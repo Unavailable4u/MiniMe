@@ -1,0 +1,874 @@
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index fde63d3..aac69d0 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -120,6 +120,7 @@ import EditorTabs from "./EditorTabs";
+ import Explorer from "./Explorer";
+ import HistoryPanel from "./HistoryPanel";
+ import PreviewColumn from "./PreviewColumn";
++import PreviewPane from "./PreviewPane"; // NEW — W6.1: mounted below, replacing the placeholder PreviewColumn shows when its children prop is omitted
+ import ProjectSearchPanel from "./ProjectSearchPanel";
+ import QuickOpen from "./QuickOpen";
+ import ReviewPanel from "./ReviewPanel";
+@@ -1764,9 +1765,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+           </div>
+         </div>
+ 
+-        {/* Preview column (W2.3b): empty frame for now — W6.1 mounts the
+-            PreviewPane inside it. Not on the single-pane (phone) layout,
+-            which has no room for a third pane. */}
++        {/* Preview column (W2.3b frame, W6.1 content). Not on the
++            single-pane (phone) layout, which has no room for a third
++            pane. */}
+         {showPreview && (
+           <>
+             <div
+@@ -1777,7 +1778,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+               className="w-1 shrink-0 cursor-col-resize bg-[var(--neutral-800)] hover:bg-[var(--accent)] transition-colors"
+             />
+             <div className="shrink min-w-0" style={{ width: previewSplitter.size }}>
+-              <PreviewColumn onClose={closePreview} />
++              <PreviewColumn onClose={closePreview}>
++                <PreviewPane provider={provider} filesMeta={filesMeta} />
++              </PreviewColumn>
+             </div>
+           </>
+         )}
+diff --git a/frontend/app/components/workbench/PreviewPane.jsx b/frontend/app/components/workbench/PreviewPane.jsx
+new file mode 100644
+index 0000000..576cb81
+--- /dev/null
++++ b/frontend/app/components/workbench/PreviewPane.jsx
+@@ -0,0 +1,311 @@
++"use client";
++// frontend/app/components/workbench/PreviewPane.jsx — W6.1 (Build
++// Workbench plan). Mounted as PreviewColumn's `children` (see that
++// file's own header) — this is the thing W2.3b left an empty frame
++// for.
++//
++// Four states, one per detectKind() outcome:
++//   - "static": the actual meat of this patch — live-bundles
++//     index.html + its local <link>/<script> files into one srcDoc,
++//     re-reading on every relevant change (debounced ~400ms).
++//   - "react": detected, but W6.6 is the patch that actually renders
++//     it (Sandpack) — a clear "coming later" message, not a dead end.
++//   - "python": runs through the SAME usePyodideWorker.js worker
++//     ArtifactRenderer.jsx's PythonArtifact already uses — click Run,
++//     see stdout/stderr, no live-typing auto-run (Pyodide's own
++//     startup is ~10-20s, so re-running on every keystroke would be
++//     actively hostile, unlike the static path's cheap string-inlining).
++//   - null (detectKind found nothing recognizable, or filesMeta hasn't
++//     loaded yet): the plan's own "No preview available for this
++//     project type — here's why" text.
++//
++// Data flow for "static", the part worth being explicit about: this
++// reads editor buffers (unsaved edits included, per the plan's own
++// "Done when") through useEditorStore() directly — it's mounted well
++// inside EditorStoreProvider already, same as CodeEditor and the
++// explorer. `provider`/`filesMeta` are NOT in the store (editorStore.js's
++// own header lists its exact shape and neither is on it) — they're
++// WorkbenchBody's plumbing, passed down as plain props the same way
++// CodeEditor and Explorer already receive them.
++//
++// Security posture: sandbox="allow-scripts" only, matching
++// ArtifactRenderer.jsx/WireframePreview.jsx exactly (see either file's
++// own header for why "allow-scripts" alone, no allow-same-origin, no
++// allow-forms, is enough and deliberately not more).
++import { useEffect, useMemo, useRef, useState } from "react";
++import { AlertTriangle, ExternalLink, Loader2, Monitor, Play, RefreshCw, Smartphone, Tablet } from "lucide-react";
++import { useEditorStore } from "../../lib/workbench/editorStore";
++import { detectKind } from "../../lib/preview/detectKind";
++import { bundleStatic } from "../../lib/preview/bundleStatic";
++import { usePyodideWorker } from "../../hooks/usePyodideWorker";
++
++const DEBOUNCE_MS = 400;
++
++const DEVICE_PRESETS = [
++  { id: "mobile", label: "Mobile", Icon: Smartphone, width: 390 },
++  { id: "tablet", label: "Tablet", Icon: Tablet, width: 768 },
++  { id: "desktop", label: "Desktop", Icon: Monitor, width: null }, // null = fill available width
++];
++
++/**
++ * Builds the one function bundleStatic() needs — "give me this path's
++ * current content" — preferring a live, possibly-unsaved editor buffer
++ * over a server read, and caching server reads by the version
++ * filesMeta already carries so an unopened, unchanged file (style.css,
++ * say, never opened as a tab) isn't re-fetched on every single
++ * debounced rebuild while you type in a DIFFERENT open file.
++ *
++ * A file with no `version` in its metadata (LocalFileProvider's
++ * listing doesn't carry one the way the cloud provider's does) always
++ * bypasses the cache and re-fetches — correctness over a cache hit for
++ * a case this patch's own "Done when" doesn't specifically target.
++ */
++function makeResolver({ provider, filesMeta, buffers, cacheRef }) {
++  return async function resolveFile(path) {
++    const buf = buffers[path];
++    if (buf) return buf.edited; // open tab -- always the freshest possible content, unsaved edits included
++
++    const version = filesMeta?.[path]?.version;
++    const cached = cacheRef.current.get(path);
++    if (cached && version != null && cached.version === version) return cached.content;
++
++    const file = await provider.read(path);
++    cacheRef.current.set(path, { version, content: file.content || "" });
++    return file.content || "";
++  };
++}
++
++function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings }) {
++  return (
++    <div className="shrink-0 flex items-center justify-between gap-2 px-2 h-8 border-b border-[var(--neutral-800)]">
++      <div className="flex items-center gap-0.5">
++        {DEVICE_PRESETS.map(({ id, label, Icon }) => (
++          <button
++            key={id}
++            type="button"
++            onClick={() => onDeviceChange(id)}
++            title={label}
++            aria-label={label}
++            aria-pressed={device === id}
++            className={`touch-target p-1 rounded ${
++              device === id ? "bg-white/10 text-[var(--neutral-100)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
++            }`}
++          >
++            <Icon size={13} />
++          </button>
++        ))}
++      </div>
++      <div className="flex items-center gap-1">
++        {warnings?.length > 0 && (
++          <span title={warnings.join("\n")} className="flex items-center gap-1 text-[10px] text-amber-400">
++            <AlertTriangle size={11} />
++            {warnings.length}
++          </span>
++        )}
++        <button type="button" onClick={onReload} title="Reload" aria-label="Reload" className="touch-target p-1 rounded text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
++          <RefreshCw size={13} />
++        </button>
++        <button
++          type="button"
++          onClick={onOpenNewTab}
++          title="Open in new tab"
++          aria-label="Open in new tab"
++          className="touch-target p-1 rounded text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
++        >
++          <ExternalLink size={13} />
++        </button>
++      </div>
++    </div>
++  );
++}
++
++function StaticPreview({ provider, filesMeta, entryPath }) {
++  const { state } = useEditorStore();
++  const [device, setDevice] = useState("desktop");
++  const [built, setBuilt] = useState(null); // {html, warnings} | null while building the first time
++  const [buildError, setBuildError] = useState(null);
++  const [reloadNonce, setReloadNonce] = useState(0);
++  const cacheRef = useRef(new Map());
++  const debounceRef = useRef(null);
++
++  const buffers = state.buffers;
++
++  useEffect(() => {
++    if (debounceRef.current) clearTimeout(debounceRef.current);
++    debounceRef.current = setTimeout(async () => {
++      try {
++        const entryContent = buffers[entryPath]?.edited ?? (await provider.read(entryPath)).content ?? "";
++        const resolveFile = makeResolver({ provider, filesMeta, buffers, cacheRef });
++        const result = await bundleStatic({ entryPath, entryContent, resolveFile });
++        setBuilt(result);
++        setBuildError(null);
++      } catch (err) {
++        setBuildError(err?.message || String(err));
++      }
++    }, DEBOUNCE_MS);
++    return () => clearTimeout(debounceRef.current);
++    // buffers is state.buffers's own object reference, which the
++    // reducer replaces on every dispatch (including every keystroke's
++    // EDIT_BUFFER) -- that's the "updates as you type" behavior the
++    // plan's own "Done when" asks for, debounced by the timer above
++    // rather than by narrowing this dependency list.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [entryPath, filesMeta, buffers, reloadNonce]);
++
++  function handleReload() {
++    cacheRef.current.clear(); // a manual reload means "don't trust anything cached", unlike the live-typing path which is fine reusing unopened files' last-known content
++    setReloadNonce((n) => n + 1);
++  }
++
++  function handleOpenNewTab() {
++    if (!built?.html) return;
++    // Same blob-URL-then-delayed-revoke pattern as
++    // ArtifactRenderer.jsx's openInNewTab() -- see that file for why
++    // 10s (long enough for the new tab to finish loading the blob
++    // before it's revoked, short enough not to leak the object URL
++    // forever).
++    const blob = new Blob([built.html], { type: "text/html" });
++    const url = URL.createObjectURL(blob);
++    window.open(url, "_blank", "noopener,noreferrer");
++    setTimeout(() => URL.revokeObjectURL(url), 10000);
++  }
++
++  const preset = DEVICE_PRESETS.find((d) => d.id === device);
++
++  return (
++    <div className="h-full min-h-0 flex flex-col">
++      <DeviceToolbar device={device} onDeviceChange={setDevice} onReload={handleReload} onOpenNewTab={handleOpenNewTab} warnings={built?.warnings} />
++      <div className="flex-1 min-h-0 overflow-auto bg-[var(--neutral-900)] flex justify-center">
++        {buildError ? (
++          <div className="p-4 text-xs text-red-400 whitespace-pre-wrap">{buildError}</div>
++        ) : !built ? (
++          <div className="flex items-center gap-1.5 text-xs text-[var(--neutral-500)] m-auto">
++            <Loader2 size={12} className="animate-spin" /> Building preview…
++          </div>
++        ) : (
++          <iframe
++            key={reloadNonce}
++            title="Preview"
++            srcDoc={built.html}
++            sandbox="allow-scripts"
++            className="bg-white h-full shrink-0"
++            style={{ width: preset.width ?? "100%", border: "none" }}
++          />
++        )}
++      </div>
++    </div>
++  );
++}
++
++function PythonPreview({ filesMeta }) {
++  const { run } = usePyodideWorker();
++  const [status, setStatus] = useState("idle"); // idle | loading | ok | error
++  const [result, setResult] = useState(null);
++  const [error, setError] = useState(null);
++
++  // Same entry-picking spirit as detectKind's index.html shortest-path
++  // rule: prefer a file literally named main.py (the obvious
++  // convention), else the shallowest .py file in the project.
++  const entryPath = useMemo(() => {
++    const pyFiles = Object.keys(filesMeta || {}).filter((p) => /\.py$/i.test(p));
++    const main = pyFiles.find((p) => p === "main.py" || p.endsWith("/main.py"));
++    if (main) return main;
++    return pyFiles.sort((a, b) => a.split("/").length - b.split("/").length)[0] || null;
++  }, [filesMeta]);
++
++  const { state } = useEditorStore();
++
++  async function handleRun() {
++    setStatus("loading");
++    setError(null);
++    try {
++      // Live buffer if the entry file happens to be open (unsaved edits
++      // included, same as the static path), otherwise this component
++      // doesn't have a provider prop to fall back to a server read with
++      // -- PreviewPane passes `provider` down to StaticPreview only
++      // today; wiring it here too is a reasonable, small follow-up once
++      // "run the file as currently saved" turns out not to be enough.
++      const code = state.buffers[entryPath]?.edited;
++      const payload = await run(code ?? "");
++      setResult(payload);
++      setStatus("ok");
++    } catch (err) {
++      setError(err?.message || String(err));
++      setStatus("error");
++    }
++  }
++
++  if (!entryPath) {
++    return <EmptyState title="No Python entry file found" detail="Expected at least one .py file in this project." />;
++  }
++
++  const hasOutput = result && (result.stdout || result.stderr || (result.images && result.images.length > 0));
++
++  return (
++    <div className="h-full min-h-0 overflow-auto p-3 space-y-2">
++      <p className="text-[11px] text-[var(--neutral-500)]">
++        Running <span className="text-[var(--neutral-300)] font-mono">{entryPath}</span>
++      </p>
++      <button
++        type="button"
++        onClick={handleRun}
++        disabled={status === "loading"}
++        className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded border border-[var(--neutral-800)] text-[var(--neutral-300)] hover:bg-white/5 disabled:opacity-60 transition-colors"
++      >
++        {status === "loading" ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
++        {status === "loading" ? "Starting Python — first run loads the runtime (~10–20s)…" : status === "ok" ? "Run again" : "Run"}
++      </button>
++      {status === "error" && <div className="text-[11px] text-red-400 whitespace-pre-wrap">{error}</div>}
++      {status === "ok" && hasOutput && (
++        <div className="space-y-2">
++          {result.stdout && (
++            <pre className="overflow-x-auto p-2 text-xs text-[var(--neutral-300)] bg-black/60 rounded max-h-[240px] whitespace-pre-wrap">{result.stdout}</pre>
++          )}
++          {result.stderr && (
++            <pre className="overflow-x-auto p-2 text-xs text-amber-400 bg-black/60 rounded max-h-[160px] whitespace-pre-wrap">{result.stderr}</pre>
++          )}
++        </div>
++      )}
++      {status === "ok" && !hasOutput && <p className="text-[11px] text-[var(--neutral-600)]">Ran with no output.</p>}
++    </div>
++  );
++}
++
++function EmptyState({ title, detail }) {
++  return (
++    <div className="h-full flex flex-col items-center justify-center gap-1 px-6 text-center">
++      <p className="text-xs text-[var(--neutral-400)]">{title}</p>
++      {detail && <p className="max-w-xs text-[11px] leading-relaxed text-[var(--neutral-600)]">{detail}</p>}
++    </div>
++  );
++}
++
++/**
++ * @param {object} props
++ * @param {object} props.provider - the active FileProvider (WorkbenchBody's own, same one CodeEditor/Explorer use)
++ * @param {{[path: string]: object}|null} props.filesMeta - FileProvider.list()'s result; null until the first load lands
++ */
++function PreviewPane({ provider, filesMeta }) {
++  const detected = useMemo(() => detectKind(filesMeta || {}), [filesMeta]);
++
++  if (!filesMeta) {
++    return (
++      <div className="h-full flex items-center gap-1.5 text-xs text-[var(--neutral-500)] justify-center">
++        <Loader2 size={12} className="animate-spin" /> Loading…
++      </div>
++    );
++  }
++
++  if (detected.kind === "static") {
++    return <StaticPreview provider={provider} filesMeta={filesMeta} entryPath={detected.entryPath} />;
++  }
++  if (detected.kind === "python") {
++    return <PythonPreview filesMeta={filesMeta} />;
++  }
++  if (detected.kind === "react") {
++    return <EmptyState title="React preview is coming soon" detail="This looks like a React project (package.json + a .jsx/.tsx file) — a live React preview isn't wired up yet." />;
++  }
++  return <EmptyState title="No preview available for this project type" detail={detected.reason} />;
++}
++
++export default PreviewPane;
+diff --git a/frontend/app/lib/preview/__tests__/bundleStatic.test.mjs b/frontend/app/lib/preview/__tests__/bundleStatic.test.mjs
+new file mode 100644
+index 0000000..e0b5d9f
+--- /dev/null
++++ b/frontend/app/lib/preview/__tests__/bundleStatic.test.mjs
+@@ -0,0 +1,174 @@
++// W6.1 (Build Workbench plan) — tests for lib/preview/bundleStatic.js.
++//
++// Loads the REAL bundleStatic.js through loadSource.mjs (see
++// instrument.test.mjs's header for why this pattern, and why it's a
++// reuse of lib/workbench/'s loadSource.mjs rather than a copy).
++// bundleStatic.js's one static import is `parse5` — same real,
++// actually-installed package instrument.test.mjs already proved this
++// pattern works with (npm install parse5 in frontend/ first).
++//
++// Run: node frontend/app/lib/preview/__tests__/bundleStatic.test.mjs
++import * as parse5 from "parse5";
++import { loadSource } from "../../workbench/__tests__/loadSource.mjs";
++
++const { bundleStatic } = loadSource("../../preview/bundleStatic.js", { imports: { parse5 } });
++
++let failures = 0;
++function assert(cond, msg) {
++  if (!cond) {
++    failures++;
++    console.error(`FAIL: ${msg}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// A stub resolveFile backed by a plain {path: content} map, standing in
++// for PreviewPane.jsx's real one (buffers-then-provider.read()) — this
++// file has no business knowing about either.
++function fileMap(map) {
++  return async (path) => (Object.prototype.hasOwnProperty.call(map, path) ? map[path] : null);
++}
++
++// --- basic inline: stylesheet + script, both at the project root -----
++
++{
++  const entryContent = [
++    "<!DOCTYPE html>",
++    "<html><head><title>x</title>",
++    '<link rel="stylesheet" href="style.css">',
++    "</head><body>",
++    "<p>hi</p>",
++    '<script src="app.js"></script>',
++    "</body></html>",
++  ].join("\n");
++
++  const result = await bundleStatic({
++    entryPath: "index.html",
++    entryContent,
++    resolveFile: fileMap({ "style.css": "body { color: red; }", "app.js": 'console.log("hi");' }),
++  });
++
++  assertEqual(result.warnings, [], "clean bundle: no warnings when every referenced file resolves");
++  assert(result.html.includes("<style>body { color: red; }</style>"), "the <link> becomes an inline <style> with the CSS content");
++  assert(result.html.includes('<script>console.log("hi");</script>'), "the <script src> loses its src and gains the JS as inline content");
++  assert(!result.html.includes("style.css"), "the original href is gone once inlined");
++  assert(!result.html.includes("app.js"), "the original src is gone once inlined");
++}
++
++// --- external URLs pass through untouched -----------------------------
++
++{
++  const entryContent = [
++    '<link rel="stylesheet" href="https://cdn.example.com/x.css">',
++    '<script src="//other-cdn.example.com/lib.js"></script>',
++    '<script src="app.js"></script>',
++  ].join("\n");
++
++  const resolveFile = async (path) => {
++    throw new Error(`resolveFile should never be called for an external URL, got: ${path}`);
++  };
++
++  // app.js still needs to resolve, so use a map for it and let the
++  // external ones prove they're never even asked about.
++  const result = await bundleStatic({
++    entryPath: "index.html",
++    entryContent,
++    resolveFile: async (path) => (path === "app.js" ? "1;" : resolveFile(path)),
++  });
++
++  assert(result.html.includes('href="https://cdn.example.com/x.css"'), "an absolute https href is left as a real <link>, not inlined");
++  assert(result.html.includes('src="//other-cdn.example.com/lib.js"'), "a protocol-relative script src is left alone too");
++  assert(result.html.includes("<script>1;</script>"), "the one genuinely local script still gets inlined");
++}
++
++// --- missing local file: warning, tag left alone -----------------------
++
++{
++  const entryContent = '<link rel="stylesheet" href="missing.css"><p>hi</p>';
++  const result = await bundleStatic({
++    entryPath: "index.html",
++    entryContent,
++    resolveFile: fileMap({}),
++  });
++  assert(result.warnings.length === 1 && result.warnings[0].includes("missing.css"), "a local file that isn't found gets exactly one warning naming it");
++  assert(result.html.includes('href="missing.css"'), "the tag is left as-is (not silently dropped) when the file can't be found");
++}
++
++// --- relative path resolution: subdirectory entry, ../, ./ -------------
++
++{
++  const entryContent = [
++    '<link rel="stylesheet" href="./style.css">',
++    '<script src="../shared/util.js"></script>',
++  ].join("\n");
++
++  const seen = [];
++  const result = await bundleStatic({
++    entryPath: "public/index.html",
++    entryContent,
++    resolveFile: async (path) => {
++      seen.push(path);
++      return path === "public/style.css" ? "a{}" : path === "shared/util.js" ? "1;" : null;
++    },
++  });
++
++  assert(seen.includes("public/style.css"), "./style.css from public/index.html resolves to public/style.css");
++  assert(seen.includes("shared/util.js"), "../shared/util.js from public/index.html resolves to shared/util.js (one level up, out of public/)");
++  assert(result.warnings.length === 0, "both resolve cleanly, no warnings");
++}
++
++// --- root-absolute path treated as relative to the entry's own dir -----
++
++{
++  const entryContent = '<script src="/app.js"></script>';
++  const result = await bundleStatic({
++    entryPath: "index.html",
++    entryContent,
++    resolveFile: fileMap({ "app.js": "1;" }),
++  });
++  assert(result.html.includes("<script>1;</script>"), "a root-absolute /app.js resolves relative to the project root (index.html's own directory), same as a real static file server would serve it");
++}
++
++// --- a script tag with inline content (no src) is left completely alone
++
++{
++  const entryContent = "<script>console.log(1);</script>";
++  const result = await bundleStatic({ entryPath: "index.html", entryContent, resolveFile: fileMap({}) });
++  assert(result.html.includes("<script>console.log(1);</script>"), "an inline script with no src is untouched (nothing to inline)");
++  assertEqual(result.warnings, [], "no warning for a script that was never meant to be inlined");
++}
++
++// --- malformed entry HTML never throws ---------------------------------
++
++{
++  // parse5 essentially never throws (see the module's own comment), but
++  // the contract must hold even if it somehow did -- pass a genuinely
++  // non-string to prove the catch path returns the input untouched
++  // rather than propagating.
++  const badInput = null;
++  let result;
++  try {
++    result = await bundleStatic({ entryPath: "index.html", entryContent: badInput, resolveFile: fileMap({}) });
++  } catch (err) {
++    result = { threw: true };
++  }
++  assert(!result.threw, "bundleStatic never throws outward, even on bad input — it returns a result with a warning instead");
++}
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/preview/__tests__/detectKind.test.mjs b/frontend/app/lib/preview/__tests__/detectKind.test.mjs
+new file mode 100644
+index 0000000..779f35c
+--- /dev/null
++++ b/frontend/app/lib/preview/__tests__/detectKind.test.mjs
+@@ -0,0 +1,95 @@
++// W6.1 (Build Workbench plan) — tests for lib/preview/detectKind.js.
++//
++// Loads the REAL detectKind.js through loadSource.mjs (reused from
++// lib/workbench/'s __tests__ — see instrument.test.mjs's header for why
++// this is a reuse, not a copy). No `imports` are passed on purpose:
++// detectKind.js must stay dependency-free, and this load fails if
++// someone adds an `import` to it.
++//
++// Run: node frontend/app/lib/preview/__tests__/detectKind.test.mjs
++import { loadSource } from "../../workbench/__tests__/loadSource.mjs";
++
++const { detectKind } = loadSource("../../preview/detectKind.js", {});
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++function meta(paths) {
++  return Object.fromEntries(paths.map((p) => [p, {}]));
++}
++
++assertEqual(
++  detectKind(meta(["index.html", "style.css", "app.js"])),
++  { kind: "static", entryPath: "index.html", reason: null },
++  "plain static project: root index.html wins"
++);
++
++assertEqual(
++  detectKind(meta(["package.json", "src/App.jsx", "src/main.jsx"])),
++  { kind: "react", entryPath: null, reason: null },
++  "package.json + a .jsx file anywhere -> react"
++);
++
++assertEqual(
++  detectKind(meta(["package.json", "src/App.tsx"])),
++  { kind: "react", entryPath: null, reason: null },
++  ".tsx counts the same as .jsx"
++);
++
++assertEqual(
++  detectKind(meta(["main.py", "requirements.txt"])),
++  { kind: "python", entryPath: null, reason: null },
++  "a .py file anywhere -> python"
++);
++
++// The Vite/CRA misclassification this priority order exists to avoid —
++// see detectKind.js's own header for the reasoning.
++assertEqual(
++  detectKind(meta(["package.json", "index.html", "src/main.jsx"])).kind,
++  "react",
++  "a React project's own index.html doesn't get misread as a plain static site"
++);
++
++assertEqual(
++  detectKind(meta(["docs/nested/index.html", "public/index.html", "readme.md"])).entryPath,
++  "public/index.html",
++  "shortest path wins when more than one index.html exists (2 segments beats 3)"
++);
++
++assertEqual(
++  detectKind(meta(["README.md", "notes.txt"])),
++  {
++    kind: null,
++    entryPath: null,
++    reason: "No index.html, React entry, or Python file found — nothing here matches a preview provider yet.",
++  },
++  "nothing recognizable -> null kind with a reason"
++);
++
++assertEqual(
++  detectKind({}),
++  { kind: null, entryPath: null, reason: "This project has no files yet." },
++  "an empty project gets its own reason, not the generic one"
++);
++
++assertEqual(
++  detectKind(meta(["package.json", "notes.txt"])).kind,
++  null,
++  "package.json alone, with no .jsx/.tsx anywhere, is NOT enough to call it a react project"
++);
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/preview/bundleStatic.js b/frontend/app/lib/preview/bundleStatic.js
+new file mode 100644
+index 0000000..84bbfc2
+--- /dev/null
++++ b/frontend/app/lib/preview/bundleStatic.js
+@@ -0,0 +1,154 @@
++// frontend/app/lib/preview/bundleStatic.js — W6.1 (Build Workbench plan).
++//
++// Turns an entry HTML file plus "however you get me the content of a
++// path" into one self-contained HTML string an iframe's `srcDoc` can
++// render directly — no bundler, no module resolution, just inlining
++// exactly what the plan scopes: `<link href>` (stylesheets) and
++// `<script src>` (scripts) that point at files IN THIS PROJECT.
++//
++// Deliberately NOT recursive/transitive: a `<link>`/`<script>` found
++// INSIDE an inlined file (there usually isn't one — CSS doesn't have
++// script tags, and a plain <script> file wouldn't either) is not
++// walked into, and neither is a CSS `@import`. This is "index.html +
++// style.css + app.js", not a bundler — see detectKind.js's header for
++// why a real bundled project (Vite/CRA's module-graph HTML) is routed
++// to the react provider (W6.6) instead of here in the first place.
++//
++// Same parse5 tree-mutate-then-serialize approach W6.3's
++// instrumentHtml() already uses, for the same reason: parse5's real
++// HTML5 parsing gets void elements/implied tags/quoting right for
++// free, where hand-splicing the raw text would have to reimplement
++// chunks of the HTML5 spec to do the same. See that file for the
++// caveat that comes with it (not a byte-for-byte round-trip of the
++// original source, which is fine here — an iframe about to render the
++// output doesn't care about the developer's original formatting).
++//
++// No React/provider/fetch imports here on purpose: `resolveFile` is
++// the one seam to the outside world, passed in by the caller
++// (PreviewPane.jsx, which knows how to pull live-buffer vs.
++// provider.read() content) — this file stays plain async functions
++// operating on strings, testable with plain node exactly like
++// instrument.test.mjs tests instrument.js, using a stub resolveFile
++// instead of a real FileProvider.
++
++import * as parse5 from "parse5";
++
++const EXTERNAL_RE = /^([a-z]+:)?\/\//i; // http:, https:, //cdn... (protocol-relative), or any other-scheme URL
++const DATA_URI_RE = /^data:/i;
++
++function isExternal(url) {
++  return EXTERNAL_RE.test(url) || DATA_URI_RE.test(url) || url.startsWith("#");
++}
++
++// Resolves an href/src found in `entryPath` against the project's own
++// path space (NOT a real URL/filesystem resolver -- workspace paths are
++// plain "a/b/c" strings with "/" separators, so this only needs to
++// handle "./", "../", a bare relative segment, and a root-absolute "/"
++// treated as relative to entryPath's own directory, which is what a
++// simple static file server would do when index.html itself IS the
++// site root).
++function resolveRelative(entryPath, url) {
++  const clean = url.split("#")[0].split("?")[0]; // strip a fragment/query before resolving
++  if (!clean) return null;
++
++  const entryDir = entryPath.includes("/") ? entryPath.slice(0, entryPath.lastIndexOf("/")) : "";
++  const base = clean.startsWith("/") ? clean.slice(1) : entryDir ? `${entryDir}/${clean}` : clean;
++
++  const parts = [];
++  for (const seg of base.split("/")) {
++    if (seg === "." || seg === "") continue;
++    if (seg === "..") parts.pop();
++    else parts.push(seg);
++  }
++  return parts.join("/");
++}
++
++/**
++ * @param {object} args
++ * @param {string} args.entryPath - the workspace path of the HTML file to bundle (detectKind's `entryPath`)
++ * @param {string} args.entryContent - that file's current content (buffer-preferred, unsaved edits included — the caller's job, not this function's)
++ * @param {(resolvedPath: string) => Promise<string|null|undefined>} args.resolveFile
++ *   called once per local (non-external) href/src this function finds,
++ *   with the path already resolved relative to entryPath. Return the
++ *   file's content, or null/undefined if there's nothing at that path —
++ *   this function never throws on a missing file, it just leaves that
++ *   one tag un-inlined and adds a warning.
++ * @returns {Promise<{html: string, warnings: string[]}>}
++ */
++export async function bundleStatic({ entryPath, entryContent, resolveFile }) {
++  const warnings = [];
++  let document;
++  try {
++    document = parse5.parse(entryContent, { sourceCodeLocationInfo: false });
++  } catch (err) {
++    // parse5 essentially never throws (see instrument.js's own note on
++    // this) but the contract here is the same "never break the
++    // preview" one instrument.js follows: fall back to the untouched
++    // source rather than propagate.
++    return { html: entryContent, warnings: [`Couldn't parse ${entryPath}: ${err.message}`] };
++  }
++
++  // Collected as {node, kind} pairs during the walk, then resolved and
++  // applied afterward -- keeps the tree-walk itself synchronous and
++  // simple, with all the `await resolveFile(...)` calls (which may
++  // genuinely hit the network, via provider.read()) grouped together
++  // and run concurrently rather than serialized one-at-a-time down the
++  // tree.
++  const candidates = [];
++  function walk(node) {
++    if (node.tagName === "link") {
++      const rel = (node.attrs || []).find((a) => a.name === "rel")?.value;
++      const href = (node.attrs || []).find((a) => a.name === "href")?.value;
++      if (rel === "stylesheet" && href && !isExternal(href)) candidates.push({ node, kind: "style", url: href });
++    } else if (node.tagName === "script") {
++      const src = (node.attrs || []).find((a) => a.name === "src")?.value;
++      if (src && !isExternal(src)) candidates.push({ node, kind: "script", url: src });
++    }
++    for (const child of node.childNodes || []) walk(child);
++  }
++  walk(document);
++
++  await Promise.all(
++    candidates.map(async (c) => {
++      const resolvedPath = resolveRelative(entryPath, c.url);
++      if (!resolvedPath) return;
++      let content;
++      try {
++        content = await resolveFile(resolvedPath);
++      } catch (err) {
++        warnings.push(`Couldn't load ${resolvedPath}: ${err.message}`);
++        return;
++      }
++      if (content == null) {
++        warnings.push(`${resolvedPath} (linked from ${c.url}) wasn't found in this project`);
++        return;
++      }
++
++      if (c.kind === "style") {
++        // Swap the <link> node itself for a <style> node in its exact
++        // place in the parent's children — a straight attrs mutation
++        // won't do here, "stylesheet link" and "style block" are
++        // different tag names.
++        const styleNode = {
++          nodeName: "style",
++          tagName: "style",
++          attrs: [],
++          namespaceURI: c.node.namespaceURI,
++          childNodes: [{ nodeName: "#text", value: content, parentNode: null }],
++          parentNode: c.node.parentNode,
++        };
++        styleNode.childNodes[0].parentNode = styleNode;
++        const siblings = c.node.parentNode.childNodes;
++        siblings[siblings.indexOf(c.node)] = styleNode;
++      } else {
++        // A script element just loses its `src` and gains the file's
++        // text as a child text node -- still a <script>, so no swap
++        // needed the way the stylesheet case does.
++        c.node.attrs = c.node.attrs.filter((a) => a.name !== "src");
++        c.node.childNodes = [{ nodeName: "#text", value: content, parentNode: c.node }];
++      }
++    })
++  );
++
++  return { html: parse5.serialize(document), warnings };
++}
+diff --git a/frontend/app/lib/preview/detectKind.js b/frontend/app/lib/preview/detectKind.js
+new file mode 100644
+index 0000000..8f7ee92
+--- /dev/null
++++ b/frontend/app/lib/preview/detectKind.js
+@@ -0,0 +1,74 @@
++// frontend/app/lib/preview/detectKind.js — W6.1 (Build Workbench plan).
++//
++// Picks which preview provider a project's file list calls for. No
++// imports on purpose — same reasoning as lib/workbench/fileTree.js and
++// tabUtils.js: plain data in, plain data out, so __tests__/detectKind.test.mjs
++// can load THIS file's real source and run it with plain `node`.
++//
++// Scope decision, since the plan's own wording ("package.json/JSX entry
++// with react") leaves room to read package.json's actual dependency
++// list: this stays METADATA-ONLY (file paths + the small metadata
++// FileProvider.list() already returns — no content, no network, no
++// provider passed in), so detectKind can run synchronously and be
++// tested the same dependency-free way as every other lib/workbench/
++// file. "React project" here means "has a package.json AND at least one
++// .jsx/.tsx file" — a structural signal, not "package.json declares
++// react as a dependency". That's good enough to route to a provider;
++// W6.6 (the actual React/Sandpack provider) is the piece that needs
++// package.json's real content, and it already has to read files anyway
++// to hand Sandpack a dependency list.
++//
++// Priority matters here, and isn't just the order the plan happens to
++// list the three kinds in: a Vite or Create-React-App project commonly
++// ships its own root or public/index.html (usually just a `<div
++// id="root">` and a `<script type="module" src="/src/main.jsx">`) —
++// the static provider has no bundler and can't resolve that script's
++// module imports, so serving that file as-is would render a blank
++// page. Checking react/python (the more specific, structural signals)
++// BEFORE falling back to the general "any index.html" static check
++// avoids that misclassification.
++
++const JSX_RE = /\.[jt]sx$/i;
++const PY_RE = /\.py$/i;
++const INDEX_HTML_RE = /(^|\/)index\.html?$/i;
++
++/**
++ * @param {{[path: string]: object}} filesMeta - FileProvider.list()'s result (flat, no directory rows)
++ * @returns {{kind: "react"|"python"|"static"|null, entryPath: string|null, reason: string|null}}
++ *   `entryPath` is only set for "static" (the file to bundle from);
++ *   react/python don't have one yet — W6.6 and the python provider each
++ *   pick their own entry point when they render. `reason` is a short,
++ *   human-readable explanation for the `null` case, meant to be shown
++ *   directly (the plan's own "No preview available for this project
++ *   type — here's why").
++ */
++export function detectKind(filesMeta) {
++  const paths = Object.keys(filesMeta || {});
++
++  if (paths.includes("package.json") && paths.some((p) => JSX_RE.test(p))) {
++    return { kind: "react", entryPath: null, reason: null };
++  }
++
++  if (paths.some((p) => PY_RE.test(p))) {
++    return { kind: "python", entryPath: null, reason: null };
++  }
++
++  // Shortest path wins so a root index.html is preferred over a nested
++  // one (e.g. a docs/index.html buried in an otherwise non-static
++  // project) — depth is measured in path segments, not string length,
++  // so "public/index.html" (2 segments) beats "a/b/index.html" (3)
++  // regardless of which literal string happens to be longer.
++  const htmlCandidates = paths.filter((p) => INDEX_HTML_RE.test(p));
++  if (htmlCandidates.length) {
++    htmlCandidates.sort((a, b) => a.split("/").length - b.split("/").length);
++    return { kind: "static", entryPath: htmlCandidates[0], reason: null };
++  }
++
++  return {
++    kind: null,
++    entryPath: null,
++    reason: paths.length
++      ? "No index.html, React entry, or Python file found — nothing here matches a preview provider yet."
++      : "This project has no files yet.",
++  };
++}

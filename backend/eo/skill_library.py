@@ -393,6 +393,13 @@ CONDENSE_SYSTEM_PROMPT = (
 MAX_RESEARCH_SOURCES = 5
 
 
+# Audit fix 2026-09-25: see ensure_skill_for_task()'s docstring update above.
+# 400 chars is comfortably under Tavily's query-length limit and keeps the
+# condense call's prompt small regardless of how long the caller's own
+# task_text happened to be.
+MAX_SKILL_TASK_DESCRIPTOR_CHARS = 400
+
+
 def ensure_skill_for_task(task_text: str) -> str:
     """The self-improvement loop half of task 14 (patch 1's docstring
     calls this out as "a later patch" -- this is that patch): on a
@@ -421,8 +428,19 @@ def ensure_skill_for_task(task_text: str) -> str:
     if not task_text:
         return ""
 
+    # Audit fix 2026-09-25 (root causes #2/#3): callers pass the FULL grounded
+    # prompt here (agents/generic_worker.py -- thousands of characters for a
+    # notebook chat, "You have access to the following excerpts..."). That
+    # text was then used, unbounded, as a web search query (blew past
+    # Tavily's query-length limit -> 400 on every key, see
+    # utils/web_search.py) AND as the bulk of the condense LLM call's prompt
+    # (5,000-7,000+ tokens -- see the Groq tpm-ceiling audit). This is a
+    # "what kind of task is this" lookup, not a request to research the
+    # task's full content, so it only ever needs a short descriptor.
+    task_descriptor = task_text[:MAX_SKILL_TASK_DESCRIPTOR_CHARS]
+
     try:
-        if get_relevant_skill(task_text):
+        if get_relevant_skill(task_descriptor):
             # Already covered -- e.g. a concurrent call (or a human)
             # wrote a matching skill since the caller's own miss.
             return ""
@@ -435,7 +453,7 @@ def ensure_skill_for_task(task_text: str) -> str:
         # modules; deferring to inside the function, which only runs
         # well after both modules have finished loading, sidesteps that
         # risk entirely rather than requiring proof it's actually safe.
-        report = web_researcher.run(task_text=f"how to {task_text}", scope="general")
+        report = web_researcher.run(task_text=f"how to {task_descriptor}", scope="general")
         sources = (report or {}).get("sources") or []
         if not sources:
             return ""
@@ -447,7 +465,7 @@ def ensure_skill_for_task(task_text: str) -> str:
 
         raw = generate_text(
             system_prompt=CONDENSE_SYSTEM_PROMPT,
-            user_content=f"Task type: {task_text}\n\nResearch sources:\n{source_text}",
+            user_content=f"Task type: {task_descriptor}\n\nResearch sources:\n{source_text}",
             chain=CONDENSE_CHAIN,
             agent_name="skill_library:condense",
         )
@@ -455,11 +473,11 @@ def ensure_skill_for_task(task_text: str) -> str:
         if not doc_text or doc_text.upper() == "NONE":
             return ""
 
-        title = f"How to: {task_text}"[:120]
+        title = f"How to: {task_descriptor}"[:120]
         return write_skill(title, doc_text, source="self_improvement_loop")
     except Exception as exc:
         print(f"  [Skill Library] self-improvement loop skipped for "
-              f"{task_text[:60]!r} ({exc.__class__.__name__}: {exc}).")
+              f"{task_descriptor[:60]!r} ({exc.__class__.__name__}: {exc}).")
         return ""
 
 

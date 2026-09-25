@@ -1,0 +1,1546 @@
+diff --git a/backend/agents/generic_worker.py b/backend/agents/generic_worker.py
+index 0f1f6ae..cdfb18d 100644
+--- a/backend/agents/generic_worker.py
++++ b/backend/agents/generic_worker.py
+@@ -115,6 +115,7 @@ eo.capabilities imports eo.registry, and eo.registry's own
+ bottom-of-file import of this module would find generic_worker.run
+ undefined if capabilities were imported before run() exists.
+ """
++import concurrent.futures
+ import os
+ import sys
+ 
+@@ -151,6 +152,14 @@ from memory.bus import write as bus_write
+ from utils.llm_client import DROPPABLE_CONTEXT_MARKER  # NEW — Patch 1b
+ from utils.llm_client import generate_text
+ 
++# Audit fix 2026-09-25: dedicated small pool for the skill self-improvement
++# side-channel (see its call site below) -- kept off the main agent-task pool
++# entirely so a slow/stuck research pass can never compete with real role
++# dispatch for the same worker budget.
++_SKILL_SELF_IMPROVE_POOL = concurrent.futures.ThreadPoolExecutor(
++    max_workers=4, thread_name_prefix="skill-self-improve")
++_SKILL_SELF_IMPROVE_TIMEOUT_SECONDS = float(os.getenv("SKILL_SELF_IMPROVE_TIMEOUT_SECONDS", "10"))
++
+ # NOTE: `from eo.panel import _best_match` is deliberately NOT imported at
+ # module level here. eo.registry.py now imports this module (generic_worker)
+ # at load time so resolve("generic_worker") works, and eo.panel.py imports
+@@ -960,7 +969,11 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
+     # that apply regardless of task type) and framed as guidance, not
+     # as part of the role's own identity/brief, so a role with a skill
+     # match doesn't read as if the skill doc IS its brief.
+-    skill_doc = "" if role in STRICT_FORMAT_ROLES else get_relevant_skill(task_text)
++    # Audit fix 2026-09-25: get_relevant_skill() is a retrieval lookup, not a
++    # generation call -- still bounded to a short descriptor so an unusually
++    # long grounded prompt can't turn this into a large embedding request.
++    _skill_lookup_text = task_text[:2000]
++    skill_doc = "" if role in STRICT_FORMAT_ROLES else get_relevant_skill(_skill_lookup_text)
+     if not skill_doc and role not in STRICT_FORMAT_ROLES:
+         # NEW — Part 6 §E2, task 14, self-improvement loop: "" here is
+         # the load-bearing "no skill matches this task type yet" signal
+@@ -975,8 +988,22 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
+         # this one, so nothing about it may ever cost this request more
+         # than the one research pass + one cheap condensation call it
+         # takes on the way to a plain "no skill found" outcome.
++        # Audit fix 2026-09-25 (root cause #2): this side-channel is supposed
++        # to cost "one research pass + one cheap condensation call", but a
++        # blocked/rate-limited web search or LLM step used to make it eat
++        # 60-140s of THIS role's wall-clock time before the role's own real
++        # work even started. Run it on a background thread with a short join
++        # timeout instead: on success within the budget the skill is written
++        # immediately, same as before; past the budget the role moves on
++        # right away and the thread finishes (or doesn't) in the background,
++        # completely decoupled from this request.
+         try:
+-            ensure_skill_for_task(task_text)
++            _skill_future = _SKILL_SELF_IMPROVE_POOL.submit(ensure_skill_for_task, _skill_lookup_text)
++            _skill_future.result(timeout=_SKILL_SELF_IMPROVE_TIMEOUT_SECONDS)
++        except concurrent.futures.TimeoutError:
++            print(f"  [Generic Worker] skill self-improvement loop still running after "
++                  f"{_SKILL_SELF_IMPROVE_TIMEOUT_SECONDS:.0f}s -- continuing without "
++                  f"waiting further (it will finish, or not, in the background).")
+         except Exception as exc:
+             print(f"  [Generic Worker] skill self-improvement loop skipped "
+                   f"({exc.__class__.__name__}: {exc}).")
+diff --git a/backend/api/routes/tasks.py b/backend/api/routes/tasks.py
+index 505f942..88a4b37 100644
+--- a/backend/api/routes/tasks.py
++++ b/backend/api/routes/tasks.py
+@@ -63,7 +63,19 @@ from memory.bus import (  # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; wr
+     read_many as bus_read_many,
+ )
+ from utils.error_sanitizer import user_facing_message  # NEW — Patch I.1
+-from utils.llm_client import ShutdownRequested  # NEW — Patch 6.3
++from utils.llm_client import RunStopped, ShutdownRequested  # NEW — Patch 6.3; RunStopped — audit fix 2026-09-25
++
++
++def _shutdown_message(exc: ShutdownRequested) -> str:
++    """Audit fix 2026-09-25: RunStopped (deadline hit, cancelled, hard token
++    ceiling) is a ShutdownRequested subclass so it's caught by the exact same
++    `except ShutdownRequested` blocks below, but deserves a message that says
++    what actually happened instead of the generic shutdown copy."""
++    if isinstance(exc, RunStopped):
++        if exc.reason == "token_hard_limit":
++            return str(exc)
++        return f"This task was stopped: {exc}."
++    return "Server is shutting down; task was cancelled mid-run."
+ 
+ router = APIRouter()
+ 
+@@ -170,10 +182,10 @@ async def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):
+             scope=req.scope,   # NEW — task 13d/13e
+             tab=req.tab,   # NEW — Patch B6
+         )
+-    except ShutdownRequested:   # NEW — Patch 6.3
++    except ShutdownRequested as exc:   # NEW — Patch 6.3; RunStopped handling — audit fix 2026-09-25
+         return TaskResponse(
+             decision={}, tier=-1, status="cancelled", result=None,
+-            message="Server is shutting down; task was cancelled mid-run.",
++            message=_shutdown_message(exc),
+         )
+     except Exception as exc:
+         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
+@@ -276,10 +288,10 @@ async def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(req
+             project_unique_name=req.project_unique_name,
+             owner_id=owner_id,   # FIXED
+         )
+-    except ShutdownRequested:   # NEW — Patch 6.3
++    except ShutdownRequested as exc:   # NEW — Patch 6.3; RunStopped handling — audit fix 2026-09-25
+         return TaskResponse(
+             decision={}, tier=-1, status="cancelled", result=None,
+-            message="Server is shutting down; task was cancelled mid-run.",
++            message=_shutdown_message(exc),
+         )
+     except Exception as exc:
+         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
+@@ -316,10 +328,10 @@ async def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(req
+             owner_id=owner_id,
+             tab=req.tab,   # NEW — Patch B6
+         )
+-    except ShutdownRequested:   # NEW — Patch 6.3
++    except ShutdownRequested as exc:   # NEW — Patch 6.3; RunStopped handling — audit fix 2026-09-25
+         return TaskResponse(
+             decision=req.decision or {}, tier=-1, status="cancelled", result=None,
+-            message="Server is shutting down; task was cancelled mid-run.",
++            message=_shutdown_message(exc),
+         )
+     except Exception as exc:
+         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
+diff --git a/backend/api/task_runner.py b/backend/api/task_runner.py
+index 9c52d30..14202f5 100644
+--- a/backend/api/task_runner.py
++++ b/backend/api/task_runner.py
+@@ -448,14 +448,21 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
+             task_text, decision,
+             outcome=f"tier-3 hires-driven pipeline paused at '{looped['paused_at_role']}' for approval",
+         )
++        # Audit fix 2026-09-25: surface WHY it paused (approval / manual_pause /
++        # budget_exceeded / token_budget_exceeded / repeated_failures) and any
++        # human-readable detail eo/executor.py attached, instead of always
++        # showing the generic "needs approval" copy even for a token-budget or
++        # failure-breaker stop.
++        pause_reason = looped.get("reason") or "approval"
++        default_message = (f"Run paused for approval at role '{looped['paused_at_role']}'. "
++                            "POST to /api/resume with this session_id to continue.")
+         return {
+             "decision": decision,
+             "tier": 3,
+             "session_id": session_id,
+             "status": "paused",
+-            "result": {"paused_at_role": looped["paused_at_role"]},
+-            "message": (f"Run paused for approval at role '{looped['paused_at_role']}'. "
+-                        "POST to /api/resume with this session_id to continue."),
++            "result": {"paused_at_role": looped["paused_at_role"], "pause_reason": pause_reason},
++            "message": looped.get("message") or default_message,
+         }
+ 
+     results = looped["results"]
+@@ -826,6 +833,20 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
+             language = None
+         if not code:
+             continue
++        # Audit fix 2026-09-25: agents/code_writers.py writes a
++        # "# CODE WRITER FAILED: ..." placeholder into code_source when a
++        # module's generation genuinely failed (empty model response, an
++        # exhausted fallback chain, output-validation failure). That string
++        # is truthy and non-empty, so it passed the `if not code` check above
++        # and got written into the workspace as if it were real code --
++        # possibly overwriting a good file from an earlier successful run
++        # with the same path. A failed module writes nothing here; the
++        # failure is still visible in the chat response/logs.
++        if isinstance(code, str) and code.lstrip().startswith("# CODE WRITER FAILED"):
++            print(f"  [task_runner] code write-back: skipping module "
++                  f"{module_name!r} -> {rel_path!r}, it failed generation "
++                  f"(not overwriting any existing file at that path).")
++            continue
+         pending_files.append({"file_path": rel_path, "content": code, "language": language})
+ 
+     if not pending_files:
+@@ -970,6 +991,14 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
+     identical behavior to today: no budget enforcement at all.
+     """
+     session_id = session_id or str(uuid.uuid4())
++    # Audit fix 2026-09-25: reset eo/run_guard.py's per-run rails (cancel flag,
++    # failure-breaker counters, token-spend counter) for this fresh dispatch.
++    # run_task() is only ever called for a NEW task_text; continuing a paused
++    # run goes through resume_graph() directly (see api/routes/tasks.py's
++    # /api/resume), never back through here, so this can't clobber state a
++    # resume still needs.
++    from eo import run_guard
++    run_guard.begin_run(session_id)
+     import time as _time  # TEMP TIMING
+ 
+     # NEW — perf audit follow-up (#6): eo/sga.py's attempt() docstring
+@@ -1715,6 +1744,25 @@ def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, sessio
+     # per this function's own docstring), so process_upload() below
+     # keeps its exact original behavior too.
+     if skip_generative_cache and attachment is None:
++        # Audit fix 2026-09-25: beast mode must skip SGA entirely, the same way
++        # eo/loop_v4.py's CLI `--mode beast` path already does (its own comment
++        # says "CHANGE: --mode beast also skips cache/SGA" -- this HTTP path
++        # never actually implemented that half of it: sga_attempt() below ran
++        # unconditionally regardless of `mode`, so a beast-mode task could be
++        # answered by SGA's single quick-and-dirty reply instead of ever
++        # reaching the fully-staffed pipeline beast mode exists to force.
++        if mode == "beast":
++            grounding = _workspace_grounding_and_cache_check(
++                task_text, session_id, owner_id, app_slug, topic_id, tier_override, mode,
++                _get_conv_context)
++            if "cache_hit" in grounding:
++                _record_routing_fact(grounding["workspace_id"], "cache", task_text, session_id)
++                return {"resolved": False, "response": grounding["cache_hit"]}
++            return {
++                "workspace_id": grounding["workspace_id"],
++                "grounded_task_text": grounding["grounded_task_text"],
++                "grounded_node_ids": grounding["grounded_node_ids"],
++            }
+         with ThreadPoolExecutor(max_workers=2) as _fast_pool:
+             _sga_future = _fast_pool.submit(sga_attempt, task_text, session_id=session_id)
+             _grounding_future = _fast_pool.submit(
+@@ -1862,7 +1910,10 @@ def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, sessio
+ 
+     print(f"  [TIMING] cache check ({cache_class}): {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+     _t = _time.monotonic()  # TEMP TIMING
+-    sga_result = sga_attempt(sga_input, session_id=session_id)   # CHANGED — bug #4 fix, was task_text; Patch B7, may include reference
++    # Audit fix 2026-09-25: beast mode skips SGA entirely -- see the fast-path
++    # branch above for the full reasoning; this is the same fix for the serial
++    # path taken whenever precomputed_cache_sga wasn't already supplied.
++    sga_result = sga_attempt(sga_input, session_id=session_id) if mode != "beast" else {"resolved": False}
+     print(f"  [TIMING] sga_attempt: {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+     if sga_result["resolved"]:
+         # PERF FIX (perf audit follow-up): write_cache() does an
+diff --git a/backend/eo/agent_task_pool.py b/backend/eo/agent_task_pool.py
+index d2c39c3..0632357 100644
+--- a/backend/eo/agent_task_pool.py
++++ b/backend/eo/agent_task_pool.py
+@@ -49,6 +49,8 @@ import sentry_sdk
+ from memory.bus import incr as _bus_incr
+ from memory.bus import read as _bus_read
+ 
++from eo import run_guard  # NEW — audit fix 2026-09-25: cancels the orphaned worker thread on timeout
++
+ # How many agent tasks (run_task/preview_task/confirm_task/resume_graph/
+ # run_task_from_template) may execute concurrently, independent of
+ # api/server.py's APP_THREAD_POOL_SIZE. Deliberately much smaller than
+@@ -117,13 +119,16 @@ class AgentTaskTimeout(Exception):
+     """Raised by run_in_agent_pool() when a single call exceeds
+     AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS.
+ 
+-    Note: the underlying thread is NOT cancelled when this fires --
+-    Python's ThreadPoolExecutor has no hard-cancel primitive for a
+-    thread that's already running, so the task keeps executing in the
+-    background even after this raises. This bounds how long the HTTP
+-    caller waits, not how much work actually happens; true hard
+-    cancellation would need cooperative checks inside the task itself,
+-    out of scope for this fix."""
++    Audit fix 2026-09-25: run_in_agent_pool() now sets eo/run_guard.py's
++    cancel flag for this session the moment the deadline fires (see the
++    `except asyncio.TimeoutError` branch below) -- Python's
++    ThreadPoolExecutor still has no hard-cancel primitive for a thread
++    that's already running, but every cooperative checkpoint that matters
++    (utils/llm_client.py before each provider call, eo/executor.py before
++    each role) polls run_guard.raise_if_stopped() and unwinds within a
++    few hundred milliseconds of the NEXT checkpoint, instead of the task
++    running to completion 30+ minutes later as an orphan competing for
++    the same rate-limited keys as any retry the caller makes."""
+ 
+     def __init__(self, timeout_seconds: float):
+         self.timeout_seconds = timeout_seconds
+@@ -233,9 +238,19 @@ async def run_in_agent_pool(fn, /, *args, **kwargs):
+                 level="warning",
+             )
+ 
++    # Audit fix 2026-09-25: session_id is a kwarg on every real call site
++    # (run_task/preview_task/resume_graph/run_task_from_template all take
++    # one) -- grabbed here, before the try/except, purely so the timeout
++    # branch below can tell the orphaned thread to stop.
++    _session_id_for_cancel = kwargs.get("session_id")
++
+     try:
+         result = await asyncio.wait_for(future, timeout=AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS)
+     except asyncio.TimeoutError as exc:
++        if _session_id_for_cancel:
++            run_guard.request_cancel(
++                _session_id_for_cancel,
++                reason=f"HTTP request exceeded its {AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS:.0f}s deadline")
+         raise AgentTaskTimeout(AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS) from exc
+     finally:
+         waited = time.monotonic() - t0
+diff --git a/backend/eo/executor.py b/backend/eo/executor.py
+index bdd6497..14b0a66 100644
+--- a/backend/eo/executor.py
++++ b/backend/eo/executor.py
+@@ -72,6 +72,7 @@ from utils.error_sanitizer import user_facing_message
+ from utils.llm_client import ChainExhaustedError
+ from utils.llm_client import PauseRequestedMidRetry  # NEW — Patch 7
+ from utils.llm_client import ShutdownRequested, shutdown_requested  # NEW — Bug fix 2026-08-27 (Ctrl+C audit)
++from eo import run_guard  # NEW — audit fix 2026-09-25: cancel flag / failure breaker / token budget
+ 
+ # D1 audit fix -- these print()s were the only signal a Langfuse span
+ # failed to open/close; grep-able marker (TRACE_EXPORT_FAILED) added so
+@@ -864,6 +865,11 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
+         if shutdown_requested():
+             raise ShutdownRequested(
+                 f"shutdown requested before dispatching role {role_names[idx]!r}")
++        # Audit fix 2026-09-25: an orphaned run (HTTP deadline hit / user
++        # cancelled) or one past its HARD token ceiling must not dispatch
++        # another role. Raises RunStopped (a ShutdownRequested) -> tasks.py
++        # returns a clean "cancelled" response.
++        run_guard.raise_if_stopped(session_id)
+         # Migration Part 2 §2.6: a group (role_names[idx] is a list, not
+         # a str) is handled entirely separately from the single-role
+         # dispatch below — see _run_concurrent_group()'s own docstring
+@@ -1330,7 +1336,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
+                     "app_slug": get_current_app_slug(),
+                 }
+                 write(f"paused_execution:{session_id}", snapshot)
+-                return {"status": "paused", "paused_at_role": role}
++                return {"status": "paused", "paused_at_role": role, "reason": "manual_pause"}
+             except ChainExhaustedError as exc:
+                 # Phase 6b (fixes Bug 5): every provider in THIS role's
+                 # fallback chain was genuinely tried and failed — degrade
+@@ -1362,6 +1368,14 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
+             # would otherwise silently overwrite itself across multiple
+             # generic_worker hires in the same plan.
+             results[role] = result
++            # Audit fix 2026-09-25: failure circuit breaker. A run whose roles
++            # keep failing (rate limits, dead keys, oversized prompts...) used
++            # to grind through the ENTIRE graph, then the macro-loop re-ran it.
++            # N consecutive / M total failures now trips the breaker and the
++            # pause block below stops the run and asks the user.
++            _breaker_reason = (
++                run_guard.record_role_outcome(session_id, ok=not role_failed, role=role)
++                if session_id else None)
+             # CHANGED — perf audit follow-up: duration_ms was already
+             # computed on the line above (and already sent to the event
+             # bus/Langfuse a few lines down via `payload`), it just never
+@@ -1375,16 +1389,17 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
+                 except Exception as trace_exc:
+                     print(f"  [executor] Langfuse role span failed to update "
+                           f"output for role={role!r} (non-fatal): {trace_exc}")
+-        if not role_failed:
+-            image = _extract_image(result)
+-            # Text budget shrinks when an image rides along in the same
+-            # event, so the two together still fit Pusher's ~10KB cap
+-            # (image is capped separately at MAX_IMAGE_DATA_URI_CHARS above).
+-            summary_limit = 9000 - len(image) if image else 9000
+-            payload = {"summary": _summarize(result, role=role, limit=summary_limit), "duration_ms": duration_ms}
+-            if image:
+-                payload["image"] = image
+-            emit_event("agent_done", session_id=session_id, agent=current_name, path=path, payload=payload)
++        if not role_failed or _breaker_reason:
++            if not role_failed:
++                image = _extract_image(result)
++                # Text budget shrinks when an image rides along in the same
++                # event, so the two together still fit Pusher's ~10KB cap
++                # (image is capped separately at MAX_IMAGE_DATA_URI_CHARS above).
++                summary_limit = 9000 - len(image) if image else 9000
++                payload = {"summary": _summarize(result, role=role, limit=summary_limit), "duration_ms": duration_ms}
++                if image:
++                    payload["image"] = image
++                emit_event("agent_done", session_id=session_id, agent=current_name, path=path, payload=payload)
+ 
+             # Human-in-the-loop pause point. See this function's own
+             # docstring above for exactly what state has and hasn't advanced
+@@ -1417,11 +1432,19 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
+             # its numbers are real if a future caller wants them), it
+             # just never reaches the point of pausing on it.
+             budget_exceeded = False
++            token_exceeded = False
+             if session_id:
+-                budget_increment(session_id)
+-                budget_exceeded = tab == "chat" and budget_over_threshold(session_id)
+-
+-            if role in approval_roles or pause_requested or budget_exceeded:
++                if not role_failed:
++                    budget_increment(session_id)
++                    budget_exceeded = tab == "chat" and budget_over_threshold(session_id)
++                # Audit fix 2026-09-25: TOKEN budget. Like an agent hitting its
++                # tool-call limit and asking permission to continue -- but
++                # measured in real tokens spent (llm_client._log_usage feeds
++                # run_guard), and enforced on every tab, not just chat.
++                token_exceeded = run_guard.over_token_budget(session_id)
++
++            if ((not role_failed and role in approval_roles) or pause_requested
++                    or budget_exceeded or token_exceeded or _breaker_reason):
+                 from memory.bus import get_current_app_slug, write
+                 if pause_requested:
+                     # Consume the flag now, same lifecycle as the snapshot
+@@ -1440,15 +1463,27 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
+                 # hit pause" vs a budget pause, without needing a third event
+                 # type (Patch B6 adds "budget_exceeded" alongside the
+                 # existing two values).
+-                if role in approval_roles:
++                pause_message = None
++                if not role_failed and role in approval_roles:
+                     reason = "approval"
+                 elif pause_requested:
+                     reason = "manual_pause"
++                elif token_exceeded:
++                    reason = "token_budget_exceeded"   # NEW — audit fix 2026-09-25
++                    pause_message = (
++                        f"Token budget reached ({run_guard.tokens_used(session_id):,} of "
++                        f"{run_guard.token_budget(session_id):,} tokens used). "
++                        f"Approve to continue with another {run_guard.DEFAULT_TOKEN_BUDGET:,} tokens.")
++                elif _breaker_reason:
++                    reason = "repeated_failures"   # NEW — audit fix 2026-09-25
++                    pause_message = (
++                        f"Stopped after repeated failures: {_breaker_reason}. "
++                        f"Fix the cause (or approve to retry with a fresh failure allowance).")
+                 else:
+                     reason = "budget_exceeded"   # NEW — Patch B6
+                 emit_event(
+                     "awaiting_approval", session_id=session_id, agent=current_name, path=path,
+-                    payload={"role": role, "reason": reason},
++                    payload={"role": role, "reason": reason, "message": pause_message},
+                 )
+                 snapshot = {
+                     "agent_names": agent_names,
+@@ -1505,7 +1540,8 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
+                     "app_slug": get_current_app_slug(),
+                 }
+                 write(f"paused_execution:{session_id}", snapshot)
+-                return {"status": "paused", "paused_at_role": role}
++                return {"status": "paused", "paused_at_role": role,
++                        "reason": reason, "message": pause_message}
+ 
+         next_idx, reason = next_step(
+             result if isinstance(result, dict) else {}, role_names, idx, session_id=session_id,
+@@ -1647,6 +1683,17 @@ def resume_graph(session_id: str, decision: dict) -> dict:
+     role = role_names[idx]
+     action = decision.get("action")
+ 
++    # Audit fix 2026-09-25: an "approve" on a run that paused for
++    # token_budget_exceeded or repeated_failures (not just a plain
++    # approval_roles/manual_pause) needs eo/run_guard.py's counters reset --
++    # otherwise resume_graph() would immediately re-pause on the very next
++    # role boundary with the same stale counters. Harmless no-op for a plain
++    # approval pause (grant_more() only raises the token ceiling when the
++    # token budget feature is enabled, and always clears any cancel flag,
++    # which is correct on every resume).
++    if action == "approve" and session_id:
++        run_guard.grant_more(session_id)
++
+     if action == "revise_section":
+         # Patch C4 (MiniMe-Patch-Series-C-Plan.md, Track 2). Deliberately
+         # handled BEFORE the edit/approve/reject_redo chain below and
+diff --git a/backend/eo/injection_guard.py b/backend/eo/injection_guard.py
+index 573f0a0..7e3c8ac 100644
+--- a/backend/eo/injection_guard.py
++++ b/backend/eo/injection_guard.py
+@@ -51,43 +51,72 @@ _FLAG_ONLY = True  # keep True until you've watched false-positive rate
+                     # on real traffic; a hard block (drop the snippet
+                     # entirely) is a one-line change once you trust it.
+ 
++# Audit fix 2026-09-25: this guard has never actually screened anything.
++# llama-prompt-guard-2-86m's context window is 512 TOKENS, and every call
++# sent up to 4,000 CHARACTERS (roughly 1,000+ tokens for real prose) --
++# Groq rejected every single one with "Please reduce the length of the
++# messages or completion" (a 400, silently swallowed by the fail-open
++# except-clause below as "not flagged"). ~3.2 chars/token is a safe average
++# for English text; 1,200 chars keeps each chunk comfortably under the
++# 512-token ceiling with room for the label token(s) in the completion.
++_CHUNK_CHARS = 1200
++# A scraped page can be very long; screening the whole thing chunk-by-chunk
++# would turn one "cheap pre-filter" call into dozens. This is a defense-in-
++# depth pass, not a full-document audit, so cap how much of any one snippet
++# gets classified -- injected instructions are typically front-loaded (they
++# need to be seen before the real content) or, if not, are still on a page
++# whose EARLY chunks already carry plenty of signal.
++_MAX_CHUNKS_PER_SNIPPET = 4
++
++
++def _classify_chunk(chunk: str) -> str:
++    """One raw classification call for a single, already-sized chunk. Returns
++    the upper-cased label text ("BENIGN"/"INJECTION"/"JAILBREAK"/""), letting
++    any exception propagate to the caller's own try/except."""
++    raw = generate_text(
++        system_prompt="",   # prompt-guard models classify the user_content directly
++        user_content=chunk,
++        chain=PROMPT_GUARD_CHAIN,
++        agent_name="injection_guard",
++        allow_continuation=False,
++    )
++    return (raw or "").strip().upper()
++
+ 
+ def score_snippet(text: str, source_label: str = "") -> dict:
+-    """Returns {"flagged": bool, "reason": str}. `flagged=True` means
+-    the classifier scored this text as containing injected
+-    instructions rather than ordinary content -- caller decides what to
+-    do with that (see filter_snippets() below for the common case: log
+-    + optionally drop before it reaches the real generation call).
++    """Returns {"flagged": bool, "reason": str}. `flagged=True` means the
++    classifier scored ANY chunk of this text as containing injected
++    instructions rather than ordinary content -- caller decides what to do
++    with that (see filter_snippets() below for the common case: log +
++    optionally drop before it reaches the real generation call).
++
++    Audit fix 2026-09-25: text longer than the classifier's real 512-token
++    window is split into _CHUNK_CHARS-sized chunks (see that constant's own
++    comment) instead of being truncated to a length that still overflowed
++    the model on anything but very short snippets. The whole snippet is
++    flagged if any chunk is.
+ 
+-    Deliberately NOT raising on any failure -- a classifier hiccup
+-    degrades to "not flagged," same fail-open contract as
++    Deliberately NOT raising on any failure -- a classifier hiccup degrades
++    to "not flagged" for that chunk, same fail-open contract as
+     eo/output_guard.py's validate_*() functions.
+     """
+     if not text or not text.strip():
+         return {"flagged": False, "reason": ""}
+     if not os.environ.get("GROQ_API_KEY"):
+         return {"flagged": False, "reason": "GROQ_API_KEY not set — guard skipped"}
+-    try:
+-        # prompt-guard models are single-label classifiers, not chat
+-        # models -- Groq serves them behind the same /chat/completions
+-        # shape generate_text() already calls, with the classification
+-        # label as the completion text (documented behavior: response
+-        # text is one of "BENIGN" / "INJECTION" / "JAILBREAK").
+-        raw = generate_text(
+-            system_prompt="",   # prompt-guard models classify the user_content directly
+-            user_content=text[:4000],   # classifier's own context window is small; snippets this module sees are short anyway
+-            chain=PROMPT_GUARD_CHAIN,
+-            agent_name="injection_guard",
+-            allow_continuation=False,
+-        )
+-        label = (raw or "").strip().upper()
+-        flagged = label in ("INJECTION", "JAILBREAK")
+-        return {"flagged": flagged, "reason": label if flagged else ""}
+-    except Exception as exc:
+-        print(f"  [injection_guard] classification failed for "
+-              f"{source_label or 'snippet'} (fail-open, treating as "
+-              f"not flagged): {exc.__class__.__name__}: {exc}")
+-        return {"flagged": False, "reason": f"guard error: {exc}"}
++    chunks = [text[i:i + _CHUNK_CHARS] for i in range(0, len(text), _CHUNK_CHARS)]
++    chunks = chunks[:_MAX_CHUNKS_PER_SNIPPET] or [text[:_CHUNK_CHARS]]
++    for chunk in chunks:
++        try:
++            label = _classify_chunk(chunk)
++        except Exception as exc:
++            print(f"  [injection_guard] classification failed for "
++                  f"{source_label or 'snippet'} (fail-open for this chunk, "
++                  f"treating as not flagged): {exc.__class__.__name__}: {exc}")
++            continue
++        if label in ("INJECTION", "JAILBREAK"):
++            return {"flagged": True, "reason": label}
++    return {"flagged": False, "reason": ""}
+ 
+ 
+ def filter_snippets(snippets: list, text_key: str = "snippet",
+diff --git a/backend/eo/loop_controller.py b/backend/eo/loop_controller.py
+index a7fc440..46b3c79 100644
+--- a/backend/eo/loop_controller.py
++++ b/backend/eo/loop_controller.py
+@@ -87,20 +87,62 @@ def _run_gatekeeper(results: dict, task_text: str, session_id: str, loop_num: in
+                    payload={"decision": hard["action"], "loop": loop_num, "cause": hard["cause"]})
+         return hard
+ 
++    # Audit fix 2026-09-25 -- fail SAFE, not fail open. Every rule below answers
++    # "should we spend another full pass?" with NO when there is reason to think
++    # the answer is wasted spend. Previously any gatekeeper reply that wasn't a
++    # literal STOP (empty, chatty, unparseable, or the gatekeeper LLM itself
++    # unavailable) became CONTINUE with no role list -> the ENTIRE graph re-ran,
++    # which is what turned one failed pass into a 27-minute second pass.
++    from eo import run_guard
++    if run_guard.over_token_budget(session_id):
++        decision = {"action": "STOP", "cause": "token_budget_reached"}
++        emit_event("macro_loop_decision", session_id=session_id,
++                   payload={"decision": "STOP", "loop": loop_num, "cause": decision["cause"]})
++        return decision
++    failed_roles = [k for k, v in results.items()
++                    if isinstance(v, dict) and v.get("status") == "failed"]
++    if results and len(failed_roles) * 2 >= len(results):
++        decision = {"action": "STOP", "cause": "majority_of_roles_failed",
++                    "failed_roles": failed_roles}
++        print(f"  [loop_controller] {len(failed_roles)}/{len(results)} roles failed this "
++              f"pass ({failed_roles}) -- another pass would repeat the same failures, stopping.")
++        emit_event("macro_loop_decision", session_id=session_id,
++                   payload={"decision": "STOP", "loop": loop_num, "cause": decision["cause"]})
++        return decision
++
+     summary = "\n\n".join(f"[{k}]: {str(v)[:400]}" for k, v in results.items())
+     from agents.generic_worker import run as generic_run
+-    raw = generic_run(role="gatekeeper", task_text=(
++    from utils.llm_client import ShutdownRequested
++    try:
++      raw = generic_run(role="gatekeeper", task_text=(
+         f"Original task: {task_text}\n\nWork completed so far:\n{summary}\n\n"
+         "Decide: is this genuinely finished, or would another pass improve it "
+         "meaningfully? Reply with exactly one line: "
+         "'STOP' or 'CONTINUE: <comma-separated roles to redo>'."
+-    ), session_id=session_id)
+-    text = raw["text"].strip()
+-    if text.upper().startswith("STOP"):
++      ), session_id=session_id)
++      text = (raw.get("text") or "").strip()
++    except ShutdownRequested:
++        raise   # cancelled / hard token stop -- never swallow
++    except Exception as exc:
++        print(f"  [loop_controller] gatekeeper unavailable ({exc.__class__.__name__}: {exc}) "
++              f"-- stopping instead of blindly re-running the whole graph.")
++        decision = {"action": "STOP", "cause": "gatekeeper_unavailable"}
++        emit_event("macro_loop_decision", session_id=session_id,
++                   payload={"decision": "STOP", "loop": loop_num, "cause": decision["cause"]})
++        return decision
++    if not text.upper().startswith("CONTINUE"):
++        # STOP, empty, or anything unparseable: stop. Only an explicit CONTINUE
++        # earns another pass.
+         decision = {"action": "STOP"}
+     else:
+-        redo = [r.strip() for r in text.split(":", 1)[1].split(",")] if ":" in text else []
+-        decision = {"action": "CONTINUE", "redo_roles": redo}
++        wanted = [r.strip() for r in text.split(":", 1)[1].split(",")] if ":" in text else []
++        # Only roles that actually exist in this run may be redone; never fall
++        # back to "the whole graph".
++        redo = [r for r in wanted if r and r in results]
++        if not redo:
++            redo = failed_roles
++        decision = ({"action": "CONTINUE", "redo_roles": redo} if redo
++                    else {"action": "STOP", "cause": "continue_without_specific_roles"})
+ 
+     # This is the single emission point for the LLM-judgment path —
+     # _hard_safety_check already emits macro_loop_decision on its own
+@@ -237,6 +279,8 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
+                 "status": "paused",
+                 "paused_at_role": pass_results["paused_at_role"],
+                 "session_id": session_id,
++                "reason": pass_results.get("reason"),     # NEW — audit fix 2026-09-25
++                "message": pass_results.get("message"),   # NEW — audit fix 2026-09-25
+             }
+ 
+         results.update(pass_results)   # merge, don't replace — a redo pass should only
+@@ -252,8 +296,10 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
+ 
+         if decision["action"] in ("STOP", "PAUSE_FOR_HUMAN"):
+             break
++        if not decision.get("redo_roles"):
++            break   # audit fix 2026-09-25: never fall back to re-running the whole graph
+         loop_num += 1
+-        current_order = decision.get("redo_roles") or execution_order
++        current_order = decision["redo_roles"]
+ 
+     # This is the one place run_with_looping() marks a task fully
+     # finished (as opposed to paused mid-pass, handled and returned
+diff --git a/backend/eo/loop_v4.py b/backend/eo/loop_v4.py
+index 51f8d7e..37bb36e 100644
+--- a/backend/eo/loop_v4.py
++++ b/backend/eo/loop_v4.py
+@@ -169,7 +169,14 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
+         draft = dict(_CLASSIFY_FAILURE_DRAFT)
+     # ... rest of function unchanged ...
+ 
+-    should_escalate = draft["confidence"] < CONFIDENCE_THRESHOLD or draft["tier"] >= 2
++    # Audit fix 2026-09-25: a tier-3 draft at HIGH confidence used to escalate
++    # to the 3-model panel too (tier >= 2 includes tier 3) -- a panel can only
++    # confirm or upgrade an already-maximal tier, so that case spent 2-3 extra
++    # LLM calls (and, if a panel member is down/rate-limited, tens of seconds
++    # of wasted wait) to buy nothing. Escalate on genuine uncertainty (low
++    # confidence, any tier) or the one tier where a second opinion can still
++    # change the outcome (tier 2, which the panel might confirm OR push to 3).
++    should_escalate = draft["confidence"] < CONFIDENCE_THRESHOLD or draft["tier"] == 2
+     if should_escalate:
+         print(f"  [EO] escalating to panel (confidence={draft['confidence']:.2f}, "
+               f"tier={draft['tier']}) ...")
+diff --git a/backend/eo/run_guard.py b/backend/eo/run_guard.py
+new file mode 100644
+index 0000000..0aabf6f
+--- /dev/null
++++ b/backend/eo/run_guard.py
+@@ -0,0 +1,261 @@
++"""
++eo/run_guard.py -- per-run safety rails for the agent pipeline.
++
++Why this exists (audit, 2026-09-25): a task that hit repeated errors kept
++running in the background long after the HTTP request had already been
++answered (or had timed out), burning rate limit on roles that could not
++succeed, and the macro-loop then re-ran the whole graph. Three independent
++rails fix that, all keyed by session_id and all cheap to check:
++
++1. CANCEL FLAG  -- request_cancel(session_id, reason). Checked at every LLM
++   chain step (utils/llm_client.py) and at every role boundary
++   (eo/executor.py). When the HTTP layer gives up on a request (deadline,
++   client stop button) it sets this flag so the orphaned worker thread
++   actually stops instead of running for another half hour.
++
++2. FAILURE BREAKER -- record_role_outcome(). N consecutive failed roles (or M
++   failed roles in total) trips the breaker. The executor then pauses the run
++   for manual approval instead of grinding through the rest of the graph.
++
++3. TOKEN BUDGET -- like an agent hitting its tool-call limit and asking the
++   user whether to keep going. Every LLM call's real token usage is added to
++   the session's counter (utils/llm_client.py::_log_usage). When the counter
++   crosses the soft budget the executor pauses at the next role boundary
++   (reason "token_budget_exceeded"); POST /api/resume {"action": "approve"}
++   grants another chunk and continues. A hard ceiling (soft x HARD_FACTOR)
++   stops even a single runaway role mid-flight.
++
++Storage: memory.bus (Upstash Redis), keys under "run_guard:" which
++memory/bus.py exempts from app_slug namespacing -- the HTTP request that sets
++a cancel flag and the worker thread that reads it run under different
++app_slug contexts and would otherwise look at different keys. Hot-path
++checks are served from a small in-process cache first so a chain step never
++pays a Redis round trip just to look at a flag.
++"""
++import os
++import threading
++import time
++
++DEFAULT_TOKEN_BUDGET = int(os.getenv("TASK_TOKEN_BUDGET", "120000"))       # 0 disables the token stop
++TOKEN_HARD_LIMIT_FACTOR = float(os.getenv("TASK_TOKEN_HARD_FACTOR", "2.0"))
++MAX_CONSECUTIVE_ROLE_FAILURES = int(os.getenv("TASK_MAX_CONSECUTIVE_FAILURES", "3"))
++MAX_TOTAL_ROLE_FAILURES = int(os.getenv("TASK_MAX_TOTAL_FAILURES", "6"))
++
++_TTL = 60 * 60 * 6          # every key self-expires; a dead run never leaves state behind forever
++_LOCAL_TTL = 1.5            # seconds a remote flag read is trusted in-process
++
++_lock = threading.Lock()
++_local_cancel: dict = {}    # session_id -> reason (authoritative in-process, set synchronously)
++_remote_seen: dict = {}     # session_id -> (checked_at, reason_or_None)
++_local_tokens: dict = {}    # session_id -> int (mirror; Redis is the source of truth across processes)
++
++
++def _k(name: str, session_id: str) -> str:
++    return f"run_guard:{name}:{session_id}"
++
++
++def _redis():
++    from memory.bus import redis  # deferred: keeps this module importable in unit tests without Upstash env
++    return redis
++
++
++def _safe(fn, default=None):
++    """Bookkeeping must never take down the real call (same contract as
++    llm_client._set_cooldown)."""
++    try:
++        return fn()
++    except Exception as exc:
++        print(f"  [run_guard] bookkeeping call failed (non-fatal): {exc}")
++        return default
++
++
++# ---------------------------------------------------------------- lifecycle
++
++def begin_run(session_id: str) -> None:
++    """Called once at the start of a FRESH task (not on resume): clears every
++    rail so a previous run's cancel flag / failures / token count can't leak
++    into this one."""
++    if not session_id:
++        return
++    with _lock:
++        _local_cancel.pop(session_id, None)
++        _remote_seen.pop(session_id, None)
++        _local_tokens.pop(session_id, None)
++
++    def _clear():
++        r = _redis()
++        for name in ("cancel", "tokens", "budget", "fail_streak", "fail_total", "tripped"):
++            r.delete(_k(name, session_id))
++    _safe(_clear)
++
++
++# ------------------------------------------------------------------- cancel
++
++def request_cancel(session_id: str, reason: str = "cancelled") -> None:
++    if not session_id:
++        return
++    with _lock:
++        _local_cancel[session_id] = reason
++    _safe(lambda: _redis().set(_k("cancel", session_id), reason, ex=_TTL))
++    print(f"  [run_guard] cancel requested for session {session_id}: {reason}")
++
++
++def cancel_reason(session_id: str):
++    """Reason string if this session was cancelled, else None."""
++    if not session_id:
++        return None
++    with _lock:
++        if session_id in _local_cancel:
++            return _local_cancel[session_id]
++        seen = _remote_seen.get(session_id)
++    now = time.monotonic()
++    if seen and now - seen[0] < _LOCAL_TTL:
++        return seen[1]
++    raw = _safe(lambda: _redis().get(_k("cancel", session_id)))
++    reason = raw.decode() if isinstance(raw, bytes) else raw
++    with _lock:
++        _remote_seen[session_id] = (now, reason)
++    return reason or None
++
++
++# ------------------------------------------------------------ token budget
++
++def token_budget(session_id: str) -> int:
++    """This session's current SOFT budget (base + any manual grants). 0 = disabled."""
++    if DEFAULT_TOKEN_BUDGET <= 0:
++        return 0
++    raw = _safe(lambda: _redis().get(_k("budget", session_id)))
++    try:
++        return int(raw) if raw is not None else DEFAULT_TOKEN_BUDGET
++    except (TypeError, ValueError):
++        return DEFAULT_TOKEN_BUDGET
++
++
++def add_tokens(session_id: str, n) -> int:
++    """Adds real usage (from the provider's own usage object) to the session
++    counter and returns the new total."""
++    if not session_id or not n:
++        return tokens_used(session_id) if session_id else 0
++    n = int(n)
++    with _lock:
++        _local_tokens[session_id] = _local_tokens.get(session_id, 0) + n
++        local_total = _local_tokens[session_id]
++
++    def _incr():
++        r = _redis()
++        total = r.incrby(_k("tokens", session_id), n)
++        r.expire(_k("tokens", session_id), _TTL)
++        return int(total)
++    remote_total = _safe(_incr)
++    return max(local_total, remote_total or 0)
++
++
++def tokens_used(session_id: str) -> int:
++    if not session_id:
++        return 0
++    raw = _safe(lambda: _redis().get(_k("tokens", session_id)))
++    try:
++        remote = int(raw) if raw is not None else 0
++    except (TypeError, ValueError):
++        remote = 0
++    with _lock:
++        return max(remote, _local_tokens.get(session_id, 0))
++
++
++def over_token_budget(session_id: str) -> bool:
++    budget = token_budget(session_id)
++    return bool(budget) and tokens_used(session_id) >= budget
++
++
++def over_hard_limit(session_id: str) -> bool:
++    budget = token_budget(session_id)
++    return bool(budget) and tokens_used(session_id) >= int(budget * TOKEN_HARD_LIMIT_FACTOR)
++
++
++# --------------------------------------------------------- failure breaker
++
++def record_role_outcome(session_id: str, ok: bool, role: str = None) -> "str | None":
++    """Feeds the breaker. Returns a human-readable reason if the breaker is
++    (now) tripped, else None. A success resets the consecutive streak."""
++    if not session_id:
++        return None
++    if ok:
++        _safe(lambda: _redis().set(_k("fail_streak", session_id), 0, ex=_TTL))
++        return breaker_reason(session_id)
++
++    def _bump():
++        r = _redis()
++        streak = int(r.incr(_k("fail_streak", session_id)))
++        total = int(r.incr(_k("fail_total", session_id)))
++        r.expire(_k("fail_streak", session_id), _TTL)
++        r.expire(_k("fail_total", session_id), _TTL)
++        return streak, total
++    res = _safe(_bump)
++    if not res:
++        return None
++    streak, total = res
++    reason = None
++    if streak >= MAX_CONSECUTIVE_ROLE_FAILURES:
++        reason = f"{streak} roles in a row failed (last: {role or 'unknown'})"
++    elif total >= MAX_TOTAL_ROLE_FAILURES:
++        reason = f"{total} roles have failed in this run (last: {role or 'unknown'})"
++    if reason:
++        _safe(lambda: _redis().set(_k("tripped", session_id), reason, ex=_TTL))
++        print(f"  [run_guard] failure breaker TRIPPED for session {session_id}: {reason}")
++    return reason
++
++
++def breaker_reason(session_id: str):
++    if not session_id:
++        return None
++    raw = _safe(lambda: _redis().get(_k("tripped", session_id)))
++    return (raw.decode() if isinstance(raw, bytes) else raw) or None
++
++
++# ------------------------------------------------------------ manual grant
++
++def grant_more(session_id: str) -> dict:
++    """The user approved a paused run: give it another token chunk, and clear
++    the breaker so the resumed run gets a fresh chance."""
++    if not session_id:
++        return {}
++    new_budget = 0
++    if DEFAULT_TOKEN_BUDGET > 0:
++        # Base the new ceiling on what was actually used, so a resume after a
++        # hard stop still gets a full chunk of headroom rather than ~0.
++        new_budget = max(token_budget(session_id), tokens_used(session_id)) + DEFAULT_TOKEN_BUDGET
++        _safe(lambda: _redis().set(_k("budget", session_id), new_budget, ex=_TTL))
++
++    def _reset():
++        r = _redis()
++        r.delete(_k("fail_streak", session_id))
++        r.delete(_k("fail_total", session_id))
++        r.delete(_k("tripped", session_id))
++    _safe(_reset)
++    with _lock:
++        _local_cancel.pop(session_id, None)
++        _remote_seen.pop(session_id, None)
++    _safe(lambda: _redis().delete(_k("cancel", session_id)))
++    return {"token_budget": new_budget, "tokens_used": tokens_used(session_id)}
++
++
++# ------------------------------------------------------------ enforcement
++
++def raise_if_stopped(session_id: str) -> None:
++    """Hard-stop check used inside the LLM call path: raises RunStopped for an
++    explicit cancel or a blown HARD token ceiling. (The SOFT budget and the
++    failure breaker are handled at role boundaries by the executor, where a
++    resumable snapshot can be written.)"""
++    if not session_id:
++        return
++    reason = cancel_reason(session_id)
++    if reason:
++        from utils.llm_client import RunStopped
++        raise RunStopped(f"run stopped: {reason}", reason=reason)
++    if over_hard_limit(session_id):
++        from utils.llm_client import RunStopped
++        used = tokens_used(session_id)
++        raise RunStopped(
++            f"token limit reached ({used:,} tokens used); send the request again to continue",
++            reason="token_hard_limit",
++        )
+diff --git a/backend/eo/skill_library.py b/backend/eo/skill_library.py
+index 67b394f..ef317ce 100644
+--- a/backend/eo/skill_library.py
++++ b/backend/eo/skill_library.py
+@@ -393,6 +393,13 @@ CONDENSE_SYSTEM_PROMPT = (
+ MAX_RESEARCH_SOURCES = 5
+ 
+ 
++# Audit fix 2026-09-25: see ensure_skill_for_task()'s docstring update above.
++# 400 chars is comfortably under Tavily's query-length limit and keeps the
++# condense call's prompt small regardless of how long the caller's own
++# task_text happened to be.
++MAX_SKILL_TASK_DESCRIPTOR_CHARS = 400
++
++
+ def ensure_skill_for_task(task_text: str) -> str:
+     """The self-improvement loop half of task 14 (patch 1's docstring
+     calls this out as "a later patch" -- this is that patch): on a
+@@ -421,8 +428,19 @@ def ensure_skill_for_task(task_text: str) -> str:
+     if not task_text:
+         return ""
+ 
++    # Audit fix 2026-09-25 (root causes #2/#3): callers pass the FULL grounded
++    # prompt here (agents/generic_worker.py -- thousands of characters for a
++    # notebook chat, "You have access to the following excerpts..."). That
++    # text was then used, unbounded, as a web search query (blew past
++    # Tavily's query-length limit -> 400 on every key, see
++    # utils/web_search.py) AND as the bulk of the condense LLM call's prompt
++    # (5,000-7,000+ tokens -- see the Groq tpm-ceiling audit). This is a
++    # "what kind of task is this" lookup, not a request to research the
++    # task's full content, so it only ever needs a short descriptor.
++    task_descriptor = task_text[:MAX_SKILL_TASK_DESCRIPTOR_CHARS]
++
+     try:
+-        if get_relevant_skill(task_text):
++        if get_relevant_skill(task_descriptor):
+             # Already covered -- e.g. a concurrent call (or a human)
+             # wrote a matching skill since the caller's own miss.
+             return ""
+@@ -435,7 +453,7 @@ def ensure_skill_for_task(task_text: str) -> str:
+         # modules; deferring to inside the function, which only runs
+         # well after both modules have finished loading, sidesteps that
+         # risk entirely rather than requiring proof it's actually safe.
+-        report = web_researcher.run(task_text=f"how to {task_text}", scope="general")
++        report = web_researcher.run(task_text=f"how to {task_descriptor}", scope="general")
+         sources = (report or {}).get("sources") or []
+         if not sources:
+             return ""
+@@ -447,7 +465,7 @@ def ensure_skill_for_task(task_text: str) -> str:
+ 
+         raw = generate_text(
+             system_prompt=CONDENSE_SYSTEM_PROMPT,
+-            user_content=f"Task type: {task_text}\n\nResearch sources:\n{source_text}",
++            user_content=f"Task type: {task_descriptor}\n\nResearch sources:\n{source_text}",
+             chain=CONDENSE_CHAIN,
+             agent_name="skill_library:condense",
+         )
+@@ -455,11 +473,11 @@ def ensure_skill_for_task(task_text: str) -> str:
+         if not doc_text or doc_text.upper() == "NONE":
+             return ""
+ 
+-        title = f"How to: {task_text}"[:120]
++        title = f"How to: {task_descriptor}"[:120]
+         return write_skill(title, doc_text, source="self_improvement_loop")
+     except Exception as exc:
+         print(f"  [Skill Library] self-improvement loop skipped for "
+-              f"{task_text[:60]!r} ({exc.__class__.__name__}: {exc}).")
++              f"{task_descriptor[:60]!r} ({exc.__class__.__name__}: {exc}).")
+         return ""
+ 
+ 
+diff --git a/backend/memory/bus.py b/backend/memory/bus.py
+index 2718848..1595340 100644
+--- a/backend/memory/bus.py
++++ b/backend/memory/bus.py
+@@ -129,6 +129,18 @@ def _namespaced(key: str) -> str:
+             # this were namespaced, the stream endpoint's read() would land in
+             # the wrong (or default/global) namespace and silently miss, same
+             # failure mode paused_execution: was exempted to avoid.
++            or key.startswith("run_guard:")   # NEW — audit fix 2026-09-25:
++            # cancel flags / failure-breaker / token-budget counters are a
++            # property of the SESSION and are written from one request
++            # context (e.g. the HTTP deadline handler, the cancel endpoint)
++            # and read from another (the worker thread that runs under the
++            # task's own app_slug). Same failure mode as paused_execution:.
++            or key.startswith("pause_requested:")   # NEW — audit fix 2026-09-25:
++            # POST /api/task/pause writes this from a fresh request (no
++            # set_app_slug() context -> falls back to the persisted GLOBAL
++            # slug) while _run_loop()/_interruptible_sleep() read it under
++            # the run's own slug. Different Redis keys -> the UI's Pause
++            # button could never reach the running task.
+             or key.startswith("scratchpad:")   # NEW — Patch B7 (§3.5):
+             # same exemption, same reasoning as paused_execution:/conversation:
+             # above -- a task's ephemeral working notes are a property of the
+diff --git a/backend/utils/llm_client.py b/backend/utils/llm_client.py
+index 16300a4..854eed7 100644
+--- a/backend/utils/llm_client.py
++++ b/backend/utils/llm_client.py
+@@ -916,7 +916,15 @@ def _set_ledger_cooldown(provider: str, key_id: str, wait_seconds: float) -> Non
+         print(f"  [llm_client] ledger cooldown write failed (non-fatal): {write_exc}")
+ 
+ 
+-def _is_cooling_down(provider: str, key_id: str) -> bool:
++def _model_cooldown_id(key_id: str, model: str) -> str:
++    """Audit fix 2026-09-25: rate-limit / zero-quota cooldowns are recorded per
++    (key, MODEL). Groq's TPM and Gemini's quota are per model, so cooling down
++    the whole key because gpt-oss-120b was busy would also (wrongly) skip
++    qwen/gpt-oss-20b on the same key. 401/403 cooldowns stay key-wide."""
++    return f"{key_id}::{model}"
++
++
++def _is_cooling_down(provider: str, key_id: str, model: str = None) -> bool:
+     """Reads cooldown_until:{provider}:{key_id} straight off the bus --
+     the same key _set_cooldown() above writes on every transient/
+     permanent-error failure, and the same key eo/panel.py's
+@@ -941,11 +949,15 @@ def _is_cooling_down(provider: str, key_id: str) -> bool:
+     """
+     try:
+         cooldown_until = bus_read(f"cooldown_until:{provider}:{key_id}", default=None)
++        model_cooldown_until = (
++            bus_read(f"cooldown_until:{provider}:{_model_cooldown_id(key_id, model)}", default=None)
++            if model else None)
+     except Exception:
+         return False
+-    if not cooldown_until:
+-        return False
+-    return cooldown_until > datetime.now(UTC).timestamp()
++    now_ts = datetime.now(UTC).timestamp()
++    if cooldown_until and cooldown_until > now_ts:
++        return True
++    return bool(model_cooldown_until and model_cooldown_until > now_ts)
+ 
+ 
+ _client_cache = {}
+@@ -1892,6 +1904,15 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
+     tokens = _extract_total_tokens(usage)
+     log_usage(provider, key_id, tokens, session_id=session_id, tier=tier, path=path,
+               agent_name=agent_name, domain=domain, model=model)
++    # Audit fix 2026-09-25: feed the per-run token budget (eo/run_guard.py) with
++    # the REAL usage the provider reported, so a run can pause and ask for
++    # permission once it has spent its allowance -- see run_guard's docstring.
++    if session_id and tokens:
++        try:
++            from eo import run_guard
++            run_guard.add_tokens(session_id, tokens)
++        except Exception as _rg_exc:
++            print(f"  [llm_client] run_guard token accounting failed (non-fatal): {_rg_exc}")
+ 
+ 
+ # --------------------------------------------------------------------------
+@@ -2140,6 +2161,10 @@ def _probe_usage_shape(provider: str, model: str, usage, agent_name: str) -> Non
+               f"probe raised {exc!r} while inspecting usage; ignoring.")
+ 
+ 
++# Audit fix 2026-09-25 -- cooldown bounds used by the no-sleep rate-limit path.
++_RATE_LIMIT_COOLDOWN_MIN_SECONDS = float(os.getenv("LLM_RATE_LIMIT_COOLDOWN_MIN", "15"))
++_RATE_LIMIT_COOLDOWN_MAX_SECONDS = float(os.getenv("LLM_RATE_LIMIT_COOLDOWN_MAX", "120"))
++_ZERO_QUOTA_COOLDOWN_SECONDS = float(os.getenv("LLM_ZERO_QUOTA_COOLDOWN", "3600"))
+ _MAX_RATE_LIMIT_RETRIES = 5  # Bug fix (2026-08-25 CI hang): cap how many
+ # times a single chain step will sleep-and-retry-in-place on
+ # RATE_LIMIT_WINDOW before giving up. Mirrors _MAX_REQUEST_TOO_LARGE_RETRIES
+@@ -2450,6 +2475,21 @@ class ShutdownRequested(Exception):
+     pass
+ 
+ 
++class RunStopped(ShutdownRequested):
++    """Audit fix 2026-09-25. Raised when eo/run_guard.py says this session must
++    stop NOW: an explicit cancel (HTTP deadline hit, user pressed stop) or the
++    hard token ceiling. Subclasses ShutdownRequested on purpose -- every
++    existing `except ShutdownRequested` (api/routes/tasks.py, the executor's
++    role-boundary check) already turns that into a clean 'cancelled' response
++    instead of a 500, and none of the per-role degrade handlers
++    (`except ChainExhaustedError/RuntimeError`) will swallow it, so a stopped
++    run really does stop instead of being recorded as one more failed role."""
++
++    def __init__(self, message: str = "run stopped", reason: str = "stopped"):
++        super().__init__(message)
++        self.reason = reason
++
++
+ class PauseRequestedMidRetry(Exception):
+     """NEW — Patch 7 (fixes audit #2). Raised from _interruptible_sleep()
+     when a session's pause_requested:{session_id} bus flag gets set
+@@ -2537,7 +2577,7 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
+             if not os.getenv(step["key_env"]):
+                 continue
+             key_id = step["key_env"]
+-        if _is_cooling_down(provider, key_id):
++        if _is_cooling_down(provider, key_id, model):
+             continue
+         step_max_tokens = _max_tokens_for(provider, model, step)
+         ok, wait = rate_ledger.can_proceed(provider, key_id, model, estimated_tokens,
+@@ -2555,7 +2595,15 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
+ # waiting at all before giving up entirely" -- and tuning one shouldn't
+ # silently retune the other. Configurable per the plan's own "e.g.
+ # 30-60s" framing; 45s splits the difference.
+-_EXHAUSTIVE_WAIT_CAP_SECONDS = 45.0
++#
++# Audit fix 2026-09-25: DEFAULT IS NOW 0 (never sleep). Waiting 45s for a
++# rate-limit window to reset just to re-run a chain that is already exhausted
++# stalled every role for a minute+ (and, stacked across roles, blew through the
++# 300s request deadline). Rate-limited keys are cooled down and skipped
++# instantly (see _handle_transient_error), so an exhausted chain now fails fast
++# and the NEXT call automatically picks the keys back up as their cooldowns
++# expire. Set LLM_CHAIN_EXHAUSTION_WAIT_SECONDS>0 to restore the old behaviour.
++_EXHAUSTIVE_WAIT_CAP_SECONDS = float(os.getenv("LLM_CHAIN_EXHAUSTION_WAIT_SECONDS", "0"))
+ 
+ 
+ def _chain_exhaustion_wait(chain: list, estimated_tokens: int, step_buckets: set,
+@@ -2606,6 +2654,8 @@ def _chain_exhaustion_wait(chain: list, estimated_tokens: int, step_buckets: set
+         real data showing mixed-bucket exhaustion is common enough to
+         be worth a more granular (per-step, not whole-chain) verdict.
+     """
++    if _EXHAUSTIVE_WAIT_CAP_SECONDS <= 0:
++        return False   # fail fast -- see _EXHAUSTIVE_WAIT_CAP_SECONDS
+     if step_buckets != {ErrorBucket.RATE_LIMIT_WINDOW}:
+         return False
+ 
+@@ -2739,72 +2789,33 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
+               f"step already has headroom, rerouting immediately "
+               f"instead of waiting.")
+         return "reroute", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
+-    # Bug fix (2026-08-27, unwinnable-step fast-fail): nothing else in the
+-    # chain has headroom either (we're past the "reroute" branch above),
+-    # so we're about to enter the retry-in-place loop below -- but if this
+-    # step's own estimated input plus its resolved max_tokens ceiling
+-    # already exceeds the model's entire tpm budget, no amount of waiting
+-    # for someone else's usage to age out of the sliding window can ever
+-    # produce headroom; every one of the retries below would just re-hit
+-    # the same structural wall. Fail immediately with a diagnostic that
+-    # says so, instead of spending the full _MAX_LEDGER_WAIT_RETRIES /
+-    # _MAX_LEDGER_WAIT_BUDGET_SECONDS budget finding that out the slow way.
++    # Structural wall: this step's own input + completion budget can never fit
++    # under the model's per-minute ceiling. Caller catches this and moves on to
++    # the next chain step (or raises ChainExhaustedError if it was the last).
+     if rate_ledger.exceeds_tpm_ceiling(provider, model, _estimated_tokens, max_tokens):
+         print(f"  [{agent_name}] {label} needs ~{_estimated_tokens} "
+               f"estimated input tokens + {max_tokens or 0} max output "
+               f"tokens, which alone exceeds this model's tpm ceiling -- "
+-              f"this call can never fit regardless of concurrent usage, "
+-              f"failing fast instead of retrying.")
++              f"skipping this step.")
+         raise _StepUnwinnableError(
+             f"{label} cannot fit under its tpm ceiling: ~{_estimated_tokens} "
+             f"estimated input tokens + {max_tokens or 0} max output tokens "
+             f"exceeds the model's per-minute token budget on its own. "
+-            f"Reduce this step's prompt size, lower its max_tokens, or "
+-            f"give it a higher-tpm fallback earlier in the chain."
++            f"Reduce this step's prompt size, or give it a higher-tpm "
++            f"fallback earlier in the chain."
+         )
+-    # Bug fix (2026-08-27, ledger-gate hang): same two-part cap the
+-    # RATE_LIMIT_WINDOW handler already has -- see _MAX_LEDGER_WAIT_RETRIES'
+-    # own comment for why this branch never had one before now.
+-    if same_step_ledger_waits >= _MAX_LEDGER_WAIT_RETRIES:
+-        print(f"  [{agent_name}] {label} still has no headroom for "
+-              f"~{_estimated_tokens} estimated tokens after "
+-              f"{_MAX_LEDGER_WAIT_RETRIES} in-place waits, and nothing "
+-              f"else in the chain has headroom -- giving up on this "
+-              f"call instead of retrying forever.")
+-        raise RuntimeError(
+-            f"{label} exhausted {_MAX_LEDGER_WAIT_RETRIES} pre-flight "
+-            f"ledger-wait retries with no reroute headroom available "
+-            f"(~{_estimated_tokens} estimated tokens each attempt)"
+-        )
+-    _remaining_budget = _MAX_LEDGER_WAIT_BUDGET_SECONDS - same_step_ledger_wait_elapsed
+-    if _remaining_budget <= 0:
+-        print(f"  [{agent_name}] {label} still has no headroom for "
+-              f"~{_estimated_tokens} estimated tokens after "
+-              f"{same_step_ledger_wait_elapsed:.1f}s spent waiting "
+-              f"(budget {_MAX_LEDGER_WAIT_BUDGET_SECONDS:.0f}s), and "
+-              f"nothing else in the chain has headroom -- giving up on "
+-              f"this call instead of continuing to wait.")
+-        raise RuntimeError(
+-            f"{label} exceeded the {_MAX_LEDGER_WAIT_BUDGET_SECONDS:.0f}s "
+-            f"pre-flight ledger-wait budget with no reroute headroom "
+-            f"available (~{_estimated_tokens} estimated tokens)"
+-        )
+-    _wait_seconds = min(_wait_seconds, _remaining_budget)
+-    same_step_ledger_waits += 1
+-    print(f"  [{agent_name}] {label} has no headroom for "
+-          f"~{_estimated_tokens} estimated tokens, and neither does "
+-          f"anything else remaining in the chain -- sleeping "
+-          f"{_wait_seconds:.1f}s (suggested {_ledger_wait:.1f}s, capped "
+-          f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
+-          f"in place (attempt {same_step_ledger_waits}/{_MAX_LEDGER_WAIT_RETRIES})...")
+-    # Bug fix (2026-08-27): was a bare time.sleep(), which neither
+-    # Ctrl+C's request_shutdown() nor the UI's per-session Pause button
+-    # could ever interrupt -- this is the actual reason Pause/Ctrl+C did
+-    # nothing while a step sat here retrying. _interruptible_sleep()
+-    # checks both every 0.5s, same as the RATE_LIMIT_WINDOW branch below.
+-    _interruptible_sleep(_wait_seconds, session_id=session_id)
+-    same_step_ledger_wait_elapsed += _wait_seconds
+-    return "waited-retry", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
++    # Audit fix 2026-09-25 (no-sleep policy): this used to sleep up to
++    # _LEDGER_WAIT_CAP_SECONDS x _MAX_LEDGER_WAIT_RETRIES (45s budget) retrying the
++    # SAME step in place whenever nothing later in the chain had headroom.
++    # Sleeping is pure wasted wall-clock: the ledger already knows this step is
++    # full, so just skip it. The reservation was never booked, nothing is
++    # cooled down, and the very next call re-checks this step on its own merits
++    # -- "we have fallbacks, we automatically get back to it". If this was the
++    # last step the caller falls off the end of the chain and fails fast.
++    print(f"  [{agent_name}] {label} has no headroom for ~{_estimated_tokens} "
++          f"estimated tokens (suggested wait {_ledger_wait:.1f}s) -- skipping "
++          f"to the next chain step instead of sleeping.")
++    return "reroute", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
+ 
+ 
+ def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_headers,
+@@ -3115,83 +3126,29 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
+                   f"-- falling back to next in chain...")
+             return ("next-step", user_content, accumulated_text, same_step_shrinks,
+                     same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
+-        # Phase 3d: an org-scoped, time-windowed quota problem is never a
+-        # size problem -- never shrink the prompt here (see llm_errors.py's
+-        # recovery table). Route back through 3b's reroute-vs-bounded-wait
+-        # decision instead of the old blind "fall through to next step"
+-        # dispatch. _retry_after_seconds(exc) (the provider's own
+-        # Retry-After / "try again in Xs" signal for THIS failure) stands
+-        # in for the pre-flight can_proceed() wait estimate 3b normally
+-        # feeds _decide_ledger_action() with.
+-        _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
+-        _action, _wait_seconds = _decide_ledger_action(
+-            chain, index, _retry_after_seconds(exc), _estimated_tokens)
+-        if _action == "reroute":
+-            print(f"  [{agent_name}] {label} hit a rate-limit window "
+-                  f"({exc.__class__.__name__}) -- a later chain step "
+-                  f"already has headroom, rerouting immediately instead "
+-                  f"of waiting.")
+-            _record_ledger_event(session_id, "reroute")
+-            return ("next-step", user_content, accumulated_text, same_step_shrinks,
+-                    same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
+-        # Bug fix (2026-08-25): bounded retry cap, same shape as
+-        # CONTEXT_LENGTH_EXCEEDED's same_step_shrinks cap above. Without
+-        # this, a chain step with no reroute headroom anywhere ahead of
+-        # it (guaranteed on a single-step chain, e.g. provider_override
+-        # pinning one provider/model) hits the "wait" branch below every
+-        # single time and loops forever -- see _MAX_RATE_LIMIT_RETRIES'
+-        # docstring for the CI incident this traces back to.
+-        if same_step_rate_limit_waits >= _MAX_RATE_LIMIT_RETRIES:
+-            print(f"  [{agent_name}] {label} still rate-limited "
+-                  f"({exc.__class__.__name__}) after "
+-                  f"{_MAX_RATE_LIMIT_RETRIES} in-place waits, and nothing "
+-                  f"else in the chain has headroom -- giving up on this "
+-                  f"call instead of retrying forever.")
+-            raise RuntimeError(
+-                f"{label} exhausted {_MAX_RATE_LIMIT_RETRIES} rate-limit "
+-                f"retries with no reroute headroom available "
+-                f"(last error: {exc.__class__.__name__}: {exc})"
+-            ) from exc
+-        # Bug fix (2026-08-25, CI hang part 2): second, independent
+-        # ceiling -- checked BEFORE this step's next sleep -- on total
+-        # wall-clock time already spent sleeping on this step, so a step
+-        # that hasn't hit _MAX_RATE_LIMIT_RETRIES yet still can't oversleep
+-        # its wait budget (see _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS' own
+-        # comment for why: 5 retries * a 20s cap each is up to 100s, long
+-        # enough to blow through external harness timeouts with zero
+-        # diagnostic info instead of this clean, immediate RuntimeError).
+-        _remaining_budget = _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS - same_step_rate_limit_elapsed
+-        if _remaining_budget <= 0:
+-            print(f"  [{agent_name}] {label} still rate-limited "
+-                  f"({exc.__class__.__name__}) after "
+-                  f"{same_step_rate_limit_elapsed:.1f}s spent waiting "
+-                  f"(budget {_MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS:.0f}s), and "
+-                  f"nothing else in the chain has headroom -- giving up on "
+-                  f"this call instead of continuing to wait.")
+-            raise RuntimeError(
+-                f"{label} exceeded the {_MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS:.0f}s "
+-                f"rate-limit wait budget with no reroute headroom available "
+-                f"(last error: {exc.__class__.__name__}: {exc})"
+-            ) from exc
+-        # Patch G2: cap this wait to whatever's left of the budget instead
+-        # of always sleeping the full ledger-suggested duration -- keeps
+-        # total elapsed sleep from ever exceeding the stated budget.
+-        _wait_seconds = min(_wait_seconds, _remaining_budget)
+-        same_step_rate_limit_waits += 1
+-        # 3e: no headroom anywhere in the remaining chain -- this is the
+-        # one RATE_LIMIT_WINDOW case that DOES cool this key down, using
+-        # the ledger's own short wait figure rather than _set_cooldown()'s
+-        # exception-derived duration.
+-        _set_ledger_cooldown(provider, key, _wait_seconds)
+-        print(f"  [{agent_name}] {label} hit a rate-limit window "
+-              f"({exc.__class__.__name__}), and neither does anything "
+-              f"else remaining in the chain -- sleeping "
+-              f"{_wait_seconds:.1f}s before retrying {label} in place "
+-              f"(attempt {same_step_rate_limit_waits}/{_MAX_RATE_LIMIT_RETRIES})...")
+-        _record_ledger_event(session_id, "wait")
+-        _interruptible_sleep(_wait_seconds, session_id=session_id)   # CHANGED — Patch 7: now pause-aware too
+-        same_step_rate_limit_elapsed += _wait_seconds
+-        return ("retry-in-place", user_content, accumulated_text, same_step_shrinks,
++        # Audit fix 2026-09-25 (no-sleep policy). A rate limit / quota error on
++        # THIS key must never make the caller wait. Cool the key down for as
++        # long as the provider says (bounded), then move to the next chain step
++        # IMMEDIATELY. Because the cooldown is recorded, every later call skips
++        # this key without even trying it, and picks it up again on its own as
++        # soon as the cooldown expires -- no sleeping, no retry-in-place.
++        from utils.llm_errors import is_zero_quota
++        if is_zero_quota(exc):
++            # Provider says our quota on this model/region is ZERO (e.g. Gemini
++            # free tier not granted): a rolling window never resets, so park
++            # the key for a long time instead of re-probing it every call.
++            _cooldown_seconds = _ZERO_QUOTA_COOLDOWN_SECONDS
++            _why = "zero quota granted"
++        else:
++            _cooldown_seconds = max(
++                _RATE_LIMIT_COOLDOWN_MIN_SECONDS,
++                min(float(_retry_after_seconds(exc)), _RATE_LIMIT_COOLDOWN_MAX_SECONDS))
++            _why = f"rate-limit window, cooling down ~{_cooldown_seconds:.0f}s"
++        _set_ledger_cooldown(provider, _model_cooldown_id(key, model), _cooldown_seconds)
++        print(f"  [{agent_name}] {label} (key {key}) hit {exc.__class__.__name__} ({_why}) -- "
++              f"moving to the next chain step immediately (no sleep).")
++        _record_ledger_event(session_id, "reroute")
++        return ("next-step", user_content, accumulated_text, same_step_shrinks,
+                 same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
+     if _bucket == ErrorBucket.MALFORMED_REQUEST:
+         # Our own payload is wrong. Never retry unchanged -- retrying
+@@ -3214,7 +3171,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
+         # block regardless of bucket.
+         _set_cooldown(provider, key, exc)
+         if not is_last:
+-            print(f"  [{agent_name}] {label} failed with a permanent "
++            print(f"  [{agent_name}] {label} (key {key}) failed with a permanent "
+                   f"auth error ({exc.__class__.__name__}) -- pulling it "
+                   f"from rotation for this chain and falling back to "
+                   f"next in chain...")
+@@ -3322,6 +3279,24 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
+             _continuation_prompt(user_content, accumulated_text)
+             if accumulated_text else user_content
+         )
++        # Audit fix 2026-09-25: (a) hard-stop check -- an orphaned worker whose
++        # HTTP request already timed out / was cancelled, or a run past its HARD
++        # token ceiling, must stop here instead of spending more quota; (b) size
++        # this call's completion budget from its ACTUAL prompt so input + output
++        # fits the model's per-minute ceiling (root cause #1: the flat
++        # `tpm - 1500` cap made every prompt over ~1,500 tokens unwinnable on
++        # 8K-TPM Groq models).
++        if session_id:
++            from eo import run_guard
++            run_guard.raise_if_stopped(session_id)
++        _est_in_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
++        _clamped_max_tokens = rate_ledger.clamp_max_output_tokens(
++            provider, model, _est_in_tokens, max_tokens)
++        if _clamped_max_tokens != max_tokens:
++            print(f"  [{agent_name}] {label} max_tokens {max_tokens} -> "
++                  f"{_clamped_max_tokens} (sized for ~{_est_in_tokens} input tokens "
++                  f"under the model's per-minute ceiling)")
++            max_tokens = _clamped_max_tokens
+         try:
+             _gate, _reservation_id, same_step_ledger_waits, same_step_ledger_wait_elapsed = _ledger_gate(
+                 chain, index, provider, key, model,
+@@ -3585,7 +3560,7 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
+                 continue
+             key_id = account_id_env  # what identifies this "account" in the usage dashboard
+             label = f"cloudflare:{model}"
+-            if _is_cooling_down(provider, key_id):
++            if _is_cooling_down(provider, key_id, model):
+                 print(f"  [{agent_name}] {label} skipped — still cooling down "
+                       f"(see cooldown_until:{provider}:{key_id}).")
+                 continue
+@@ -3637,7 +3612,7 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
+             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
+ 
+         label = f"{provider}:{model}"
+-        if _is_cooling_down(provider, key_env):
++        if _is_cooling_down(provider, key_env, model):
+             print(f"  [{agent_name}] {label} skipped — still cooling down "
+                   f"(see cooldown_until:{provider}:{key_env}).")
+             continue
+@@ -4005,7 +3980,7 @@ async def _walk_chain_once_stream(system_prompt: str, user_content: str, chain:
+             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
+ 
+         label = f"{provider}:{model}"
+-        if _is_cooling_down(provider, key_env):
++        if _is_cooling_down(provider, key_env, model):
+             print(f"  [{agent_name}] {label} skipped — still cooling down "
+                   f"(see cooldown_until:{provider}:{key_env}).")
+             continue
+diff --git a/backend/utils/llm_errors.py b/backend/utils/llm_errors.py
+index 4a96630..c7b77be 100644
+--- a/backend/utils/llm_errors.py
++++ b/backend/utils/llm_errors.py
+@@ -76,6 +76,25 @@ _CONTEXT_LENGTH_PHRASES = (
+     "context length exceeded",
+     "too many tokens for model",
+     "too many tokens for this model",
++    # Groq's wording for an input longer than the model's own context window
++    # (e.g. llama-prompt-guard-2-86m's 512 tokens). Audit 2026-09-25: this
++    # was missing, so a 400 with this text fell into MALFORMED_REQUEST and
++    # the shrink-and-retry path never ran.
++    "reduce the length of the messages",
++    "reduce the length of the prompt",
++    "prompt is too long",
++    "input is too long",
++)
++
++# A 429 whose body reports a quota LIMIT VALUE of 0 (Google: "quota_limit_value":
++# "0") means the project has been granted zero requests on that model/region --
++# a permanent entitlement problem, not a rolling window. Waiting can never fix it.
++_ZERO_QUOTA_MARKERS = (
++    "'quota_limit_value': '0'",
++    '"quota_limit_value": "0"',
++    "'quota_limit_value': 0",
++    '"quota_limit_value": 0',
++    "limit: 0,",
+ )
+ 
+ _MALFORMED_REQUEST_STATUS_CODES = {400}
+@@ -208,3 +227,15 @@ def classify_error(exc, response=None) -> ErrorBucket:
+     # and this is never mistaken for a bucket whose recovery action
+     # (trimming, long cooldown, silent-retry ban) would be wrong here.
+     return ErrorBucket.TRANSIENT_NETWORK
++
++
++def is_zero_quota(exc, response=None) -> bool:
++    """True when a rate-limit error carries an explicit zero quota (see
++    _ZERO_QUOTA_MARKERS). Callers should cool the key down for a long time and
++    move to the next chain step instead of waiting."""
++    try:
++        body = (_body_text(exc, response=response) or "") + " " + str(exc)
++    except Exception:
++        body = str(exc)
++    body = body.lower()
++    return any(marker in body for marker in _ZERO_QUOTA_MARKERS)
+diff --git a/backend/utils/rate_ledger.py b/backend/utils/rate_ledger.py
+index e9c2549..d516dce 100644
+--- a/backend/utils/rate_ledger.py
++++ b/backend/utils/rate_ledger.py
+@@ -286,6 +286,40 @@ def exceeds_tpm_ceiling(provider: str, model: str, estimated_tokens: int,
+     return prospective > tpm_limit
+ 
+ 
++# Audit fix 2026-09-25 (root cause #1). llm_client._max_tokens_for() caps a
++# model's max_tokens at (tpm - 1500), and exceeds_tpm_ceiling() then refuses any
++# call where input + max_tokens > tpm -- which silently turns that "margin" into
++# a hard 1,500-token cap on INPUT for every 8K-TPM Groq model. The completion
++# budget has to be sized per call, from the actual prompt, not per model.
++_TPM_SAFETY_MARGIN = 200          # slack for estimation error on the input side
++MIN_USEFUL_OUTPUT_TOKENS = 1024   # below this a step is not worth dispatching
++
++
++def clamp_max_output_tokens(provider: str, model: str, estimated_input_tokens: int,
++                             requested_max_tokens: "int | None") -> "int | None":
++    """Returns the completion budget this specific call should ask for so that
++    estimated input + max output fits under the model's per-minute ceiling.
++
++    - No verified tpm figure, or no requested cap -> returned unchanged
++      (same "don't fabricate a number, fail open" posture as the rest of this
++      module).
++    - Room for at least MIN_USEFUL_OUTPUT_TOKENS -> min(requested, room).
++    - Not enough room for a useful completion -> requested is returned
++      UNCHANGED so exceeds_tpm_ceiling() still flags the step as unwinnable
++      and the caller reroutes to the next chain step instead of dispatching a
++      call that can only be truncated or rejected.
++    """
++    if not requested_max_tokens:
++        return requested_max_tokens
++    tpm_limit = _tpm_limit_for(provider, model)
++    if tpm_limit is None:
++        return requested_max_tokens
++    room = tpm_limit - int(estimated_input_tokens) - _TPM_SAFETY_MARGIN
++    if room < MIN_USEFUL_OUTPUT_TOKENS:
++        return requested_max_tokens
++    return min(requested_max_tokens, room)
++
++
+ def _rpm_limit_for(provider: str, model: str):
+     """OR-1d: QUOTA_CONFIG[provider][model]["rpm"] -- "requests" gating
+     mode's per-minute ceiling. None means no verified rpm figure -> that
+diff --git a/backend/utils/web_search.py b/backend/utils/web_search.py
+index afa489c..3e6c3d0 100644
+--- a/backend/utils/web_search.py
++++ b/backend/utils/web_search.py
+@@ -45,6 +45,15 @@ EXA_URL = "https://api.exa.ai/search"
+ REQUEST_TIMEOUT = 12
+ 
+ 
++# Audit fix 2026-09-25: Tavily rejects queries beyond a few hundred
++# characters with a 400 -- every caller upstream of here (e.g.
++# eo/skill_library.py used to hand this the entire grounded prompt) got that
++# 400 identically on all 10 configured keys, one request each, before ever
++# reaching Exa. Truncating once, here, protects every current and future
++# caller regardless of what it passes in.
++MAX_QUERY_CHARS = 400
++
++
+ def search(query: str, domains: list[str] | None = None, max_results: int = 3,
+            agent_name: str = "web_search") -> list[dict]:
+     """Returns [{"url", "snippet", "title"}, ...]. Empty list only if BOTH
+@@ -58,6 +67,7 @@ def search(query: str, domains: list[str] | None = None, max_results: int = 3,
+     dashboard attributes the call to whichever agent made it, rather
+     than lumping every caller's search usage under one label.
+     """
++    query = (query or "").strip()[:MAX_QUERY_CHARS]
+     results = _search_tavily(query, domains, max_results, agent_name)
+     if results:
+         return results
+@@ -121,6 +131,17 @@ def _search_tavily(query: str, domains: list[str] | None, max_results: int,
+                       f"next configured Tavily key, if any.")
+                 _set_tavily_cooldown(key_env)
+                 continue
++            if resp.status_code == 400:
++                # Audit fix 2026-09-25: a 400 means OUR request is malformed
++                # (bad payload/query) -- identical for every key, so trying
++                # the other 9 just repeats the same failure 9 more times.
++                # Log the body once (previously only the generic requests
++                # exception text was logged, which never showed WHY) and
++                # stop, instead of looping through every configured key.
++                print(f"  [web_search] Tavily rejected the request as malformed "
++                      f"(400): {resp.text[:300]!r} -- not retrying on other keys, "
++                      f"falling back to Exa.")
++                return []
+             resp.raise_for_status()
+             log_usage("tavily", key_env, tokens=None, agent_name=agent_name)
+             return [{"url": r["url"], "snippet": r.get("content", ""), "title": r.get("title", "")}

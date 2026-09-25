@@ -120,6 +120,7 @@ import EditorTabs from "./EditorTabs";
 import Explorer from "./Explorer";
 import HistoryPanel from "./HistoryPanel";
 import PreviewColumn from "./PreviewColumn";
+import PreviewPane from "./PreviewPane"; // NEW — W6.1: mounted below, replacing the placeholder PreviewColumn shows when its children prop is omitted
 import ProjectSearchPanel from "./ProjectSearchPanel";
 import QuickOpen from "./QuickOpen";
 import ReviewPanel from "./ReviewPanel";
@@ -1764,9 +1765,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
           </div>
         </div>
 
-        {/* Preview column (W2.3b): empty frame for now — W6.1 mounts the
-            PreviewPane inside it. Not on the single-pane (phone) layout,
-            which has no room for a third pane. */}
+        {/* Preview column (W2.3b frame, W6.1 content). Not on the
+            single-pane (phone) layout, which has no room for a third
+            pane. */}
         {showPreview && (
           <>
             <div
@@ -1777,7 +1778,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
               className="w-1 shrink-0 cursor-col-resize bg-[var(--neutral-800)] hover:bg-[var(--accent)] transition-colors"
             />
             <div className="shrink min-w-0" style={{ width: previewSplitter.size }}>
-              <PreviewColumn onClose={closePreview} />
+              <PreviewColumn onClose={closePreview}>
+                <PreviewPane provider={provider} filesMeta={filesMeta} />
+              </PreviewColumn>
             </div>
           </>
         )}

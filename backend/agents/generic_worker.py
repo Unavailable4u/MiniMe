@@ -115,6 +115,7 @@ eo.capabilities imports eo.registry, and eo.registry's own
 bottom-of-file import of this module would find generic_worker.run
 undefined if capabilities were imported before run() exists.
 """
+import concurrent.futures
 import os
 import sys
 
@@ -150,6 +151,14 @@ from memory.bus import read as bus_read
 from memory.bus import write as bus_write
 from utils.llm_client import DROPPABLE_CONTEXT_MARKER  # NEW — Patch 1b
 from utils.llm_client import generate_text
+
+# Audit fix 2026-09-25: dedicated small pool for the skill self-improvement
+# side-channel (see its call site below) -- kept off the main agent-task pool
+# entirely so a slow/stuck research pass can never compete with real role
+# dispatch for the same worker budget.
+_SKILL_SELF_IMPROVE_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="skill-self-improve")
+_SKILL_SELF_IMPROVE_TIMEOUT_SECONDS = float(os.getenv("SKILL_SELF_IMPROVE_TIMEOUT_SECONDS", "10"))
 
 # NOTE: `from eo.panel import _best_match` is deliberately NOT imported at
 # module level here. eo.registry.py now imports this module (generic_worker)
@@ -960,7 +969,11 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
     # that apply regardless of task type) and framed as guidance, not
     # as part of the role's own identity/brief, so a role with a skill
     # match doesn't read as if the skill doc IS its brief.
-    skill_doc = "" if role in STRICT_FORMAT_ROLES else get_relevant_skill(task_text)
+    # Audit fix 2026-09-25: get_relevant_skill() is a retrieval lookup, not a
+    # generation call -- still bounded to a short descriptor so an unusually
+    # long grounded prompt can't turn this into a large embedding request.
+    _skill_lookup_text = task_text[:2000]
+    skill_doc = "" if role in STRICT_FORMAT_ROLES else get_relevant_skill(_skill_lookup_text)
     if not skill_doc and role not in STRICT_FORMAT_ROLES:
         # NEW — Part 6 §E2, task 14, self-improvement loop: "" here is
         # the load-bearing "no skill matches this task type yet" signal
@@ -975,8 +988,22 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
         # this one, so nothing about it may ever cost this request more
         # than the one research pass + one cheap condensation call it
         # takes on the way to a plain "no skill found" outcome.
+        # Audit fix 2026-09-25 (root cause #2): this side-channel is supposed
+        # to cost "one research pass + one cheap condensation call", but a
+        # blocked/rate-limited web search or LLM step used to make it eat
+        # 60-140s of THIS role's wall-clock time before the role's own real
+        # work even started. Run it on a background thread with a short join
+        # timeout instead: on success within the budget the skill is written
+        # immediately, same as before; past the budget the role moves on
+        # right away and the thread finishes (or doesn't) in the background,
+        # completely decoupled from this request.
         try:
-            ensure_skill_for_task(task_text)
+            _skill_future = _SKILL_SELF_IMPROVE_POOL.submit(ensure_skill_for_task, _skill_lookup_text)
+            _skill_future.result(timeout=_SKILL_SELF_IMPROVE_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            print(f"  [Generic Worker] skill self-improvement loop still running after "
+                  f"{_SKILL_SELF_IMPROVE_TIMEOUT_SECONDS:.0f}s -- continuing without "
+                  f"waiting further (it will finish, or not, in the background).")
         except Exception as exc:
             print(f"  [Generic Worker] skill self-improvement loop skipped "
                   f"({exc.__class__.__name__}: {exc}).")

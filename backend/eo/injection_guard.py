@@ -51,43 +51,72 @@ _FLAG_ONLY = True  # keep True until you've watched false-positive rate
                     # on real traffic; a hard block (drop the snippet
                     # entirely) is a one-line change once you trust it.
 
+# Audit fix 2026-09-25: this guard has never actually screened anything.
+# llama-prompt-guard-2-86m's context window is 512 TOKENS, and every call
+# sent up to 4,000 CHARACTERS (roughly 1,000+ tokens for real prose) --
+# Groq rejected every single one with "Please reduce the length of the
+# messages or completion" (a 400, silently swallowed by the fail-open
+# except-clause below as "not flagged"). ~3.2 chars/token is a safe average
+# for English text; 1,200 chars keeps each chunk comfortably under the
+# 512-token ceiling with room for the label token(s) in the completion.
+_CHUNK_CHARS = 1200
+# A scraped page can be very long; screening the whole thing chunk-by-chunk
+# would turn one "cheap pre-filter" call into dozens. This is a defense-in-
+# depth pass, not a full-document audit, so cap how much of any one snippet
+# gets classified -- injected instructions are typically front-loaded (they
+# need to be seen before the real content) or, if not, are still on a page
+# whose EARLY chunks already carry plenty of signal.
+_MAX_CHUNKS_PER_SNIPPET = 4
+
+
+def _classify_chunk(chunk: str) -> str:
+    """One raw classification call for a single, already-sized chunk. Returns
+    the upper-cased label text ("BENIGN"/"INJECTION"/"JAILBREAK"/""), letting
+    any exception propagate to the caller's own try/except."""
+    raw = generate_text(
+        system_prompt="",   # prompt-guard models classify the user_content directly
+        user_content=chunk,
+        chain=PROMPT_GUARD_CHAIN,
+        agent_name="injection_guard",
+        allow_continuation=False,
+    )
+    return (raw or "").strip().upper()
+
 
 def score_snippet(text: str, source_label: str = "") -> dict:
-    """Returns {"flagged": bool, "reason": str}. `flagged=True` means
-    the classifier scored this text as containing injected
-    instructions rather than ordinary content -- caller decides what to
-    do with that (see filter_snippets() below for the common case: log
-    + optionally drop before it reaches the real generation call).
+    """Returns {"flagged": bool, "reason": str}. `flagged=True` means the
+    classifier scored ANY chunk of this text as containing injected
+    instructions rather than ordinary content -- caller decides what to do
+    with that (see filter_snippets() below for the common case: log +
+    optionally drop before it reaches the real generation call).
 
-    Deliberately NOT raising on any failure -- a classifier hiccup
-    degrades to "not flagged," same fail-open contract as
+    Audit fix 2026-09-25: text longer than the classifier's real 512-token
+    window is split into _CHUNK_CHARS-sized chunks (see that constant's own
+    comment) instead of being truncated to a length that still overflowed
+    the model on anything but very short snippets. The whole snippet is
+    flagged if any chunk is.
+
+    Deliberately NOT raising on any failure -- a classifier hiccup degrades
+    to "not flagged" for that chunk, same fail-open contract as
     eo/output_guard.py's validate_*() functions.
     """
     if not text or not text.strip():
         return {"flagged": False, "reason": ""}
     if not os.environ.get("GROQ_API_KEY"):
         return {"flagged": False, "reason": "GROQ_API_KEY not set — guard skipped"}
-    try:
-        # prompt-guard models are single-label classifiers, not chat
-        # models -- Groq serves them behind the same /chat/completions
-        # shape generate_text() already calls, with the classification
-        # label as the completion text (documented behavior: response
-        # text is one of "BENIGN" / "INJECTION" / "JAILBREAK").
-        raw = generate_text(
-            system_prompt="",   # prompt-guard models classify the user_content directly
-            user_content=text[:4000],   # classifier's own context window is small; snippets this module sees are short anyway
-            chain=PROMPT_GUARD_CHAIN,
-            agent_name="injection_guard",
-            allow_continuation=False,
-        )
-        label = (raw or "").strip().upper()
-        flagged = label in ("INJECTION", "JAILBREAK")
-        return {"flagged": flagged, "reason": label if flagged else ""}
-    except Exception as exc:
-        print(f"  [injection_guard] classification failed for "
-              f"{source_label or 'snippet'} (fail-open, treating as "
-              f"not flagged): {exc.__class__.__name__}: {exc}")
-        return {"flagged": False, "reason": f"guard error: {exc}"}
+    chunks = [text[i:i + _CHUNK_CHARS] for i in range(0, len(text), _CHUNK_CHARS)]
+    chunks = chunks[:_MAX_CHUNKS_PER_SNIPPET] or [text[:_CHUNK_CHARS]]
+    for chunk in chunks:
+        try:
+            label = _classify_chunk(chunk)
+        except Exception as exc:
+            print(f"  [injection_guard] classification failed for "
+                  f"{source_label or 'snippet'} (fail-open for this chunk, "
+                  f"treating as not flagged): {exc.__class__.__name__}: {exc}")
+            continue
+        if label in ("INJECTION", "JAILBREAK"):
+            return {"flagged": True, "reason": label}
+    return {"flagged": False, "reason": ""}
 
 
 def filter_snippets(snippets: list, text_key: str = "snippet",
