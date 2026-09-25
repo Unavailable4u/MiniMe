@@ -345,16 +345,50 @@ function StepRow({ step, onResume, dedupNote }) {
   );
 }
 
-// Part 2 §2.4/§2.7 — the three decisions resume_graph() understands.
-// "Edit & Continue" opens a textarea seeded with this role's own output
-// (the same text/summary already rendered above) so the human edits the
+// Part 2 §2.4/§2.7 — the three decisions resume_graph() understands,
+// but only for a genuine approval_roles content review. "Edit &
+// Continue" opens a textarea seeded with this role's own output (the
+// same text/summary already rendered above) so the human edits the
 // ACTUAL text that gets written back to stage_output:{session_id}:{role}
 // — not a blank box. "Reject & Redo" needs no extra input; the backend
 // resets idx back to this role's position and re-enters the loop.
+//
+// NEW — frontend audit fix 2026-09-26: eo/executor.py's own audit fix
+// (2026-09-25, see run_guard.py's docstring) reuses this exact
+// "awaiting_approval" mechanism for three more pause reasons — a token
+// budget stop, a per-run failure-breaker trip, and a chat-tab
+// tool-call budget stop — none of which has a role's output to
+// reject/redo or edit; nothing failed and nothing is written yet, it
+// just hit a limit. Only a real approval_roles review (`pauseReason`
+// "approval", or absent on an older snapshot predating this field)
+// gets those two buttons. Every other reason shows the backend's own
+// `pauseMessage` (WorkspaceDockContext.jsx's awaiting_approval
+// handler) as plain prompt text — the same "you've hit a limit, want
+// to keep going?" moment Claude itself shows, but as an ordinary
+// paragraph rather than a distinct styled "Continue" control — and
+// falls straight to the same Approve button below, since that's
+// already the exact POST /api/resume {"action":"approve"} call this
+// is asking for.
+const CONTENT_REVIEW_REASON = "approval";
+const PAUSE_REASON_FALLBACK_MESSAGE = {
+  manual_pause: "This run was paused before it continues.",
+  budget_exceeded: "This run reached its tool-call budget for this task.",
+  token_budget_exceeded: "This run reached its token budget.",
+  repeated_failures: "This run stopped after repeated failures.",
+};
+
 function ApprovalActions({ step, onResume }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(step.text || step.summary || "");
   const [busy, setBusy] = useState(false);
+
+  const pauseReason = step.pauseReason || CONTENT_REVIEW_REASON;
+  const isContentReview = pauseReason === CONTENT_REVIEW_REASON;
+  const promptMessage =
+    step.pauseMessage ||
+    (isContentReview
+      ? "This role requires approval before the run continues."
+      : PAUSE_REASON_FALLBACK_MESSAGE[pauseReason] || "This run is paused before it continues.");
 
   async function act(action, payload) {
     setBusy(true);
@@ -367,9 +401,7 @@ function ApprovalActions({ step, onResume }) {
 
   return (
     <div className="mt-2 border-t border-amber-900/60 pt-2 space-y-2">
-      <p className="text-amber-500/90">
-        This role requires approval before the run continues.
-      </p>
+      <p className="text-amber-500/90">{promptMessage}</p>
       {editing ? (
         <>
           <textarea
@@ -402,24 +434,28 @@ function ApprovalActions({ step, onResume }) {
         </>
       ) : (
         <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => act("reject_redo")}
-            className="flex items-center gap-1.5 text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-2 py-1"
-          >
-            <RotateCcw size={12} />
-            Reject & Redo
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => setEditing(true)}
-            className="flex items-center gap-1.5 text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-2 py-1"
-          >
-            <Pencil size={12} />
-            Edit & Continue
-          </button>
+          {isContentReview && (
+            <>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => act("reject_redo")}
+                className="flex items-center gap-1.5 text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-2 py-1"
+              >
+                <RotateCcw size={12} />
+                Reject & Redo
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setEditing(true)}
+                className="flex items-center gap-1.5 text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-2 py-1"
+              >
+                <Pencil size={12} />
+                Edit & Continue
+              </button>
+            </>
+          )}
           <button
             type="button"
             disabled={busy}
