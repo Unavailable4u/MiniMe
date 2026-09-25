@@ -513,12 +513,34 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       }
       if (eventType === "awaiting_approval") {
         const roleName = payload?.role || payload?.label || agent;
+        // NEW — frontend audit fix 2026-09-26: eo/executor.py's own
+        // audit fix (2026-09-25, see run_guard.py's docstring) started
+        // sending WHY the run paused ("approval" / "manual_pause" /
+        // "budget_exceeded" / "token_budget_exceeded" /
+        // "repeated_failures") and a human-readable `message` on this
+        // same event, so a token-budget or failure-breaker stop could
+        // show its own copy instead of the generic role-review card.
+        // This handler only ever read `payload.role` off the event, so
+        // both fields were computed and sent but silently dropped —
+        // every pause rendered identically regardless of cause.
+        // Carried onto the step itself (not just pausedApproval) since
+        // that's what AgentStepList.jsx's ApprovalActions actually
+        // renders from; `pause`-prefixed names avoid colliding with
+        // this step's own unrelated `reason` (calledOutTo.reason, a
+        // routing label — see REASON_LABELS in AgentStepList.jsx).
+        // Defaults to "approval" (not the literal payload value, which
+        // is absent on an approval_roles pause) so an older client-side
+        // step shape or a redelivered event without `reason` still
+        // renders the original three-button review card rather than
+        // falling into the single-message branch by omission.
+        const pauseReason = payload?.reason || "approval";
+        const pauseMessage = payload?.message || null;
         setState(key, (prev) => {
           const idx = [...prev.liveSteps].map((s) => s.role).lastIndexOf(roleName);
           const liveSteps = idx !== -1
-            ? prev.liveSteps.map((s, i) => (i === idx ? { ...s, status: "awaiting_approval" } : s))
+            ? prev.liveSteps.map((s, i) => (i === idx ? { ...s, status: "awaiting_approval", pauseReason, pauseMessage } : s))
             : prev.liveSteps;
-          return { liveSteps, pausedApproval: { role: roleName } };
+          return { liveSteps, pausedApproval: { role: roleName, reason: pauseReason, message: pauseMessage } };
         });
         return;
       }

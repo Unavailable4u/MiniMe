@@ -1,6 +1,6 @@
 "use client";
 import { useRef, useEffect, useState } from "react";
-import { Pause, Loader2 } from "lucide-react";
+import { Pause, Play, Loader2 } from "lucide-react";
 import { useSession, authHeaders } from "../context/SessionContext";
 import { useWorkspaceDock } from "../context/WorkspaceDockContext";
 import RoutingTraceCard from "./RoutingTraceCard";
@@ -42,41 +42,70 @@ import TouchCollapsibleGraph from "./TouchCollapsibleGraph"; // NEW — touch-sc
 // CO3: small local component rather than inlining the busy-state
 // handling into WorkingPanel's render — mirrors ArtifactRenderer.jsx's
 // PythonArtifact "Run" button pattern (local status state, spinner while
-// in flight, re-enables after). Once clicked, stays disabled/"Pausing…"
+// in flight, re-enables after). Once clicked, stays disabled/pending
 // until the live "awaiting_approval" event actually arrives and
 // liveSteps flips (handled by the parent's conditional render, not this
 // component) — a pause is fire-and-forget server-side, so this button
 // can't itself know the moment the run really stopped, only that it
 // asked.
-function PauseButton({ onRequestPause }) {
+//
+// CHANGED — frontend audit fix 2026-09-26, two issues found reading
+// this component for the token-budget-pause patch:
+// 1. Icon-only now (title/aria-label still carry the label for a
+//    screen reader or a hover tooltip) instead of an icon + "Pause"/
+//    "Pausing…" text — the text was the widest thing in this header
+//    row and had nothing to do with the narrow Working Panel on
+//    mobile, where every character here is taken from the row's
+//    actual content.
+// 2. This used to be the ONLY control ever rendered in this header
+//    slot, and the parent's own gate (below) hid it completely once
+//    the run was actually paused — there was no "play" affordance
+//    anywhere in this header, only the approval/manual-pause card
+//    further down the panel. PauseResumeButton now renders a Play
+//    icon in the same spot once paused, wired straight to the same
+//    quick "approve, resume as-is" call
+//    (WorkspaceDockContext.jsx's resumeRun -> POST /api/resume
+//    {"action":"approve"}) the approval card's own Approve button
+//    makes — a fast way to unblock the run without scrolling to that
+//    card, which still exists underneath for anyone who wants to
+//    read the pause message or edit/redirect first.
+function PauseResumeButton({ paused, onRequestPause, onResume }) {
   const [pending, setPending] = useState(false);
 
   async function handleClick() {
     setPending(true);
     try {
-      await onRequestPause();
+      await (paused ? onResume({ action: "approve" }) : onRequestPause());
     } finally {
-      // Left true briefly even after the request resolves — the actual
-      // pause hasn't landed yet at that point, only the request has.
-      // The button disappears on its own once liveSteps shows
-      // awaiting_approval (parent's gate above), so there's no risk of
-      // this staying stuck in a "Pausing…" state forever if that never
-      // arrives except the genuinely-rare case the run finishes on its
-      // own first, which is also a fine outcome to just let happen.
+      // Left true briefly even after the request resolves — see this
+      // component's own comment above on why that's fine either way:
+      // a pause request flips this to the Play icon on its own once
+      // liveSteps/pausedRun catches up, and a resume request either
+      // clears pausedRun (button disappears with the rest of the live
+      // section) or re-pauses at the next checkpoint (button just
+      // stays in its "paused" state, ready to be tapped again).
       setPending(false);
     }
   }
+
+  const label = paused ? "Resume the run" : "Pause after the current step finishes";
 
   return (
     <button
       type="button"
       onClick={handleClick}
       disabled={pending}
-      title="Pause after the current step finishes"
-      className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border border-[var(--neutral-800)] text-[var(--neutral-400)] hover:bg-white/5 disabled:opacity-60 transition-colors"
+      title={label}
+      aria-label={label}
+      className="flex items-center justify-center h-6 w-6 shrink-0 rounded border border-[var(--neutral-800)] text-[var(--neutral-400)] hover:bg-white/5 disabled:opacity-60 transition-colors"
     >
-      {pending ? <Loader2 size={11} className="animate-spin" /> : <Pause size={11} />}
-      {pending ? "Pausing…" : "Pause"}
+      {pending ? (
+        <Loader2 size={11} className="animate-spin" />
+      ) : paused ? (
+        <Play size={11} />
+      ) : (
+        <Pause size={11} />
+      )}
     </button>
   );
 }
@@ -336,18 +365,20 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
                 flag eo/executor.py's loop picks up at its own next
                 checkpoint (after whichever role finishes next), so it's
                 fine to request one even during the pre-decision
-                "Classifying and routing…" moment. Hidden once a step is
-                already awaiting_approval — pausing an already-paused
-                run has nothing left to do.
-                CHANGED — CO3 patch 4: also hidden once pausedRun is set.
-                Previously only the awaiting_approval case was checked,
-                so a manual pause (which never sets any step's status —
-                see AgentStepList's own comment on `manualPause`) left
-                this button visible and clickable on an already-paused
-                run. */}
-            {!liveSteps.some((s) => s.status === "awaiting_approval") && !pausedRun && (
-              <PauseButton onRequestPause={requestPause} />
-            )}
+                "Classifying and routing…" moment.
+                CHANGED — CO3 patch 4: paused is true once EITHER a step
+                is awaiting_approval OR pausedRun is set — a manual
+                pause never sets any step's status (see AgentStepList's
+                own comment on `manualPause`), so checking only the
+                first would miss it.
+                CHANGED — frontend audit fix 2026-09-26: previously this
+                whole button was hidden once paused instead of switching
+                modes — see PauseResumeButton's own comment above. */}
+            <PauseResumeButton
+              paused={liveSteps.some((s) => s.status === "awaiting_approval") || !!pausedRun}
+              onRequestPause={requestPause}
+              onResume={resumeRun}
+            />
           </div>
           {!liveDecision ? (
             <div className="text-[var(--neutral-500)] text-sm animate-pulse">
