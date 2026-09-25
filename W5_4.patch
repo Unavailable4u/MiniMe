@@ -1,0 +1,1403 @@
+diff --git a/frontend/app/components/MessageBubble.jsx b/frontend/app/components/MessageBubble.jsx
+index ab0af17..999919c 100644
+--- a/frontend/app/components/MessageBubble.jsx
++++ b/frontend/app/components/MessageBubble.jsx
+@@ -9,6 +9,7 @@ import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step
+ import { useProactiveSuggestions } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
+ import ArtifactRenderer from "./ArtifactRenderer";   // NEW — Phase CO, CO2
+ import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark beside each assistant reply
++import CodeProposalCard from "./workbench/CodeProposalCard";   // NEW — W5.4
+ 
+ const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));   // NEW — Phase 3 step 3.2
+ 
+@@ -137,7 +138,16 @@ function useStreamingAnswer(sessionId, enabled) {
+ // is still set, so a stale paused bubble further up the thread (from a
+ // run that has since been resumed) doesn't keep showing a live Resume
+ // button.
+-function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isActivePause }) {
++function MessageBubble({
++  message,
++  onNavigateSubTab,
++  onSendCommand,
++  onResume,
++  isActivePause,
++  onReviewProposal, // NEW — W5.4
++  onKeepProposal, // NEW — W5.4
++  onRejectProposal, // NEW — W5.4
++}) {
+   // NEW — Phase 3 step 3.7. Called unconditionally, ahead of every
+   // early-return branch below (role === "generation"/"suggestion"/
+   // "user") — Rules of Hooks: a hook can't be called only on the path
+@@ -173,6 +183,29 @@ function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isA
+     );
+   }
+ 
++  // NEW — W5.4 (Build Workbench plan). The persisted record of an
++  // Edit-mode send (sendCodeEditProposal, WorkspaceChatPanel.jsx — see
++  // that function's own header for why a proposal earns a persisted
++  // card where the "generation" role just above doesn't persist at
++  // all). onReviewProposal/onKeepProposal/onRejectProposal are the
++  // same three-layer-threaded callbacks (rowProps -> VirtualMessageRow
++  // -> MessageRow -> here) onResume/onSendCommand above already use.
++  // `onReviewProposal` takes a proposal-shaped object elsewhere (the
++  // composer's own read-only list passes the real `codeProposals`
++  // entry) — this card only ever has the message's own `proposalId`,
++  // so it's adapted to `{id: message.proposalId}` right here rather
++  // than changing that callback's contract for every other caller.
++  if (message.role === "code_proposal") {
++    return (
++      <CodeProposalCard
++        message={message}
++        onReview={(m) => onReviewProposal?.({ id: m.proposalId })}
++        onKeepAll={onKeepProposal}
++        onReject={onRejectProposal}
++      />
++    );
++  }
++
+   // NEW — Phase 3 step 3.2/3.3. The post-generation cross-sell card:
+   // WorkspaceDockContext.jsx's generation_done handling (step 3.1's
+   // notebookAffinities.js lookup) appends one of these right after a
+diff --git a/frontend/app/components/MessageRow.jsx b/frontend/app/components/MessageRow.jsx
+index 9ef3982..0ef46c7 100644
+--- a/frontend/app/components/MessageRow.jsx
++++ b/frontend/app/components/MessageRow.jsx
+@@ -17,6 +17,9 @@ export default function MessageRow({
+   onSendCommand,
+   onResume,       // NEW — CO3 patch 3
+   isActivePause,  // NEW — CO3 patch 3
++  onReviewProposal,  // NEW — W5.4
++  onKeepProposal,    // NEW — W5.4
++  onRejectProposal,  // NEW — W5.4
+ }) {
+   return (
+     <div onClick={() => onSelect(index)} className="pb-4">
+@@ -26,6 +29,9 @@ export default function MessageRow({
+         onSendCommand={onSendCommand}
+         onResume={onResume}
+         isActivePause={isActivePause}
++        onReviewProposal={onReviewProposal}
++        onKeepProposal={onKeepProposal}
++        onRejectProposal={onRejectProposal}
+       />
+     </div>
+   );
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index 7818367..cb07514 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -23,7 +23,22 @@ import HireReviewScreen from "./HireReviewScreen";
+ // trio of per-half collapse buttons.
+ import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle, Send } from "lucide-react";   // CHANGED — Send added for the compact icon-only composer below
+ import { ingestFileByExtension } from "../lib/ingestDispatch";
+-import { createProposal as createCodeProposal, subscribeToProposalEvents } from "../lib/workbench/codeProposals";   // NEW — W5.1b
++// NEW — W5.1b: createProposal, subscribeToProposalEvents. NEW — W5.4:
++// resolveProposal/ProposalStaleError (the card's own Keep all/Reject —
++// the same POST .../code/proposals/{id}/resolve round trip
++// ReviewPanel.jsx's Done button makes) and listProposals (the "one
++// active proposal per file" pre-check below).
++import {
++  createProposal as createCodeProposal,
++  listProposals,
++  ProposalStaleError,
++  resolveProposal,
++  subscribeToProposalEvents,
++} from "../lib/workbench/codeProposals";
++// NEW — W5.4: keepAllDecisions()/rejectAllDecisions() stand in for a
++// per-hunk review nobody opened, the same shortcut PendingTray.jsx
++// (EditorWorkbench.jsx) uses for its own Keep all/Reject buttons.
++import { keepAllDecisions, rejectAllDecisions } from "../lib/workbench/reviewMode";
+ import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
+ import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
+ 
+@@ -185,7 +200,19 @@ const ATTACH_DONE_AUTOCLEAR_MS = 3000;
+ // purpose anymore, so it — and the ref-setting div wrapper in
+ // MessageRow.jsx — were dead weight kept alive only by being passed
+ // through. Removed here, and MessageRow's ref prop dropped to match.
+-function VirtualMessageRow({ index, style, messages, onSelect, onNavigateSubTab, onSendCommand, onResume, pausedActive }) {
++function VirtualMessageRow({
++  index,
++  style,
++  messages,
++  onSelect,
++  onNavigateSubTab,
++  onSendCommand,
++  onResume,
++  pausedActive,
++  onReviewProposal, // NEW — W5.4
++  onKeepProposal, // NEW — W5.4
++  onRejectProposal, // NEW — W5.4
++}) {
+   // NEW — CO3 patch 3: only the single most-recent message can be the
+   // "live" pause — everything earlier in the thread is history, even
+   // if it also happens to carry status:"paused" from a prior run.
+@@ -200,6 +227,9 @@ function VirtualMessageRow({ index, style, messages, onSelect, onNavigateSubTab,
+         onSendCommand={onSendCommand}
+         onResume={onResume}
+         isActivePause={isActivePause}
++        onReviewProposal={onReviewProposal}
++        onKeepProposal={onKeepProposal}
++        onRejectProposal={onRejectProposal}
+       />
+     </div>
+   );
+@@ -1222,8 +1252,7 @@ export default function WorkspaceChatPanel({
+   // message: calls eo/code_proposals.py's create_proposal() via
+   // POST .../code/proposals (see api/routes/code_edit.py) instead of
+   // sendTask()'s /api/task path — a proposal is its own resource with
+-  // its own lifecycle, not a chat turn, so it never touches the
+-  // dock's chat/message state at all. The instruction's own text is
++  // its own lifecycle, not a chat turn. The instruction's own text is
+   // NOT prefixed with fenced snippets the way sendCodeChatMessage's
+   // `augmented` text is — the backend already re-reads each ref's
+   // CURRENT file content itself (create_proposal()'s own
+@@ -1231,50 +1260,103 @@ export default function WorkspaceChatPanel({
+   // so sending the snippet twice would just be redundant bytes on the
+   // wire, not anything the server needs.
+   //
+-  // The returned proposal is appended to codeProposals for this
+-  // panel's own plain read-only list (see that state's own comment
+-  // above) — there is deliberately no Keep/Undo action wired to it
+-  // yet (W5.3), so a 'pending' proposal here just sits there showing
+-  // what the (today: stub, W5.2: real) generator produced until a
+-  // later step's merge view can act on it.
++  // W5.4 CHANGED: the returned proposal is still appended to
++  // codeProposals for this panel's own composer-tray list (below the
++  // Ask|Edit toggle), same as W5.1b/W5.3 — but it is ALSO now persisted
++  // as a `code_proposal` chat message (dock.persistMessage), with
++  // Review/Keep all/Reject of its own. That's new: this step's own
++  // W5.1b comment used to say a proposal "never touches the dock's
++  // chat/message state at all" — true until a scrollback-visible
++  // record of it became part of the spec. The tray
++  // (GET .../code/proposals?status=pending, EditorWorkbench.jsx's
++  // PendingTray.jsx) stays the actual source of truth per the plan's
++  // own line ("the proposal survives closing the tab") — this card is
++  // a convenience, which is also why it carries a full snapshot
++  // (original/proposed per file, same shape the proposal row itself
++  // already stores) rather than a trimmed reference the way an
++  // ordinary chat message's `codeRefs` are: it needs to render its own
++  // +/- badges without a second fetch, and a page reload only shows
++  // whatever was persisted at send time regardless (there's no
++  // update-message endpoint to keep it current — the live badge below
++  // only updates while this tab stays open, over Pusher).
+   const sendCodeEditProposal = useCallback(
+-    (text) => {
++    async (text) => {
+       if (!workspaceId) return; // Edit mode is only ever shown inside a workspace's Build tab
+       setCodeProposalPending(true);
+       setCodeProposalError(null);
+-      createCodeProposal(API_URL, workspaceId, {
+-        instruction: text,
+-        refs: codeRefs,
+-        sessionId: dock.state.sessionId ?? null,
+-      })
+-        .then((proposal) => {
+-          setCodeProposals((prev) => [proposal, ...prev]);
+-          onClearCodeRefs?.();
+-        })
+-        .catch((err) => {
+-          // A 400 (bad request shape — see create_proposal()'s own
+-          // ValueError cases) lands here; a GENERATION failure does
+-          // NOT (create_proposal() still returns 200 with
+-          // status: "failed" — see its own docstring) — that case
+-          // still hits the .then() above and renders as a failed
+-          // entry in the list, not this error banner.
+-          setCodeProposalError(err.message || "Couldn't create the proposal — try again.");
+-        })
+-        .finally(() => setCodeProposalPending(false));
++      try {
++        // W5.4: "one active proposal per file" (plan §5 W5.4) — a
++        // pending proposal already covers one of these paths, so a
++        // second one here would leave two AI edits racing for the
++        // same file's base_version. Folder refs aren't expanded
++        // server-side yet (W5.5 — create_proposal() itself rejects
++        // them today), so only the paths actually being sent matter.
++        const targetPaths = codeRefs.filter((r) => r.kind !== "folder").map((r) => r.path);
++        if (targetPaths.length > 0) {
++          const targets = new Set(targetPaths);
++          const pending = await listProposals(API_URL, workspaceId, { status: "pending" });
++          const blockingFile = pending
++            .flatMap((p) => p.files || [])
++            .find((f) => targets.has(f.path));
++          if (blockingFile) {
++            throw new Error(`${blockingFile.path} already has a pending AI edit — review or resolve it first.`);
++          }
++        }
++
++        const proposal = await createCodeProposal(API_URL, workspaceId, {
++          instruction: text,
++          refs: codeRefs,
++          sessionId: dock.state.sessionId ?? null,
++        });
++        setCodeProposals((prev) => [proposal, ...prev]);
++        onClearCodeRefs?.();
++
++        if (usingDock) {
++          const cardMessage = {
++            role: "code_proposal",
++            proposalId: proposal.id,
++            instruction: proposal.instruction,
++            summary: proposal.summary,
++            status: proposal.status,
++            files: (proposal.files || []).map((f) => ({ path: f.path, op: f.op, original: f.original, proposed: f.proposed })),
++          };
++          dock.setDockState((prev) => ({ messages: [...prev.messages, cardMessage] }));
++          dock.persistMessage(cardMessage);
++        }
++      } catch (err) {
++        // A 400 (bad request shape — see create_proposal()'s own
++        // ValueError cases), the one-active-proposal-per-file check
++        // above, or a network failure all land here; a GENERATION
++        // failure does NOT (create_proposal() still returns 200 with
++        // status: "failed" — see its own docstring) — that case still
++        // reaches the try block's happy path and renders as a failed
++        // entry, not this error banner.
++        setCodeProposalError(err.message || "Couldn't create the proposal — try again.");
++      } finally {
++        setCodeProposalPending(false);
++      }
+     },
+-    [workspaceId, API_URL, codeRefs, dock.state.sessionId, onClearCodeRefs]
++    [workspaceId, API_URL, codeRefs, dock.state.sessionId, dock.setDockState, dock.persistMessage, onClearCodeRefs, usingDock]
+   );
+ 
+-  // NEW — W5.1b: live status updates for proposals THIS panel created
+-  // — see codeProposals.js's subscribeToProposalEvents() own
+-  // docstring for why this is the one case (another tab/session
+-  // resolving the SAME proposal) this subscription actually changes
+-  // anything for today; this tab's own create already has the row
+-  // via sendCodeEditProposal's .then() above. Only subscribed while
+-  // this is a code-context-aware panel with a real workspace behind
+-  // it (codeRefs !== null, same gate the Ask|Edit strip itself uses)
+-  // — every other WorkspaceChatPanel instance (Chat tab, Research,
+-  // etc.) never had an Edit mode to react to in the first place.
++  // NEW — W5.1b: live status updates for proposals THIS panel created —
++  // see codeProposals.js's subscribeToProposalEvents() own docstring
++  // for why this is the one case (another tab/session resolving the
++  // SAME proposal) this subscription actually changes anything for
++  // today; this tab's own create already has the row via
++  // sendCodeEditProposal's .then() above. Only subscribed while this
++  // is a code-context-aware panel with a real workspace behind it
++  // (codeRefs !== null, same gate the Ask|Edit strip itself uses) —
++  // every other WorkspaceChatPanel instance (Chat tab, Research, etc.)
++  // never had an Edit mode to react to in the first place.
++  //
++  // W5.4 CHANGED: also patches any persisted `code_proposal` chat
++  // messages' own live status badge — a proposal resolved from
++  // ANYWHERE (ReviewPanel.jsx's Done, PendingTray.jsx's Keep all/
++  // Reject, or this card's own buttons below, which already update
++  // optimistically) fires the exact same CODE_PROPOSAL_RESOLVED event,
++  // so this one subscription keeps the card honest regardless of where
++  // the resolve actually happened.
+   useEffect(() => {
+     if (codeRefs === null || !workspaceId) return;
+     return subscribeToProposalEvents(workspaceId, {
+@@ -1282,9 +1364,55 @@ export default function WorkspaceChatPanel({
+         setCodeProposals((prev) =>
+           prev.map((p) => (p.id === proposal_id ? { ...p, status } : p))
+         );
++        if (usingDock) {
++          dock.setDockState((prev) => ({
++            messages: prev.messages.map((m) =>
++              m.role === "code_proposal" && m.proposalId === proposal_id ? { ...m, status } : m
++            ),
++          }));
++        }
+       },
+     });
+-  }, [codeRefs, workspaceId]);
++  }, [codeRefs, workspaceId, usingDock, dock.setDockState]);
++
++  // W5.4: the persisted `code_proposal` card's own Keep all / Reject —
++  // the same POST .../code/proposals/{id}/resolve round trip
++  // ReviewPanel.jsx's Done button makes (W5.3), just with
++  // reviewMode.js's keepAllDecisions()/rejectAllDecisions() standing in
++  // for a per-hunk review nobody opened. Works from the message itself
++  // rather than looking the proposal up in `codeProposals` — that
++  // local list only ever holds what THIS panel instance has created or
++  // heard resolved this session, while a persisted card can outlive it
++  // (a reload, a proposal made in another tab and only ever seen here
++  // as a resolved-status echo) — which is exactly why the card carries
++  // its own full files[] snapshot (see sendCodeEditProposal's header).
++  const handleResolveFromCard = useCallback(
++    async (message, mode) => {
++      const decisions = mode === "keep" ? keepAllDecisions(message) : rejectAllDecisions(message);
++      try {
++        const resolved = await resolveProposal(API_URL, workspaceId, message.proposalId, decisions);
++        setCodeProposals((prev) =>
++          prev.map((p) => (p.id === message.proposalId ? { ...p, status: resolved.status } : p))
++        );
++        if (usingDock) {
++          dock.setDockState((prev) => ({
++            messages: prev.messages.map((m) =>
++              m.role === "code_proposal" && m.proposalId === message.proposalId ? { ...m, status: resolved.status } : m
++            ),
++          }));
++        }
++      } catch (err) {
++        setCodeProposalError(
++          err instanceof ProposalStaleError
++            ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
++            : err.message || "Couldn't apply this edit."
++        );
++      }
++    },
++    [API_URL, workspaceId, usingDock, dock.setDockState]
++  );
++  const handleKeepProposalCard = useCallback((message) => handleResolveFromCard(message, "keep"), [handleResolveFromCard]);
++  const handleRejectProposalCard = useCallback((message) => handleResolveFromCard(message, "reject"), [handleResolveFromCard]);
+ 
+   const dispatchText = useCallback(
+     (text) => {
+@@ -1423,8 +1551,21 @@ export default function WorkspaceChatPanel({
+       onSendCommand: dispatchText,
+       onResume: dock.resumeRun,               // NEW — CO3 patch 3
+       pausedActive: !!dock.state.pausedRun,    // NEW — CO3 patch 3
++      onReviewProposal,                        // NEW — W5.4
++      onKeepProposal: handleKeepProposalCard,  // NEW — W5.4
++      onRejectProposal: handleRejectProposalCard, // NEW — W5.4
+     }),
+-    [messages, setActiveMessageIndex, onNavigateSubTab, dispatchText, dock.resumeRun, dock.state.pausedRun]
++    [
++      messages,
++      setActiveMessageIndex,
++      onNavigateSubTab,
++      dispatchText,
++      dock.resumeRun,
++      dock.state.pausedRun,
++      onReviewProposal,
++      handleKeepProposalCard,
++      handleRejectProposalCard,
++    ]
+   );
+ 
+   // Perf audit #3 step 8 fix — Row now lives at module scope (see
+@@ -1851,7 +1992,12 @@ export default function WorkspaceChatPanel({
+                 ReviewPanel.jsx's Keep/Undo UI; anything else just shows
+                 how it was left (matches reviewMode.js's own status
+                 vocabulary, so a proposal resolved elsewhere while this
+-                panel was closed reads the same way here as there). */}
++                panel was closed reads the same way here as there).
++                W5.4: this list is session-local (cleared on reload) —
++                the persisted `code_proposal` message below in the
++                thread itself, and EditorWorkbench.jsx's cross-session
++                PendingTray.jsx, are what survive a reload; this stays
++                as a quick glance right above the composer. */}
+             {codeProposals.length > 0 && (
+               <ul className="flex flex-col gap-1 max-h-40 overflow-y-auto">
+                 {codeProposals.map((p) => (
+diff --git a/frontend/app/components/workbench/CodeProposalCard.jsx b/frontend/app/components/workbench/CodeProposalCard.jsx
+new file mode 100644
+index 0000000..2ffe525
+--- /dev/null
++++ b/frontend/app/components/workbench/CodeProposalCard.jsx
+@@ -0,0 +1,126 @@
++"use client";
++// frontend/app/components/workbench/CodeProposalCard.jsx — W5.4 (Build
++// Workbench plan). The persisted "code_proposal" chat-message role
++// (MessageBubble.jsx's own early-return branch, same shape as its
++// "generation"/"suggestion" cards) — a scrollback-visible record of an
++// Edit-mode send, with the same Review / Keep all / Reject affordances
++// EditorWorkbench.jsx's PendingTray.jsx gives the cross-session tray.
++//
++// Deliberately NOT the source of truth (plan §5 W5.4: "the tray is the
++// source of truth — the chat card is a convenience... the proposal
++// survives closing the tab"): this card's `status` only ever updates
++// live, while this tab stays open, via subscribeToProposalEvents'
++// onResolved (WorkspaceChatPanel.jsx's own effect) or this card's own
++// buttons succeeding — a page reload shows whatever status was
++// persisted at send time, the same "convenience, not authority"
++// trade-off runGenerateTarget's `role:"generation"` card makes by not
++// persisting itself at all. Unlike that one, this DOES persist
++// (dock.persistMessage) — see sendCodeEditProposal's own comment in
++// WorkspaceChatPanel.jsx for why a proposal's card earns that where a
++// generation run's didn't.
++import { useState } from "react";
++import { Check, ChevronRight, Loader2, X } from "lucide-react";
++import { fileDiffStats, unreviewableReason } from "../../lib/workbench/reviewMode";
++
++const OP_LABELS = { create: "new", delete: "deleted" }; // mirrors ReviewPanel.jsx's own copy
++
++const STATUS_STYLES = {
++  pending: { label: "Pending review", text: "text-amber-300" },
++  accepted: { label: "Applied", text: "text-emerald-400" },
++  rejected: { label: "Discarded", text: "text-[var(--neutral-500)]" },
++  partial: { label: "Partly applied", text: "text-violet-400" },
++  stale: { label: "Out of date", text: "text-amber-300" },
++  failed: { label: "Failed", text: "text-red-400" },
++};
++
++/**
++ * @param {object} props
++ * @param {object} props.message - a persisted `{role: "code_proposal", ...}` message (WorkspaceChatPanel.jsx's sendCodeEditProposal builds the shape)
++ * @param {(message: object) => void} props.onReview
++ * @param {(message: object) => Promise<void>} props.onKeepAll
++ * @param {(message: object) => Promise<void>} props.onReject
++ */
++export default function CodeProposalCard({ message, onReview, onKeepAll, onReject }) {
++  const [busy, setBusy] = useState(null); // "keep" | "reject" | null
++
++  const status = message.status || "pending";
++  const style = STATUS_STYLES[status] || { label: status, text: "text-[var(--neutral-400)]" };
++  const isPending = status === "pending";
++
++  const run = async (mode, action) => {
++    setBusy(mode);
++    try {
++      await action?.(message);
++    } finally {
++      setBusy(null);
++    }
++  };
++
++  return (
++    <div className="flex justify-start">
++      <div className="w-full max-w-[85%] space-y-2 rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] px-3 py-2.5 text-sm">
++        <div className="flex items-center justify-between gap-2">
++          <span className="truncate font-medium text-[var(--neutral-200)]" title={message.instruction || undefined}>
++            {message.summary || message.instruction || "AI edit"}
++          </span>
++          <span className={`shrink-0 text-[11px] font-medium ${style.text}`}>{style.label}</span>
++        </div>
++
++        {message.files?.length > 0 && (
++          <ul className="space-y-1">
++            {message.files.map((f) => {
++              const { added, removed } = fileDiffStats(f.original || "", f.proposed || "");
++              return (
++                <li key={f.path} className="flex items-center gap-1.5 text-[11px] text-[var(--neutral-400)]">
++                  <span className="truncate">{f.path}</span>
++                  {OP_LABELS[f.op] && (
++                    <span className="shrink-0 rounded bg-[var(--neutral-700)] px-1 text-[10px] uppercase tracking-wide text-[var(--neutral-300)]">
++                      {OP_LABELS[f.op]}
++                    </span>
++                  )}
++                  <span className="flex shrink-0 gap-1 font-mono">
++                    <span className="text-emerald-400">+{added}</span>
++                    <span className="text-red-400">−{removed}</span>
++                  </span>
++                </li>
++              );
++            })}
++          </ul>
++        )}
++
++        {!isPending && (
++          <p className="text-[11px] text-[var(--neutral-500)]">{unreviewableReason({ status, files: message.files })}</p>
++        )}
++
++        {isPending && (
++          <div className="flex items-center gap-1.5 pt-0.5">
++            <button
++              type="button"
++              onClick={() => onReview?.(message)}
++              disabled={busy != null}
++              className="flex items-center gap-1 rounded bg-[var(--accent)] px-2 py-1 text-[11px] font-medium text-[var(--accent-text)] hover:opacity-90 disabled:opacity-50"
++            >
++              Review <ChevronRight size={11} />
++            </button>
++            <button
++              type="button"
++              onClick={() => run("keep", onKeepAll)}
++              disabled={busy != null}
++              className="flex items-center gap-1 rounded border border-[var(--neutral-700)] px-2 py-1 text-[11px] text-[var(--neutral-300)] hover:bg-[var(--neutral-800)] disabled:opacity-50"
++            >
++              {busy === "keep" ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />} Keep all
++            </button>
++            <button
++              type="button"
++              onClick={() => run("reject", onReject)}
++              disabled={busy != null}
++              className="flex items-center gap-1 rounded border border-[var(--neutral-700)] px-2 py-1 text-[11px] text-[var(--neutral-400)] hover:bg-[var(--neutral-800)] disabled:opacity-50"
++            >
++              {busy === "reject" ? <Loader2 size={11} className="animate-spin" /> : <X size={11} />} Reject
++            </button>
++          </div>
++        )}
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index fde63d3..33ce7dc 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -85,14 +85,33 @@ import { useViewport } from "../../hooks/useViewport";
+ import { useCodeContext } from "../../lib/workbench/codeContext";
+ // W5.3: the review round trip — getProposal() to fetch what
+ // pendingReview only carries the id of, resolveProposal() for Done.
+-import { ProposalStaleError, getProposal, resolveProposal } from "../../lib/workbench/codeProposals";
++// W5.4: listProposals() (the tray's own GET .../code/proposals?status=
++// pending on mount), subscribeToProposalEvents() (CODE_PROPOSAL_READY/
++// CODE_PROPOSAL_RESOLVED keeping it live — the same subscription shape
++// WorkspaceChatPanel.jsx's own composer-tray list already uses), and
++// createProposal (aliased: PendingTray.jsx's "Regenerate" re-creates a
++// proposal the same way sendCodeEditProposal does, just from here).
++import {
++  ProposalStaleError,
++  createProposal as createCodeProposal,
++  getProposal,
++  listProposals,
++  resolveProposal,
++  subscribeToProposalEvents,
++} from "../../lib/workbench/codeProposals";
+ import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
+ import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
+ import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
+ import { deleteSummary } from "../../lib/workbench/explorerOps";
+ import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
+ import { jumpToPosition } from "../../lib/workbench/gotoPosition";
+-import { buildDecisions, dirtyOverlap, unreviewableReason } from "../../lib/workbench/reviewMode";
++import {
++  buildDecisions,
++  dirtyOverlap,
++  keepAllDecisions,
++  rejectAllDecisions,
++  unreviewableReason,
++} from "../../lib/workbench/reviewMode";
+ import { useProjectSearch } from "../../hooks/useProjectSearch";
+ import {
+   BOTTOM_PANEL_DEFAULT_HEIGHT,
+@@ -119,6 +138,7 @@ import ConflictCompareView from "./ConflictCompareView";
+ import EditorTabs from "./EditorTabs";
+ import Explorer from "./Explorer";
+ import HistoryPanel from "./HistoryPanel";
++import PendingTray from "./PendingTray";
+ import PreviewColumn from "./PreviewColumn";
+ import ProjectSearchPanel from "./ProjectSearchPanel";
+ import QuickOpen from "./QuickOpen";
+@@ -229,6 +249,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+     reviewSubmitting,
+     reviewError,
+     reviewClose,
++    // W5.4
++    proposalsLoaded,
++    proposalUpsert,
++    proposalStatusUpdate,
++    proposalFilesChanged,
++    proposalClearPossiblyStale,
+   } = useEditorStore();
+ 
+   // W4.1: see this component's own import comment on why this is
+@@ -525,9 +551,20 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+ 
+   // Live refresh (W0.1 / W2.2): the provider owns the Pusher plumbing;
+   // this is only "what to do when told something changed". The payload's
+-  // file paths aren't even needed — a list refetch + version comparison
+-  // finds what changed.
+-  useEffect(() => provider.subscribe(() => refreshRef.current()), [provider]);
++  // file paths aren't needed for the refresh itself — a list refetch +
++  // version comparison finds what changed — but W5.4's pending-tray
++  // staleness banner DOES want them: any pending proposal touching one
++  // of these paths gets flagged (see editorStore.js's
++  // PROPOSAL_FILES_CHANGED for why this, and not a base_hash recompute,
++  // is what drives it).
++  useEffect(
++    () =>
++      provider.subscribe(({ filePaths }) => {
++        refreshRef.current();
++        if (filePaths?.length) proposalFilesChanged(filePaths);
++      }),
++    [provider, proposalFilesChanged]
++  );
+ 
+   // W0.1: Pusher can drop a connection while a tab is backgrounded
+   // (mobile Safari suspends sockets aggressively), so a regen that
+@@ -542,6 +579,49 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+     return () => document.removeEventListener("visibilitychange", onVisibility);
+   }, []);
+ 
++  // W5.4: the pending tray's own source of truth — "populated from GET
++  // …/code/proposals?status=pending on mount" (plan §5 W5.4), loaded
++  // once per mount the same way loadFileList() above is (this component
++  // remounts per project, key={selected.id} in BuildTab.jsx, so there's
++  // no workspace switch to react to in place). A failure here just
++  // leaves the tray empty rather than crashing the workbench — same
++  // "don't take down the editor over a list that failed to load"
++  // reasoning loadFileList() itself already follows.
++  useEffect(() => {
++    let cancelled = false;
++    listProposals(apiUrl, workspaceId, { status: "pending" })
++      .then((proposals) => {
++        if (!cancelled) proposalsLoaded(proposals);
++      })
++      .catch((err) => {
++        console.error("Couldn't load pending proposals:", err);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [apiUrl, workspaceId, proposalsLoaded]);
++
++  // W5.4: keeps the tray live. CODE_PROPOSAL_READY fires for a NEW
++  // proposal — this tab's own sendCodeEditProposal (WorkspaceChatPanel.jsx)
++  // just as much as another tab or session — with ids/status only (plan
++  // §7.2's Pusher byte cap), so a real GET fills in the summary/files
++  // the tray actually renders. CODE_PROPOSAL_RESOLVED needs no such
++  // fetch: it's already just the id/status this tray wants (see
++  // PROPOSAL_STATUS_UPDATE's own comment). Same workspace channel
++  // WorkspaceChatPanel.jsx's own subscription and this component's
++  // `provider.subscribe` above already use — subscribeToProposalEvents()'s
++  // own header covers why a second (third) subscriber is fine.
++  useEffect(() => {
++    return subscribeToProposalEvents(workspaceId, {
++      onReady: ({ proposal_id }) => {
++        getProposal(apiUrl, workspaceId, proposal_id)
++          .then((proposal) => proposalUpsert(proposal))
++          .catch((err) => console.error("Couldn't load new proposal:", err));
++      },
++      onResolved: ({ proposal_id, status }) => proposalStatusUpdate(proposal_id, status),
++    });
++  }, [workspaceId, apiUrl, proposalUpsert, proposalStatusUpdate]);
++
+   // ---- open / close --------------------------------------------------
+ 
+   const openFile = useCallback(
+@@ -1101,6 +1181,81 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+     }
+   }, [apiUrl, workspaceId, reviewSubmitting, reviewClose, reviewError]);
+ 
++  // W5.4: PendingTray.jsx's own three quick actions, for a proposal
++  // nobody has opened ReviewPanel.jsx's per-hunk diff for. "Review"
++  // just reuses the exact same path a chip's Review button already
++  // takes (openProposalForReview, above) — dismissing the stale banner
++  // along the way, since opening the diff IS "acknowledging" it. Keep
++  // all / Reject skip straight to resolveProposal() with
++  // reviewMode.js's keepAllDecisions()/rejectAllDecisions() standing in
++  // for a review nobody opened — same round trip handleReviewDone makes,
++  // just without a `review` slice to read `current` from. Each success
++  // lands the FULL updated row via proposalUpsert() rather than waiting
++  // for this tab's own CODE_PROPOSAL_RESOLVED echo, so the tray updates
++  // immediately instead of after a Pusher round trip.
++  const handleTrayReview = useCallback(
++    (proposal) => {
++      proposalClearPossiblyStale(proposal.id);
++      openProposalForReview(proposal.id);
++    },
++    [openProposalForReview, proposalClearPossiblyStale]
++  );
++
++  const handleTrayKeepAll = useCallback(
++    async (proposal) => {
++      try {
++        const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, keepAllDecisions(proposal));
++        proposalUpsert(resolved);
++      } catch (err) {
++        setNotice(
++          err instanceof ProposalStaleError
++            ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
++            : err.message || "Couldn't apply this edit."
++        );
++      }
++    },
++    [apiUrl, workspaceId, proposalUpsert]
++  );
++
++  const handleTrayReject = useCallback(
++    async (proposal) => {
++      try {
++        const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, rejectAllDecisions(proposal));
++        proposalUpsert(resolved);
++      } catch (err) {
++        setNotice(err.message || "Couldn't discard this edit.");
++      }
++    },
++    [apiUrl, workspaceId, proposalUpsert]
++  );
++
++  // The stale banner's other action: reject the out-of-date proposal
++  // (always safe — rejectAllDecisions() never sends a "keep", and
++  // resolve_proposal() only checks base_version for those, so this
++  // never itself throws ProposalStaleError) and immediately ask for a
++  // fresh one against the SAME instruction/refs. `refs`/`session_id`
++  // are stored on the proposal row exactly as create_proposal()
++  // received them (eo/code_proposals.py's own _build_files_payload
++  // docstring), so this is the same request sendCodeEditProposal made
++  // the first time, just replayed from here instead of the composer.
++  const handleTrayRegenerate = useCallback(
++    async (proposal) => {
++      try {
++        const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, rejectAllDecisions(proposal));
++        proposalUpsert(resolved);
++        const fresh = await createCodeProposal(apiUrl, workspaceId, {
++          instruction: proposal.instruction,
++          refs: proposal.refs || [],
++          sessionId: proposal.session_id ?? null,
++        });
++        proposalUpsert(fresh);
++      } catch (err) {
++        setNotice(err.message || "Couldn't regenerate this edit.");
++      }
++    },
++    [apiUrl, workspaceId, proposalUpsert]
++  );
++
+   // History's "Restore": lands the server's response the same way a
+   // normal save does — FILE_LOADED for the buffer, plus the file list's
+   // own entry patched in place rather than a full refetch (saveFile()
+@@ -1273,14 +1428,17 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   );
+   const closePreview = useCallback(() => setLayout({ previewOpen: false }), [setLayout]);
+ 
+-  // "Pending changes (N)": AI-proposed edits waiting for review. The
+-  // store's `proposals` stays empty until W5.4 loads them, so this is 0
+-  // for now; only `pending` ones count (resolved ones may live in the
+-  // list too — plan §5 W5.1's status column).
+-  const pendingCount = useMemo(
+-    () => state.proposals.filter((p) => p?.status === "pending").length,
++  // "Pending changes (N)": AI-proposed edits waiting for review —
++  // StatusBar.jsx's own chip, and PendingTray.jsx's list when it's
++  // clicked open. Only `pending` ones count/show; resolved ones stay in
++  // `state.proposals` too (plan §5 W5.1's status column) but drop out of
++  // both once their status moves on.
++  const pendingProposals = useMemo(
++    () => state.proposals.filter((p) => p?.status === "pending"),
+     [state.proposals]
+   );
++  const pendingCount = pendingProposals.length;
++  const [pendingTrayOpen, setPendingTrayOpen] = useState(false);
+ 
+   // ---- derived ---------------------------------------------------------
+ 
+@@ -1803,9 +1961,23 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+         language={activeBuffer?.language}
+         cursor={cursor}
+         pendingCount={pendingCount}
++        onPendingClick={() => setPendingTrayOpen(true)}
+         reserveRight={reserveCorner}
+       />
+ 
++      <PendingTray
++        open={pendingTrayOpen}
++        onClose={() => setPendingTrayOpen(false)}
++        proposals={pendingProposals}
++        onReview={(proposal) => {
++          setPendingTrayOpen(false);
++          handleTrayReview(proposal);
++        }}
++        onKeepAll={handleTrayKeepAll}
++        onReject={handleTrayReject}
++        onRegenerate={handleTrayRegenerate}
++      />
++
+       <ConfirmDialog
+         open={!!pendingClose}
+         title="Discard unsaved changes?"
+diff --git a/frontend/app/components/workbench/PendingTray.jsx b/frontend/app/components/workbench/PendingTray.jsx
+new file mode 100644
+index 0000000..555e994
+--- /dev/null
++++ b/frontend/app/components/workbench/PendingTray.jsx
+@@ -0,0 +1,172 @@
++"use client";
++// frontend/app/components/workbench/PendingTray.jsx — W5.4 (Build
++// Workbench plan). StatusBar.jsx's "Pending changes (N)" chip opens
++// this: every PENDING proposal EditorWorkbench.jsx currently knows
++// about (editorStore's `proposals`, loaded at mount from GET
++// .../code/proposals?status=pending and kept live over Pusher — see
++// that component's own effects for how). "The tray is the source of
++// truth... the proposal survives closing the tab" (plan §5 W5.4),
++// independent of whatever WorkspaceChatPanel.jsx's own `code_proposal`
++// chat cards happen to still be scrolled into view in this session.
++//
++// Presentational, same split ReviewPanel.jsx uses: proposal data and
++// the resolve/regenerate round trips live in EditorWorkbench.jsx; this
++// only renders what it's given and turns clicks into the callbacks
++// below. ResponsiveSheet, not a hand-rolled overlay — same modal
++// primitive QuickOpen.jsx already uses (Escape/backdrop-click/scroll
++// lock, a full-screen sheet on mobile, all for free).
++import { useState } from "react";
++import { AlertTriangle, Check, ChevronRight, Loader2, RefreshCw, X } from "lucide-react";
++import { fileDiffStats } from "../../lib/workbench/reviewMode";
++import ResponsiveSheet from "../mobile/ResponsiveSheet";
++
++const OP_LABELS = { create: "new", delete: "deleted" }; // mirrors ReviewPanel.jsx's own copy
++
++function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) {
++  const [busy, setBusy] = useState(null); // "keep" | "reject" | "regenerate" | null
++
++  const run = async (mode, action) => {
++    setBusy(mode);
++    try {
++      await action?.(proposal);
++    } finally {
++      setBusy(null);
++    }
++  };
++
++  return (
++    <li className="space-y-2 rounded-md border border-[var(--neutral-800)] bg-[var(--neutral-900)] p-2.5">
++      <p className="truncate text-sm text-[var(--neutral-200)]" title={proposal.instruction || undefined}>
++        {proposal.summary || proposal.instruction || "AI edit"}
++      </p>
++
++      {proposal.files?.length > 0 && (
++        <ul className="space-y-1">
++          {proposal.files.map((f) => {
++            const { added, removed } = fileDiffStats(f.original || "", f.proposed || "");
++            return (
++              <li key={f.path} className="flex items-center gap-1.5 text-[11px] text-[var(--neutral-400)]">
++                <span className="truncate">{f.path}</span>
++                {OP_LABELS[f.op] && (
++                  <span className="shrink-0 rounded bg-[var(--neutral-700)] px-1 text-[10px] uppercase tracking-wide text-[var(--neutral-300)]">
++                    {OP_LABELS[f.op]}
++                  </span>
++                )}
++                <span className="flex shrink-0 gap-1 font-mono">
++                  <span className="text-emerald-400">+{added}</span>
++                  <span className="text-red-400">−{removed}</span>
++                </span>
++              </li>
++            );
++          })}
++        </ul>
++      )}
++
++      {/* W5.4 stale banner — editorStore.js's PROPOSAL_FILES_CHANGED sets
++          this from a code_file_updated path match, not a base_hash
++          recompute (see that reducer case's own comment for why). */}
++      {proposal.possiblyStale && (
++        <div className="flex items-center justify-between gap-2 rounded border border-amber-900/60 bg-amber-950/30 px-2 py-1.5 text-[11px] text-amber-300">
++          <span className="flex items-center gap-1.5">
++            <AlertTriangle size={12} className="shrink-0" />
++            File changed since this edit was proposed
++          </span>
++          <span className="flex shrink-0 items-center gap-2.5">
++            <button
++              type="button"
++              onClick={() => run("regenerate", onRegenerate)}
++              disabled={busy != null}
++              className="flex items-center gap-1 underline underline-offset-2 hover:text-amber-200 disabled:opacity-50"
++            >
++              {busy === "regenerate" ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Regenerate
++            </button>
++            <button
++              type="button"
++              onClick={() => onReview?.(proposal)}
++              className="underline underline-offset-2 hover:text-amber-200"
++            >
++              Review anyway
++            </button>
++          </span>
++        </div>
++      )}
++
++      <div className="flex items-center gap-1.5">
++        <button
++          type="button"
++          onClick={() => onReview?.(proposal)}
++          disabled={busy != null}
++          className="flex items-center gap-1 rounded bg-[var(--accent)] px-2 py-1 text-[11px] font-medium text-[var(--accent-text)] hover:opacity-90 disabled:opacity-50"
++        >
++          Review <ChevronRight size={11} />
++        </button>
++        <button
++          type="button"
++          onClick={() => run("keep", onKeepAll)}
++          disabled={busy != null}
++          className="flex items-center gap-1 rounded border border-[var(--neutral-700)] px-2 py-1 text-[11px] text-[var(--neutral-300)] hover:bg-[var(--neutral-800)] disabled:opacity-50"
++        >
++          {busy === "keep" ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />} Keep all
++        </button>
++        <button
++          type="button"
++          onClick={() => run("reject", onReject)}
++          disabled={busy != null}
++          className="flex items-center gap-1 rounded border border-[var(--neutral-700)] px-2 py-1 text-[11px] text-[var(--neutral-400)] hover:bg-[var(--neutral-800)] disabled:opacity-50"
++        >
++          {busy === "reject" ? <Loader2 size={11} className="animate-spin" /> : <X size={11} />} Reject
++        </button>
++      </div>
++    </li>
++  );
++}
++
++/**
++ * @param {object} props
++ * @param {boolean} props.open
++ * @param {() => void} props.onClose
++ * @param {object[]} props.proposals - PENDING proposals only; the caller (EditorWorkbench.jsx) filters
++ * @param {(proposal: object) => void} props.onReview
++ * @param {(proposal: object) => Promise<void>} props.onKeepAll
++ * @param {(proposal: object) => Promise<void>} props.onReject
++ * @param {(proposal: object) => Promise<void>} props.onRegenerate
++ */
++export default function PendingTray({ open, onClose, proposals, onReview, onKeepAll, onReject, onRegenerate }) {
++  return (
++    <ResponsiveSheet
++      open={open}
++      onClose={onClose}
++      maxWidth="max-w-md"
++      className="bg-[var(--neutral-950)] border border-[var(--neutral-700)] shadow-2xl"
++    >
++      <div role="dialog" aria-modal="true" aria-label="Pending changes" className="flex max-h-[70vh] flex-col">
++        <div className="flex items-center justify-between border-b border-[var(--neutral-800)] px-3 py-2">
++          <h2 className="text-sm font-medium text-[var(--neutral-100)]">Pending changes</h2>
++          <button type="button" onClick={onClose} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
++            <X size={14} />
++          </button>
++        </div>
++        <div className="overflow-y-auto p-3">
++          {proposals.length === 0 ? (
++            <p className="py-4 text-center text-xs text-[var(--neutral-500)]">
++              AI-proposed edits waiting for your review will be listed here.
++            </p>
++          ) : (
++            <ul className="space-y-2">
++              {proposals.map((p) => (
++                <ProposalRow
++                  key={p.id}
++                  proposal={p}
++                  onReview={onReview}
++                  onKeepAll={onKeepAll}
++                  onReject={onReject}
++                  onRegenerate={onRegenerate}
++                />
++              ))}
++            </ul>
++          )}
++        </div>
++      </div>
++    </ResponsiveSheet>
++  );
++}
+diff --git a/frontend/app/context/WorkspaceDockContext.jsx b/frontend/app/context/WorkspaceDockContext.jsx
+index 2fe037d..c769e01 100644
+--- a/frontend/app/context/WorkspaceDockContext.jsx
++++ b/frontend/app/context/WorkspaceDockContext.jsx
+@@ -1451,7 +1451,34 @@ export function useWorkspaceDock(workspaceId, chatId = null) {
+     [store, workspaceId]
+   );
+ 
+-  return { key, state, setDockState, sendTask, resumeRun, requestPause, confirmHireReview, cancelHireReview, openScopedSubChat };
++  // NEW — W5.4 (Build Workbench plan). The store-level persistMessage()
++  // (above sendTask, this file's own §3c comment) has always existed,
++  // but nothing calling THIS hook could reach it — every prior caller
++  // either goes through sendTask (a message + a run together) or
++  // persistMessageToSession directly (the run functions above, which
++  // already have a captured sessionId of their own). WorkspaceChatPanel.jsx's
++  // `code_proposal` card is the first caller that wants to persist a
++  // message with no run attached — a proposal is its own resource, not
++  // a chat turn (see sendCodeEditProposal's own header) — so this
++  // follows sendTask's exact wrapper shape: bound to whatever key this
++  // hook already resolved, a no-op when there's none yet.
++  const persistMessage = useCallback(
++    (message) => (key ? store.persistMessage(key, message) : Promise.resolve()),
++    [store, key]
++  );
++
++  return {
++    key,
++    state,
++    setDockState,
++    sendTask,
++    resumeRun,
++    requestPause,
++    confirmHireReview,
++    cancelHireReview,
++    openScopedSubChat,
++    persistMessage,
++  };
+ }
+ 
+ /**
+diff --git a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+index fc416be..4a841cd 100644
+--- a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+@@ -556,6 +556,84 @@ assertEqual(savedOverTruncated.buffers["big.log"].truncated, false, "SAVE_SUCCES
+   );
+ }
+ 
++// --- W5.4: PROPOSALS_LOADED / PROPOSAL_UPSERT / PROPOSAL_STATUS_UPDATE /
++// PROPOSAL_FILES_CHANGED / PROPOSAL_CLEAR_POSSIBLY_STALE ------------------
++{
++  const propA = { id: "prop_a", status: "pending", files: [{ path: "a.py" }] };
++  const propB = { id: "prop_b", status: "pending", files: [{ path: "b.py" }] };
++
++  let st = editorReducer(initialState, { type: "PROPOSALS_LOADED", proposals: [propA, propB] });
++  assertEqual(
++    st.proposals,
++    [{ ...propA, possiblyStale: false }, { ...propB, possiblyStale: false }],
++    "PROPOSALS_LOADED replaces `proposals` wholesale, tagging each with possiblyStale: false"
++  );
++
++  // PROPOSAL_UPSERT: a new id is added at the front...
++  const propC = { id: "prop_c", status: "pending", files: [{ path: "c.py" }] };
++  st = editorReducer(st, { type: "PROPOSAL_UPSERT", proposal: propC });
++  assertEqual(
++    st.proposals.map((p) => p.id),
++    ["prop_c", "prop_a", "prop_b"],
++    "PROPOSAL_UPSERT adds an unknown id at the front"
++  );
++
++  // ...an existing id is replaced in place, and possiblyStale resets.
++  st = editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: ["a.py"] });
++  assertEqual(st.proposals.find((p) => p.id === "prop_a").possiblyStale, true, "PROPOSAL_FILES_CHANGED flags a pending proposal touching the changed path");
++  const resolvedA = { id: "prop_a", status: "accepted", files: [{ path: "a.py" }] };
++  st = editorReducer(st, { type: "PROPOSAL_UPSERT", proposal: resolvedA });
++  assertEqual(
++    st.proposals.map((p) => p.id),
++    ["prop_c", "prop_a", "prop_b"],
++    "PROPOSAL_UPSERT replaces an existing id in place rather than reordering"
++  );
++  assertEqual(st.proposals.find((p) => p.id === "prop_a").status, "accepted", "...with the new status");
++  assertEqual(st.proposals.find((p) => p.id === "prop_a").possiblyStale, false, "...and possiblyStale reset, since a full replace means a fresh row");
++
++  // PROPOSAL_STATUS_UPDATE: a cheap in-place patch, no fetch involved.
++  st = editorReducer(st, { type: "PROPOSAL_STATUS_UPDATE", proposalId: "prop_b", status: "rejected" });
++  assertEqual(st.proposals.find((p) => p.id === "prop_b").status, "rejected", "PROPOSAL_STATUS_UPDATE patches just the status field");
++  assertEqual(
++    editorReducer(st, { type: "PROPOSAL_STATUS_UPDATE", proposalId: "prop_ghost", status: "accepted" }) === st,
++    true,
++    "PROPOSAL_STATUS_UPDATE for an unknown id is a no-op"
++  );
++
++  // PROPOSAL_FILES_CHANGED: only touches PENDING proposals whose files overlap.
++  assertEqual(
++    editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: ["a.py"] }) === st,
++    true,
++    "PROPOSAL_FILES_CHANGED doesn't re-flag an already-resolved proposal (prop_a is accepted, not pending)"
++  );
++  st = editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: ["c.py", "nothing.py"] });
++  assertEqual(st.proposals.find((p) => p.id === "prop_c").possiblyStale, true, "PROPOSAL_FILES_CHANGED flags prop_c via c.py");
++  assertEqual(
++    editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: [] }) === st,
++    true,
++    "PROPOSAL_FILES_CHANGED with no paths is a no-op"
++  );
++  assertEqual(
++    editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: ["c.py"] }) === st,
++    true,
++    "PROPOSAL_FILES_CHANGED is a no-op when the proposal is already flagged"
++  );
++
++  // PROPOSAL_CLEAR_POSSIBLY_STALE: "Review anyway".
++  st = editorReducer(st, { type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId: "prop_c" });
++  assertEqual(st.proposals.find((p) => p.id === "prop_c").possiblyStale, false, "PROPOSAL_CLEAR_POSSIBLY_STALE clears the flag");
++  assertEqual(
++    editorReducer(st, { type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId: "prop_c" }) === st,
++    true,
++    "PROPOSAL_CLEAR_POSSIBLY_STALE is a no-op when the flag is already clear"
++  );
++  assertEqual(
++    editorReducer(st, { type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId: "prop_ghost" }) === st,
++    true,
++    "PROPOSAL_CLEAR_POSSIBLY_STALE for an unknown id is a no-op"
++  );
++}
++
+ if (failures > 0) {
+   console.error(`\n${failures} assertion(s) failed.`);
+   process.exit(1);
+diff --git a/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs b/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
+index 70ae844..ad40c0d 100644
+--- a/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
+@@ -14,6 +14,9 @@ const {
+   reviewFilesFromProposal,
+   decisionForFile,
+   buildDecisions,
++  keepAllDecisions,
++  rejectAllDecisions,
++  fileDiffStats,
+   reviewProgress,
+   dirtyOverlap,
+   unreviewableReason,
+@@ -261,6 +264,59 @@ assertEqual(resolvedMessage("partial"), "Applied part of the AI edit.", "partial
+ assertEqual(resolvedMessage("rejected"), "Discarded the AI edit — nothing was changed.", "rejected");
+ assertEqual(resolvedMessage("something-else"), "Finished reviewing the AI edit.", "an unrecognized status still gets a sensible message");
+ 
++// --- keepAllDecisions / rejectAllDecisions (W5.4) -------------------------
++
++{
++  const proposal = {
++    files: [
++      { path: "a.py", op: "replace", original: "def greet():\n    pass\n", proposed: "def greet():\n    \"\"\"Says hi.\"\"\"\n    pass\n" },
++      { path: "new.py", op: "create", original: "", proposed: "x = 1\n" },
++      { path: "gone.py", op: "delete", original: "old\n", proposed: "" },
++    ],
++  };
++
++  assertEqual(
++    keepAllDecisions(proposal),
++    [
++      { path: "a.py", decision: "keep", finalContent: null },
++      { path: "new.py", decision: "keep", finalContent: null },
++      { path: "gone.py", decision: "keep", finalContent: null },
++    ],
++    "keepAllDecisions keeps every file exactly as proposed, with no finalContent"
++  );
++
++  assertEqual(
++    rejectAllDecisions(proposal),
++    [
++      { path: "a.py", decision: "undo", finalContent: null },
++      { path: "new.py", decision: "undo", finalContent: null },
++      { path: "gone.py", decision: "undo", finalContent: null },
++    ],
++    "rejectAllDecisions undoes every file, including a delete (nothing is removed)"
++  );
++}
++
++// --- fileDiffStats (W5.4) --------------------------------------------------
++
++assertEqual(fileDiffStats("a\nb\nc\n", "a\nb\nc\n"), { added: 0, removed: 0 }, "identical text -> no changes");
++assertEqual(fileDiffStats("", "x = 1\n"), { added: 1, removed: 0 }, "a brand-new file (empty original) is all additions");
++assertEqual(fileDiffStats("old\n", ""), { added: 0, removed: 1 }, "a deleted file (empty proposed) is all removals");
++assertEqual(
++  fileDiffStats("one\ntwo\nthree\nfour\n", "one\nTWO\nTHREE\nfour\n"),
++  { added: 2, removed: 2 },
++  "a changed middle block, same length -> one-for-one added/removed, common prefix/suffix excluded"
++);
++assertEqual(
++  fileDiffStats("one\ntwo\nthree\n", "one\ntwo\nextra\nthree\n"),
++  { added: 1, removed: 0 },
++  "a pure insertion in the middle counts only as added"
++);
++assertEqual(
++  fileDiffStats("one\r\ntwo\r\n", "one\r\ntwo\r\n"),
++  { added: 0, removed: 0 },
++  "CRLF line endings normalize the same way decisionForFile()'s eol() does"
++);
++
+ if (failures > 0) {
+   console.error(`\n${failures} assertion(s) failed.`);
+   process.exit(1);
+diff --git a/frontend/app/lib/workbench/editorStore.js b/frontend/app/lib/workbench/editorStore.js
+index e81a432..f2cd713 100644
+--- a/frontend/app/lib/workbench/editorStore.js
++++ b/frontend/app/lib/workbench/editorStore.js
+@@ -40,11 +40,9 @@
+ // single slot, not keyed by proposal id: only one review is ever open
+ // at a time (it replaces the tabs+editor area — see ReviewPanel.jsx's
+ // own header), and EditorWorkbench.jsx's openFile() guard refuses to
+-// open anything else while it's set. Left `proposals` (still an empty
+-// placeholder) alone — that one's W5.4's cross-session pending tray,
+-// a list of every open proposal regardless of whether it's being
+-// reviewed right now; this is "the one being reviewed right now, and
+-// how far through it we are". Its shape — `{proposalId, instruction,
++// open anything else while it's set. Distinct from `proposals` (W5.4,
++// below) — this is "the one being reviewed right now, and how far
++// through it we are". Its shape — `{proposalId, instruction,
+ // summary, order, files, activePath, submitting, error, stale}` — is
+ // built by reviewMode.js's reviewFilesFromProposal() (order/files) on
+ // REVIEW_OPEN; `files[path]` is `{op, baseVersion, original, proposed,
+@@ -54,6 +52,19 @@
+ // file's own CodeEditor review instance reporting through
+ // REVIEW_FILE_UPDATE (see CodeEditor.jsx's reviewSnapshot()).
+ //
++// W5.4 addition: `proposals` is now populated — the cross-session
++// pending tray (StatusBar.jsx's "Pending changes (N)" chip,
++// PendingTray.jsx). A plain array of proposal rows exactly as GET
++// .../code/proposals returns them, plus one client-only field per row
++// (`possiblyStale`) — see PROPOSALS_LOADED/PROPOSAL_UPSERT/
++// PROPOSAL_STATUS_UPDATE/PROPOSAL_FILES_CHANGED/
++// PROPOSAL_CLEAR_POSSIBLY_STALE below for how it's loaded and kept
++// live. Unlike `review` above (one slot, the proposal actually open
++// for a per-hunk diff), this can hold several proposals at once — one
++// per file being edited, at most, since W5.4 also enforces "one active
++// proposal per file" at creation time (WorkspaceChatPanel.jsx's
++// sendCodeEditProposal).
++//
+ // No JSX here on purpose — every other file directly under `lib/`
+ // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
+ // so the provider component below is written with `createElement`
+@@ -421,6 +432,96 @@ export function editorReducer(state, action) {
+       return { ...initialState, layout: normalizeLayout({ ...current, source }, current) };
+     }
+ 
++    // W5.4: the cross-session pending tray's own source of truth.
++    // `proposals` is populated once at mount from GET
++    // .../code/proposals?status=pending (EditorWorkbench.jsx's own
++    // effect) — "the tray is the source of truth... the proposal
++    // survives closing the tab" (plan §5 W5.4) — a full replace, not a
++    // merge: this is the one point where the tray's contents are
++    // trusted to be exactly what the server says is pending right now.
++    // `possiblyStale` (client-only — never a field the server sends)
++    // starts false for everything just loaded; see
++    // PROPOSAL_FILES_CHANGED below for what sets it.
++    case "PROPOSALS_LOADED": {
++      const proposals = (action.proposals || []).map((p) => ({ ...p, possiblyStale: false }));
++      return { ...state, proposals };
++    }
++
++    // A proposal was created (CODE_PROPOSAL_READY, from this tab's own
++    // sendCodeEditProposal or another tab/session entirely) or just
++    // resolved with the FULL updated row already in hand (a local Keep
++    // all / Reject / Regenerate — PendingTray.jsx's own buttons — whose
++    // resolveProposal()/createProposal() response is exactly this
++    // shape). Replaces the existing entry by id, or adds it at the
++    // front if this tab has never heard of it before. `possiblyStale`
++    // always resets to false on a full replace: a proposal that just
++    // (re)entered `pending` was, by definition, generated against
++    // whatever the file looks like right now.
++    case "PROPOSAL_UPSERT": {
++      const proposal = { ...action.proposal, possiblyStale: false };
++      const idx = state.proposals.findIndex((p) => p.id === proposal.id);
++      const proposals =
++        idx === -1
++          ? [proposal, ...state.proposals]
++          : state.proposals.map((p, i) => (i === idx ? proposal : p));
++      return { ...state, proposals };
++    }
++
++    // CODE_PROPOSAL_RESOLVED's own payload is ids/status only (plan
++    // §7.2's Pusher byte cap, same reasoning CODE_FILE_UPDATED's own
++    // payload follows) — cheaper to patch the one field a proposal
++    // resolved ELSEWHERE (ReviewPanel.jsx's Done, another tab's tray)
++    // needs updated here than to re-fetch a full row this tab may not
++    // even be showing. A status update for a proposal id this tab has
++    // never heard of is a no-op — there's nothing here worth inventing
++    // a placeholder row for.
++    case "PROPOSAL_STATUS_UPDATE": {
++      const { proposalId, status } = action;
++      const idx = state.proposals.findIndex((p) => p.id === proposalId);
++      if (idx === -1) return state;
++      const proposals = state.proposals.slice();
++      proposals[idx] = { ...proposals[idx], status };
++      return { ...state, proposals };
++    }
++
++    // W5.4's proactive staleness signal. eo/code_proposals.py's
++    // base_hash is display-only — the thing that actually blocks a
++    // stale write is base_version, checked only when someone ACTUALLY
++    // tries to resolve (resolve_proposal()'s own Phase 1) — so there is
++    // no "did this change" value to poll ahead of time, and nothing
++    // here tries to recompute one. What's already flowing into this
++    // component either way is exactly the event the plan names as the
++    // trigger: `code_file_updated` naming a path (EditorWorkbench.jsx's
++    // own `provider.subscribe` effect). Any PENDING proposal touching
++    // one of those paths gets flagged. A false positive (the file was
++    // saved back byte-identical) just shows a dismissible banner; a
++    // false negative isn't possible, since resolve() still catches a
++    // real version mismatch regardless of whether this was ever set.
++    case "PROPOSAL_FILES_CHANGED": {
++      const changed = new Set(action.filePaths || []);
++      if (changed.size === 0) return state;
++      let touched = false;
++      const proposals = state.proposals.map((p) => {
++        if (p.status !== "pending" || p.possiblyStale) return p;
++        if (!(p.files || []).some((f) => changed.has(f.path))) return p;
++        touched = true;
++        return { ...p, possiblyStale: true };
++      });
++      return touched ? { ...state, proposals } : state;
++    }
++
++    // "Review anyway" on the stale banner acknowledges it without
++    // necessarily having resolved anything (Regenerate doesn't need
++    // this — replacing the row via PROPOSAL_UPSERT already resets the
++    // flag on its own).
++    case "PROPOSAL_CLEAR_POSSIBLY_STALE": {
++      const idx = state.proposals.findIndex((p) => p.id === action.proposalId);
++      if (idx === -1 || !state.proposals[idx].possiblyStale) return state;
++      const proposals = state.proposals.slice();
++      proposals[idx] = { ...proposals[idx], possiblyStale: false };
++      return { ...state, proposals };
++    }
++
+     default:
+       return state;
+   }
+@@ -468,6 +569,12 @@ export function EditorStoreProvider({ children, initialLayout }) {
+       reviewSubmitting: (submitting) => dispatch({ type: "REVIEW_SUBMITTING", submitting }),
+       reviewError: (error, stale) => dispatch({ type: "REVIEW_ERROR", error, stale }),
+       reviewClose: () => dispatch({ type: "REVIEW_CLOSE" }),
++      // W5.4
++      proposalsLoaded: (proposals) => dispatch({ type: "PROPOSALS_LOADED", proposals }),
++      proposalUpsert: (proposal) => dispatch({ type: "PROPOSAL_UPSERT", proposal }),
++      proposalStatusUpdate: (proposalId, status) => dispatch({ type: "PROPOSAL_STATUS_UPDATE", proposalId, status }),
++      proposalFilesChanged: (filePaths) => dispatch({ type: "PROPOSAL_FILES_CHANGED", filePaths }),
++      proposalClearPossiblyStale: (proposalId) => dispatch({ type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId }),
+     }),
+     [dispatch]
+   );
+diff --git a/frontend/app/lib/workbench/reviewMode.js b/frontend/app/lib/workbench/reviewMode.js
+index c9be20e..a56df5b 100644
+--- a/frontend/app/lib/workbench/reviewMode.js
++++ b/frontend/app/lib/workbench/reviewMode.js
+@@ -137,6 +137,83 @@ export function buildDecisions(review) {
+   });
+ }
+ 
++/**
++ * Every file kept exactly as proposed — W5.4's "Keep all" quick action
++ * (PendingTray.jsx's tray row, CodeProposalCard.jsx's chat card) for a
++ * proposal nobody has opened a per-hunk review for. reviewFilesFromProposal()
++ * already seeds every file's `current` as its proposed text (see that
++ * function's own doc comment), which is exactly buildDecisions()'s
++ * "whole proposal survived → keep, no finalContent" case — this just
++ * names that shortcut so a caller with no open `review` slice can reach
++ * the identical decisions ReviewPanel.jsx's own Keep-all button would
++ * produce on an untouched review.
++ *
++ * @param {{files?: object[]}} proposal
++ * @returns {{path:string, decision:"keep"|"undo", finalContent:string|null}[]}
++ */
++export function keepAllDecisions(proposal) {
++  return buildDecisions(reviewFilesFromProposal(proposal));
++}
++
++/**
++ * The opposite quick action — every file undone, nothing written to
++ * disk. decisionForFile() only reaches "undo" when the final text
++ * equals the file's ORIGINAL text, so this overrides every file's
++ * `current` back to `original` before calling buildDecisions() (the
++ * default `current` reviewFilesFromProposal() seeds is the proposed
++ * text — Keep all's shape, not this one's). Safe to call on a proposal
++ * that's already gone stale: resolve_proposal() only checks
++ * base_version for a "keep" decision (see that function's own Phase 1),
++ * so an all-"undo" resolve never trips ProposalStaleError.
++ *
++ * @param {{files?: object[]}} proposal
++ * @returns {{path:string, decision:"keep"|"undo", finalContent:string|null}[]}
++ */
++export function rejectAllDecisions(proposal) {
++  const review = reviewFilesFromProposal(proposal);
++  for (const path of review.order) {
++    review.files[path] = { ...review.files[path], current: review.files[path].original };
++  }
++  return buildDecisions(review);
++}
++
++/**
++ * Lines added/removed between two whole-file texts — the file-list
++ * "+N −M" badge PendingTray.jsx and CodeProposalCard.jsx (W5.4) both
++ * need BEFORE any editor exists to ask chunkLineStats() (above) for
++ * real merge-view chunks; both only ever have the proposal's own
++ * stored `original`/`proposed` strings to work from.
++ *
++ * Not a general-purpose diff: trims the common prefix and common
++ * suffix lines, then counts everything left in the middle as one
++ * replaced block — `removed` lines from `original`, `added` lines from
++ * `proposed`, the same convention chunkLineStats() applies to a single
++ * merge-view chunk. Right whenever the edit is one contiguous changed
++ * region, which is the overwhelmingly common shape for a targeted AI
++ * edit; can over-count on a genuinely interleaved edit (lines
++ * reordered, several separate untouched stretches inside the changed
++ * region) — acceptable for a summary badge that a real per-hunk review
++ * (ReviewPanel.jsx, once the file is actually open) already supersedes.
++ *
++ * @param {string} original
++ * @param {string} proposed
++ * @returns {{added:number, removed:number}}
++ */
++export function fileDiffStats(original, proposed) {
++  const a = eol(original).split("\n");
++  const b = eol(proposed).split("\n");
++  let start = 0;
++  const maxStart = Math.min(a.length, b.length);
++  while (start < maxStart && a[start] === b[start]) start++;
++  let endA = a.length;
++  let endB = b.length;
++  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
++    endA--;
++    endB--;
++  }
++  return { added: endB - start, removed: endA - start };
++}
++
+ /**
+  * How far along a review is. `ready` is false until every file's editor
+  * has reported at least once (`remaining` is null before that);

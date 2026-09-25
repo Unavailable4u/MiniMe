@@ -129,6 +129,18 @@ def _namespaced(key: str) -> str:
             # this were namespaced, the stream endpoint's read() would land in
             # the wrong (or default/global) namespace and silently miss, same
             # failure mode paused_execution: was exempted to avoid.
+            or key.startswith("run_guard:")   # NEW — audit fix 2026-09-25:
+            # cancel flags / failure-breaker / token-budget counters are a
+            # property of the SESSION and are written from one request
+            # context (e.g. the HTTP deadline handler, the cancel endpoint)
+            # and read from another (the worker thread that runs under the
+            # task's own app_slug). Same failure mode as paused_execution:.
+            or key.startswith("pause_requested:")   # NEW — audit fix 2026-09-25:
+            # POST /api/task/pause writes this from a fresh request (no
+            # set_app_slug() context -> falls back to the persisted GLOBAL
+            # slug) while _run_loop()/_interruptible_sleep() read it under
+            # the run's own slug. Different Redis keys -> the UI's Pause
+            # button could never reach the running task.
             or key.startswith("scratchpad:")   # NEW — Patch B7 (§3.5):
             # same exemption, same reasoning as paused_execution:/conversation:
             # above -- a task's ephemeral working notes are a property of the

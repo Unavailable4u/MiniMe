@@ -916,7 +916,15 @@ def _set_ledger_cooldown(provider: str, key_id: str, wait_seconds: float) -> Non
         print(f"  [llm_client] ledger cooldown write failed (non-fatal): {write_exc}")
 
 
-def _is_cooling_down(provider: str, key_id: str) -> bool:
+def _model_cooldown_id(key_id: str, model: str) -> str:
+    """Audit fix 2026-09-25: rate-limit / zero-quota cooldowns are recorded per
+    (key, MODEL). Groq's TPM and Gemini's quota are per model, so cooling down
+    the whole key because gpt-oss-120b was busy would also (wrongly) skip
+    qwen/gpt-oss-20b on the same key. 401/403 cooldowns stay key-wide."""
+    return f"{key_id}::{model}"
+
+
+def _is_cooling_down(provider: str, key_id: str, model: str = None) -> bool:
     """Reads cooldown_until:{provider}:{key_id} straight off the bus --
     the same key _set_cooldown() above writes on every transient/
     permanent-error failure, and the same key eo/panel.py's
@@ -941,11 +949,15 @@ def _is_cooling_down(provider: str, key_id: str) -> bool:
     """
     try:
         cooldown_until = bus_read(f"cooldown_until:{provider}:{key_id}", default=None)
+        model_cooldown_until = (
+            bus_read(f"cooldown_until:{provider}:{_model_cooldown_id(key_id, model)}", default=None)
+            if model else None)
     except Exception:
         return False
-    if not cooldown_until:
-        return False
-    return cooldown_until > datetime.now(UTC).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
+    if cooldown_until and cooldown_until > now_ts:
+        return True
+    return bool(model_cooldown_until and model_cooldown_until > now_ts)
 
 
 _client_cache = {}
@@ -1892,6 +1904,15 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
     tokens = _extract_total_tokens(usage)
     log_usage(provider, key_id, tokens, session_id=session_id, tier=tier, path=path,
               agent_name=agent_name, domain=domain, model=model)
+    # Audit fix 2026-09-25: feed the per-run token budget (eo/run_guard.py) with
+    # the REAL usage the provider reported, so a run can pause and ask for
+    # permission once it has spent its allowance -- see run_guard's docstring.
+    if session_id and tokens:
+        try:
+            from eo import run_guard
+            run_guard.add_tokens(session_id, tokens)
+        except Exception as _rg_exc:
+            print(f"  [llm_client] run_guard token accounting failed (non-fatal): {_rg_exc}")
 
 
 # --------------------------------------------------------------------------
@@ -2140,6 +2161,10 @@ def _probe_usage_shape(provider: str, model: str, usage, agent_name: str) -> Non
               f"probe raised {exc!r} while inspecting usage; ignoring.")
 
 
+# Audit fix 2026-09-25 -- cooldown bounds used by the no-sleep rate-limit path.
+_RATE_LIMIT_COOLDOWN_MIN_SECONDS = float(os.getenv("LLM_RATE_LIMIT_COOLDOWN_MIN", "15"))
+_RATE_LIMIT_COOLDOWN_MAX_SECONDS = float(os.getenv("LLM_RATE_LIMIT_COOLDOWN_MAX", "120"))
+_ZERO_QUOTA_COOLDOWN_SECONDS = float(os.getenv("LLM_ZERO_QUOTA_COOLDOWN", "3600"))
 _MAX_RATE_LIMIT_RETRIES = 5  # Bug fix (2026-08-25 CI hang): cap how many
 # times a single chain step will sleep-and-retry-in-place on
 # RATE_LIMIT_WINDOW before giving up. Mirrors _MAX_REQUEST_TOO_LARGE_RETRIES
@@ -2450,6 +2475,21 @@ class ShutdownRequested(Exception):
     pass
 
 
+class RunStopped(ShutdownRequested):
+    """Audit fix 2026-09-25. Raised when eo/run_guard.py says this session must
+    stop NOW: an explicit cancel (HTTP deadline hit, user pressed stop) or the
+    hard token ceiling. Subclasses ShutdownRequested on purpose -- every
+    existing `except ShutdownRequested` (api/routes/tasks.py, the executor's
+    role-boundary check) already turns that into a clean 'cancelled' response
+    instead of a 500, and none of the per-role degrade handlers
+    (`except ChainExhaustedError/RuntimeError`) will swallow it, so a stopped
+    run really does stop instead of being recorded as one more failed role."""
+
+    def __init__(self, message: str = "run stopped", reason: str = "stopped"):
+        super().__init__(message)
+        self.reason = reason
+
+
 class PauseRequestedMidRetry(Exception):
     """NEW — Patch 7 (fixes audit #2). Raised from _interruptible_sleep()
     when a session's pause_requested:{session_id} bus flag gets set
@@ -2537,7 +2577,7 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
             if not os.getenv(step["key_env"]):
                 continue
             key_id = step["key_env"]
-        if _is_cooling_down(provider, key_id):
+        if _is_cooling_down(provider, key_id, model):
             continue
         step_max_tokens = _max_tokens_for(provider, model, step)
         ok, wait = rate_ledger.can_proceed(provider, key_id, model, estimated_tokens,
@@ -2555,7 +2595,15 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
 # waiting at all before giving up entirely" -- and tuning one shouldn't
 # silently retune the other. Configurable per the plan's own "e.g.
 # 30-60s" framing; 45s splits the difference.
-_EXHAUSTIVE_WAIT_CAP_SECONDS = 45.0
+#
+# Audit fix 2026-09-25: DEFAULT IS NOW 0 (never sleep). Waiting 45s for a
+# rate-limit window to reset just to re-run a chain that is already exhausted
+# stalled every role for a minute+ (and, stacked across roles, blew through the
+# 300s request deadline). Rate-limited keys are cooled down and skipped
+# instantly (see _handle_transient_error), so an exhausted chain now fails fast
+# and the NEXT call automatically picks the keys back up as their cooldowns
+# expire. Set LLM_CHAIN_EXHAUSTION_WAIT_SECONDS>0 to restore the old behaviour.
+_EXHAUSTIVE_WAIT_CAP_SECONDS = float(os.getenv("LLM_CHAIN_EXHAUSTION_WAIT_SECONDS", "0"))
 
 
 def _chain_exhaustion_wait(chain: list, estimated_tokens: int, step_buckets: set,
@@ -2606,6 +2654,8 @@ def _chain_exhaustion_wait(chain: list, estimated_tokens: int, step_buckets: set
         real data showing mixed-bucket exhaustion is common enough to
         be worth a more granular (per-step, not whole-chain) verdict.
     """
+    if _EXHAUSTIVE_WAIT_CAP_SECONDS <= 0:
+        return False   # fail fast -- see _EXHAUSTIVE_WAIT_CAP_SECONDS
     if step_buckets != {ErrorBucket.RATE_LIMIT_WINDOW}:
         return False
 
@@ -2739,72 +2789,33 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
               f"step already has headroom, rerouting immediately "
               f"instead of waiting.")
         return "reroute", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
-    # Bug fix (2026-08-27, unwinnable-step fast-fail): nothing else in the
-    # chain has headroom either (we're past the "reroute" branch above),
-    # so we're about to enter the retry-in-place loop below -- but if this
-    # step's own estimated input plus its resolved max_tokens ceiling
-    # already exceeds the model's entire tpm budget, no amount of waiting
-    # for someone else's usage to age out of the sliding window can ever
-    # produce headroom; every one of the retries below would just re-hit
-    # the same structural wall. Fail immediately with a diagnostic that
-    # says so, instead of spending the full _MAX_LEDGER_WAIT_RETRIES /
-    # _MAX_LEDGER_WAIT_BUDGET_SECONDS budget finding that out the slow way.
+    # Structural wall: this step's own input + completion budget can never fit
+    # under the model's per-minute ceiling. Caller catches this and moves on to
+    # the next chain step (or raises ChainExhaustedError if it was the last).
     if rate_ledger.exceeds_tpm_ceiling(provider, model, _estimated_tokens, max_tokens):
         print(f"  [{agent_name}] {label} needs ~{_estimated_tokens} "
               f"estimated input tokens + {max_tokens or 0} max output "
               f"tokens, which alone exceeds this model's tpm ceiling -- "
-              f"this call can never fit regardless of concurrent usage, "
-              f"failing fast instead of retrying.")
+              f"skipping this step.")
         raise _StepUnwinnableError(
             f"{label} cannot fit under its tpm ceiling: ~{_estimated_tokens} "
             f"estimated input tokens + {max_tokens or 0} max output tokens "
             f"exceeds the model's per-minute token budget on its own. "
-            f"Reduce this step's prompt size, lower its max_tokens, or "
-            f"give it a higher-tpm fallback earlier in the chain."
+            f"Reduce this step's prompt size, or give it a higher-tpm "
+            f"fallback earlier in the chain."
         )
-    # Bug fix (2026-08-27, ledger-gate hang): same two-part cap the
-    # RATE_LIMIT_WINDOW handler already has -- see _MAX_LEDGER_WAIT_RETRIES'
-    # own comment for why this branch never had one before now.
-    if same_step_ledger_waits >= _MAX_LEDGER_WAIT_RETRIES:
-        print(f"  [{agent_name}] {label} still has no headroom for "
-              f"~{_estimated_tokens} estimated tokens after "
-              f"{_MAX_LEDGER_WAIT_RETRIES} in-place waits, and nothing "
-              f"else in the chain has headroom -- giving up on this "
-              f"call instead of retrying forever.")
-        raise RuntimeError(
-            f"{label} exhausted {_MAX_LEDGER_WAIT_RETRIES} pre-flight "
-            f"ledger-wait retries with no reroute headroom available "
-            f"(~{_estimated_tokens} estimated tokens each attempt)"
-        )
-    _remaining_budget = _MAX_LEDGER_WAIT_BUDGET_SECONDS - same_step_ledger_wait_elapsed
-    if _remaining_budget <= 0:
-        print(f"  [{agent_name}] {label} still has no headroom for "
-              f"~{_estimated_tokens} estimated tokens after "
-              f"{same_step_ledger_wait_elapsed:.1f}s spent waiting "
-              f"(budget {_MAX_LEDGER_WAIT_BUDGET_SECONDS:.0f}s), and "
-              f"nothing else in the chain has headroom -- giving up on "
-              f"this call instead of continuing to wait.")
-        raise RuntimeError(
-            f"{label} exceeded the {_MAX_LEDGER_WAIT_BUDGET_SECONDS:.0f}s "
-            f"pre-flight ledger-wait budget with no reroute headroom "
-            f"available (~{_estimated_tokens} estimated tokens)"
-        )
-    _wait_seconds = min(_wait_seconds, _remaining_budget)
-    same_step_ledger_waits += 1
-    print(f"  [{agent_name}] {label} has no headroom for "
-          f"~{_estimated_tokens} estimated tokens, and neither does "
-          f"anything else remaining in the chain -- sleeping "
-          f"{_wait_seconds:.1f}s (suggested {_ledger_wait:.1f}s, capped "
-          f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
-          f"in place (attempt {same_step_ledger_waits}/{_MAX_LEDGER_WAIT_RETRIES})...")
-    # Bug fix (2026-08-27): was a bare time.sleep(), which neither
-    # Ctrl+C's request_shutdown() nor the UI's per-session Pause button
-    # could ever interrupt -- this is the actual reason Pause/Ctrl+C did
-    # nothing while a step sat here retrying. _interruptible_sleep()
-    # checks both every 0.5s, same as the RATE_LIMIT_WINDOW branch below.
-    _interruptible_sleep(_wait_seconds, session_id=session_id)
-    same_step_ledger_wait_elapsed += _wait_seconds
-    return "waited-retry", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
+    # Audit fix 2026-09-25 (no-sleep policy): this used to sleep up to
+    # _LEDGER_WAIT_CAP_SECONDS x _MAX_LEDGER_WAIT_RETRIES (45s budget) retrying the
+    # SAME step in place whenever nothing later in the chain had headroom.
+    # Sleeping is pure wasted wall-clock: the ledger already knows this step is
+    # full, so just skip it. The reservation was never booked, nothing is
+    # cooled down, and the very next call re-checks this step on its own merits
+    # -- "we have fallbacks, we automatically get back to it". If this was the
+    # last step the caller falls off the end of the chain and fails fast.
+    print(f"  [{agent_name}] {label} has no headroom for ~{_estimated_tokens} "
+          f"estimated tokens (suggested wait {_ledger_wait:.1f}s) -- skipping "
+          f"to the next chain step instead of sleeping.")
+    return "reroute", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
 
 
 def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_headers,
@@ -3115,83 +3126,29 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                   f"-- falling back to next in chain...")
             return ("next-step", user_content, accumulated_text, same_step_shrinks,
                     same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
-        # Phase 3d: an org-scoped, time-windowed quota problem is never a
-        # size problem -- never shrink the prompt here (see llm_errors.py's
-        # recovery table). Route back through 3b's reroute-vs-bounded-wait
-        # decision instead of the old blind "fall through to next step"
-        # dispatch. _retry_after_seconds(exc) (the provider's own
-        # Retry-After / "try again in Xs" signal for THIS failure) stands
-        # in for the pre-flight can_proceed() wait estimate 3b normally
-        # feeds _decide_ledger_action() with.
-        _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
-        _action, _wait_seconds = _decide_ledger_action(
-            chain, index, _retry_after_seconds(exc), _estimated_tokens)
-        if _action == "reroute":
-            print(f"  [{agent_name}] {label} hit a rate-limit window "
-                  f"({exc.__class__.__name__}) -- a later chain step "
-                  f"already has headroom, rerouting immediately instead "
-                  f"of waiting.")
-            _record_ledger_event(session_id, "reroute")
-            return ("next-step", user_content, accumulated_text, same_step_shrinks,
-                    same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
-        # Bug fix (2026-08-25): bounded retry cap, same shape as
-        # CONTEXT_LENGTH_EXCEEDED's same_step_shrinks cap above. Without
-        # this, a chain step with no reroute headroom anywhere ahead of
-        # it (guaranteed on a single-step chain, e.g. provider_override
-        # pinning one provider/model) hits the "wait" branch below every
-        # single time and loops forever -- see _MAX_RATE_LIMIT_RETRIES'
-        # docstring for the CI incident this traces back to.
-        if same_step_rate_limit_waits >= _MAX_RATE_LIMIT_RETRIES:
-            print(f"  [{agent_name}] {label} still rate-limited "
-                  f"({exc.__class__.__name__}) after "
-                  f"{_MAX_RATE_LIMIT_RETRIES} in-place waits, and nothing "
-                  f"else in the chain has headroom -- giving up on this "
-                  f"call instead of retrying forever.")
-            raise RuntimeError(
-                f"{label} exhausted {_MAX_RATE_LIMIT_RETRIES} rate-limit "
-                f"retries with no reroute headroom available "
-                f"(last error: {exc.__class__.__name__}: {exc})"
-            ) from exc
-        # Bug fix (2026-08-25, CI hang part 2): second, independent
-        # ceiling -- checked BEFORE this step's next sleep -- on total
-        # wall-clock time already spent sleeping on this step, so a step
-        # that hasn't hit _MAX_RATE_LIMIT_RETRIES yet still can't oversleep
-        # its wait budget (see _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS' own
-        # comment for why: 5 retries * a 20s cap each is up to 100s, long
-        # enough to blow through external harness timeouts with zero
-        # diagnostic info instead of this clean, immediate RuntimeError).
-        _remaining_budget = _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS - same_step_rate_limit_elapsed
-        if _remaining_budget <= 0:
-            print(f"  [{agent_name}] {label} still rate-limited "
-                  f"({exc.__class__.__name__}) after "
-                  f"{same_step_rate_limit_elapsed:.1f}s spent waiting "
-                  f"(budget {_MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS:.0f}s), and "
-                  f"nothing else in the chain has headroom -- giving up on "
-                  f"this call instead of continuing to wait.")
-            raise RuntimeError(
-                f"{label} exceeded the {_MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS:.0f}s "
-                f"rate-limit wait budget with no reroute headroom available "
-                f"(last error: {exc.__class__.__name__}: {exc})"
-            ) from exc
-        # Patch G2: cap this wait to whatever's left of the budget instead
-        # of always sleeping the full ledger-suggested duration -- keeps
-        # total elapsed sleep from ever exceeding the stated budget.
-        _wait_seconds = min(_wait_seconds, _remaining_budget)
-        same_step_rate_limit_waits += 1
-        # 3e: no headroom anywhere in the remaining chain -- this is the
-        # one RATE_LIMIT_WINDOW case that DOES cool this key down, using
-        # the ledger's own short wait figure rather than _set_cooldown()'s
-        # exception-derived duration.
-        _set_ledger_cooldown(provider, key, _wait_seconds)
-        print(f"  [{agent_name}] {label} hit a rate-limit window "
-              f"({exc.__class__.__name__}), and neither does anything "
-              f"else remaining in the chain -- sleeping "
-              f"{_wait_seconds:.1f}s before retrying {label} in place "
-              f"(attempt {same_step_rate_limit_waits}/{_MAX_RATE_LIMIT_RETRIES})...")
-        _record_ledger_event(session_id, "wait")
-        _interruptible_sleep(_wait_seconds, session_id=session_id)   # CHANGED — Patch 7: now pause-aware too
-        same_step_rate_limit_elapsed += _wait_seconds
-        return ("retry-in-place", user_content, accumulated_text, same_step_shrinks,
+        # Audit fix 2026-09-25 (no-sleep policy). A rate limit / quota error on
+        # THIS key must never make the caller wait. Cool the key down for as
+        # long as the provider says (bounded), then move to the next chain step
+        # IMMEDIATELY. Because the cooldown is recorded, every later call skips
+        # this key without even trying it, and picks it up again on its own as
+        # soon as the cooldown expires -- no sleeping, no retry-in-place.
+        from utils.llm_errors import is_zero_quota
+        if is_zero_quota(exc):
+            # Provider says our quota on this model/region is ZERO (e.g. Gemini
+            # free tier not granted): a rolling window never resets, so park
+            # the key for a long time instead of re-probing it every call.
+            _cooldown_seconds = _ZERO_QUOTA_COOLDOWN_SECONDS
+            _why = "zero quota granted"
+        else:
+            _cooldown_seconds = max(
+                _RATE_LIMIT_COOLDOWN_MIN_SECONDS,
+                min(float(_retry_after_seconds(exc)), _RATE_LIMIT_COOLDOWN_MAX_SECONDS))
+            _why = f"rate-limit window, cooling down ~{_cooldown_seconds:.0f}s"
+        _set_ledger_cooldown(provider, _model_cooldown_id(key, model), _cooldown_seconds)
+        print(f"  [{agent_name}] {label} (key {key}) hit {exc.__class__.__name__} ({_why}) -- "
+              f"moving to the next chain step immediately (no sleep).")
+        _record_ledger_event(session_id, "reroute")
+        return ("next-step", user_content, accumulated_text, same_step_shrinks,
                 same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
     if _bucket == ErrorBucket.MALFORMED_REQUEST:
         # Our own payload is wrong. Never retry unchanged -- retrying
@@ -3214,7 +3171,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
         # block regardless of bucket.
         _set_cooldown(provider, key, exc)
         if not is_last:
-            print(f"  [{agent_name}] {label} failed with a permanent "
+            print(f"  [{agent_name}] {label} (key {key}) failed with a permanent "
                   f"auth error ({exc.__class__.__name__}) -- pulling it "
                   f"from rotation for this chain and falling back to "
                   f"next in chain...")
@@ -3322,6 +3279,24 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             _continuation_prompt(user_content, accumulated_text)
             if accumulated_text else user_content
         )
+        # Audit fix 2026-09-25: (a) hard-stop check -- an orphaned worker whose
+        # HTTP request already timed out / was cancelled, or a run past its HARD
+        # token ceiling, must stop here instead of spending more quota; (b) size
+        # this call's completion budget from its ACTUAL prompt so input + output
+        # fits the model's per-minute ceiling (root cause #1: the flat
+        # `tpm - 1500` cap made every prompt over ~1,500 tokens unwinnable on
+        # 8K-TPM Groq models).
+        if session_id:
+            from eo import run_guard
+            run_guard.raise_if_stopped(session_id)
+        _est_in_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
+        _clamped_max_tokens = rate_ledger.clamp_max_output_tokens(
+            provider, model, _est_in_tokens, max_tokens)
+        if _clamped_max_tokens != max_tokens:
+            print(f"  [{agent_name}] {label} max_tokens {max_tokens} -> "
+                  f"{_clamped_max_tokens} (sized for ~{_est_in_tokens} input tokens "
+                  f"under the model's per-minute ceiling)")
+            max_tokens = _clamped_max_tokens
         try:
             _gate, _reservation_id, same_step_ledger_waits, same_step_ledger_wait_elapsed = _ledger_gate(
                 chain, index, provider, key, model,
@@ -3585,7 +3560,7 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
                 continue
             key_id = account_id_env  # what identifies this "account" in the usage dashboard
             label = f"cloudflare:{model}"
-            if _is_cooling_down(provider, key_id):
+            if _is_cooling_down(provider, key_id, model):
                 print(f"  [{agent_name}] {label} skipped — still cooling down "
                       f"(see cooldown_until:{provider}:{key_id}).")
                 continue
@@ -3637,7 +3612,7 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
 
         label = f"{provider}:{model}"
-        if _is_cooling_down(provider, key_env):
+        if _is_cooling_down(provider, key_env, model):
             print(f"  [{agent_name}] {label} skipped — still cooling down "
                   f"(see cooldown_until:{provider}:{key_env}).")
             continue
@@ -4005,7 +3980,7 @@ async def _walk_chain_once_stream(system_prompt: str, user_content: str, chain: 
             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
 
         label = f"{provider}:{model}"
-        if _is_cooling_down(provider, key_env):
+        if _is_cooling_down(provider, key_env, model):
             print(f"  [{agent_name}] {label} skipped — still cooling down "
                   f"(see cooldown_until:{provider}:{key_env}).")
             continue

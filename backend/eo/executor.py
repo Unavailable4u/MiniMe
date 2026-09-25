@@ -72,6 +72,7 @@ from utils.error_sanitizer import user_facing_message
 from utils.llm_client import ChainExhaustedError
 from utils.llm_client import PauseRequestedMidRetry  # NEW — Patch 7
 from utils.llm_client import ShutdownRequested, shutdown_requested  # NEW — Bug fix 2026-08-27 (Ctrl+C audit)
+from eo import run_guard  # NEW — audit fix 2026-09-25: cancel flag / failure breaker / token budget
 
 # D1 audit fix -- these print()s were the only signal a Langfuse span
 # failed to open/close; grep-able marker (TRACE_EXPORT_FAILED) added so
@@ -864,6 +865,11 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         if shutdown_requested():
             raise ShutdownRequested(
                 f"shutdown requested before dispatching role {role_names[idx]!r}")
+        # Audit fix 2026-09-25: an orphaned run (HTTP deadline hit / user
+        # cancelled) or one past its HARD token ceiling must not dispatch
+        # another role. Raises RunStopped (a ShutdownRequested) -> tasks.py
+        # returns a clean "cancelled" response.
+        run_guard.raise_if_stopped(session_id)
         # Migration Part 2 §2.6: a group (role_names[idx] is a list, not
         # a str) is handled entirely separately from the single-role
         # dispatch below — see _run_concurrent_group()'s own docstring
@@ -1330,7 +1336,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     "app_slug": get_current_app_slug(),
                 }
                 write(f"paused_execution:{session_id}", snapshot)
-                return {"status": "paused", "paused_at_role": role}
+                return {"status": "paused", "paused_at_role": role, "reason": "manual_pause"}
             except ChainExhaustedError as exc:
                 # Phase 6b (fixes Bug 5): every provider in THIS role's
                 # fallback chain was genuinely tried and failed — degrade
@@ -1362,6 +1368,14 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
             # would otherwise silently overwrite itself across multiple
             # generic_worker hires in the same plan.
             results[role] = result
+            # Audit fix 2026-09-25: failure circuit breaker. A run whose roles
+            # keep failing (rate limits, dead keys, oversized prompts...) used
+            # to grind through the ENTIRE graph, then the macro-loop re-ran it.
+            # N consecutive / M total failures now trips the breaker and the
+            # pause block below stops the run and asks the user.
+            _breaker_reason = (
+                run_guard.record_role_outcome(session_id, ok=not role_failed, role=role)
+                if session_id else None)
             # CHANGED — perf audit follow-up: duration_ms was already
             # computed on the line above (and already sent to the event
             # bus/Langfuse a few lines down via `payload`), it just never
@@ -1375,16 +1389,17 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 except Exception as trace_exc:
                     print(f"  [executor] Langfuse role span failed to update "
                           f"output for role={role!r} (non-fatal): {trace_exc}")
-        if not role_failed:
-            image = _extract_image(result)
-            # Text budget shrinks when an image rides along in the same
-            # event, so the two together still fit Pusher's ~10KB cap
-            # (image is capped separately at MAX_IMAGE_DATA_URI_CHARS above).
-            summary_limit = 9000 - len(image) if image else 9000
-            payload = {"summary": _summarize(result, role=role, limit=summary_limit), "duration_ms": duration_ms}
-            if image:
-                payload["image"] = image
-            emit_event("agent_done", session_id=session_id, agent=current_name, path=path, payload=payload)
+        if not role_failed or _breaker_reason:
+            if not role_failed:
+                image = _extract_image(result)
+                # Text budget shrinks when an image rides along in the same
+                # event, so the two together still fit Pusher's ~10KB cap
+                # (image is capped separately at MAX_IMAGE_DATA_URI_CHARS above).
+                summary_limit = 9000 - len(image) if image else 9000
+                payload = {"summary": _summarize(result, role=role, limit=summary_limit), "duration_ms": duration_ms}
+                if image:
+                    payload["image"] = image
+                emit_event("agent_done", session_id=session_id, agent=current_name, path=path, payload=payload)
 
             # Human-in-the-loop pause point. See this function's own
             # docstring above for exactly what state has and hasn't advanced
@@ -1417,11 +1432,19 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
             # its numbers are real if a future caller wants them), it
             # just never reaches the point of pausing on it.
             budget_exceeded = False
+            token_exceeded = False
             if session_id:
-                budget_increment(session_id)
-                budget_exceeded = tab == "chat" and budget_over_threshold(session_id)
+                if not role_failed:
+                    budget_increment(session_id)
+                    budget_exceeded = tab == "chat" and budget_over_threshold(session_id)
+                # Audit fix 2026-09-25: TOKEN budget. Like an agent hitting its
+                # tool-call limit and asking permission to continue -- but
+                # measured in real tokens spent (llm_client._log_usage feeds
+                # run_guard), and enforced on every tab, not just chat.
+                token_exceeded = run_guard.over_token_budget(session_id)
 
-            if role in approval_roles or pause_requested or budget_exceeded:
+            if ((not role_failed and role in approval_roles) or pause_requested
+                    or budget_exceeded or token_exceeded or _breaker_reason):
                 from memory.bus import get_current_app_slug, write
                 if pause_requested:
                     # Consume the flag now, same lifecycle as the snapshot
@@ -1440,15 +1463,27 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # hit pause" vs a budget pause, without needing a third event
                 # type (Patch B6 adds "budget_exceeded" alongside the
                 # existing two values).
-                if role in approval_roles:
+                pause_message = None
+                if not role_failed and role in approval_roles:
                     reason = "approval"
                 elif pause_requested:
                     reason = "manual_pause"
+                elif token_exceeded:
+                    reason = "token_budget_exceeded"   # NEW — audit fix 2026-09-25
+                    pause_message = (
+                        f"Token budget reached ({run_guard.tokens_used(session_id):,} of "
+                        f"{run_guard.token_budget(session_id):,} tokens used). "
+                        f"Approve to continue with another {run_guard.DEFAULT_TOKEN_BUDGET:,} tokens.")
+                elif _breaker_reason:
+                    reason = "repeated_failures"   # NEW — audit fix 2026-09-25
+                    pause_message = (
+                        f"Stopped after repeated failures: {_breaker_reason}. "
+                        f"Fix the cause (or approve to retry with a fresh failure allowance).")
                 else:
                     reason = "budget_exceeded"   # NEW — Patch B6
                 emit_event(
                     "awaiting_approval", session_id=session_id, agent=current_name, path=path,
-                    payload={"role": role, "reason": reason},
+                    payload={"role": role, "reason": reason, "message": pause_message},
                 )
                 snapshot = {
                     "agent_names": agent_names,
@@ -1505,7 +1540,8 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     "app_slug": get_current_app_slug(),
                 }
                 write(f"paused_execution:{session_id}", snapshot)
-                return {"status": "paused", "paused_at_role": role}
+                return {"status": "paused", "paused_at_role": role,
+                        "reason": reason, "message": pause_message}
 
         next_idx, reason = next_step(
             result if isinstance(result, dict) else {}, role_names, idx, session_id=session_id,
@@ -1646,6 +1682,17 @@ def resume_graph(session_id: str, decision: dict) -> dict:
 
     role = role_names[idx]
     action = decision.get("action")
+
+    # Audit fix 2026-09-25: an "approve" on a run that paused for
+    # token_budget_exceeded or repeated_failures (not just a plain
+    # approval_roles/manual_pause) needs eo/run_guard.py's counters reset --
+    # otherwise resume_graph() would immediately re-pause on the very next
+    # role boundary with the same stale counters. Harmless no-op for a plain
+    # approval pause (grant_more() only raises the token ceiling when the
+    # token budget feature is enabled, and always clears any cancel flag,
+    # which is correct on every resume).
+    if action == "approve" and session_id:
+        run_guard.grant_more(session_id)
 
     if action == "revise_section":
         # Patch C4 (MiniMe-Patch-Series-C-Plan.md, Track 2). Deliberately

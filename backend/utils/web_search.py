@@ -45,6 +45,15 @@ EXA_URL = "https://api.exa.ai/search"
 REQUEST_TIMEOUT = 12
 
 
+# Audit fix 2026-09-25: Tavily rejects queries beyond a few hundred
+# characters with a 400 -- every caller upstream of here (e.g.
+# eo/skill_library.py used to hand this the entire grounded prompt) got that
+# 400 identically on all 10 configured keys, one request each, before ever
+# reaching Exa. Truncating once, here, protects every current and future
+# caller regardless of what it passes in.
+MAX_QUERY_CHARS = 400
+
+
 def search(query: str, domains: list[str] | None = None, max_results: int = 3,
            agent_name: str = "web_search") -> list[dict]:
     """Returns [{"url", "snippet", "title"}, ...]. Empty list only if BOTH
@@ -58,6 +67,7 @@ def search(query: str, domains: list[str] | None = None, max_results: int = 3,
     dashboard attributes the call to whichever agent made it, rather
     than lumping every caller's search usage under one label.
     """
+    query = (query or "").strip()[:MAX_QUERY_CHARS]
     results = _search_tavily(query, domains, max_results, agent_name)
     if results:
         return results
@@ -121,6 +131,17 @@ def _search_tavily(query: str, domains: list[str] | None, max_results: int,
                       f"next configured Tavily key, if any.")
                 _set_tavily_cooldown(key_env)
                 continue
+            if resp.status_code == 400:
+                # Audit fix 2026-09-25: a 400 means OUR request is malformed
+                # (bad payload/query) -- identical for every key, so trying
+                # the other 9 just repeats the same failure 9 more times.
+                # Log the body once (previously only the generic requests
+                # exception text was logged, which never showed WHY) and
+                # stop, instead of looping through every configured key.
+                print(f"  [web_search] Tavily rejected the request as malformed "
+                      f"(400): {resp.text[:300]!r} -- not retrying on other keys, "
+                      f"falling back to Exa.")
+                return []
             resp.raise_for_status()
             log_usage("tavily", key_env, tokens=None, agent_name=agent_name)
             return [{"url": r["url"], "snippet": r.get("content", ""), "title": r.get("title", "")}

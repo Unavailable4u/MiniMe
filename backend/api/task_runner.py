@@ -448,14 +448,21 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
             task_text, decision,
             outcome=f"tier-3 hires-driven pipeline paused at '{looped['paused_at_role']}' for approval",
         )
+        # Audit fix 2026-09-25: surface WHY it paused (approval / manual_pause /
+        # budget_exceeded / token_budget_exceeded / repeated_failures) and any
+        # human-readable detail eo/executor.py attached, instead of always
+        # showing the generic "needs approval" copy even for a token-budget or
+        # failure-breaker stop.
+        pause_reason = looped.get("reason") or "approval"
+        default_message = (f"Run paused for approval at role '{looped['paused_at_role']}'. "
+                            "POST to /api/resume with this session_id to continue.")
         return {
             "decision": decision,
             "tier": 3,
             "session_id": session_id,
             "status": "paused",
-            "result": {"paused_at_role": looped["paused_at_role"]},
-            "message": (f"Run paused for approval at role '{looped['paused_at_role']}'. "
-                        "POST to /api/resume with this session_id to continue."),
+            "result": {"paused_at_role": looped["paused_at_role"], "pause_reason": pause_reason},
+            "message": looped.get("message") or default_message,
         }
 
     results = looped["results"]
@@ -826,6 +833,20 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
             language = None
         if not code:
             continue
+        # Audit fix 2026-09-25: agents/code_writers.py writes a
+        # "# CODE WRITER FAILED: ..." placeholder into code_source when a
+        # module's generation genuinely failed (empty model response, an
+        # exhausted fallback chain, output-validation failure). That string
+        # is truthy and non-empty, so it passed the `if not code` check above
+        # and got written into the workspace as if it were real code --
+        # possibly overwriting a good file from an earlier successful run
+        # with the same path. A failed module writes nothing here; the
+        # failure is still visible in the chat response/logs.
+        if isinstance(code, str) and code.lstrip().startswith("# CODE WRITER FAILED"):
+            print(f"  [task_runner] code write-back: skipping module "
+                  f"{module_name!r} -> {rel_path!r}, it failed generation "
+                  f"(not overwriting any existing file at that path).")
+            continue
         pending_files.append({"file_path": rel_path, "content": code, "language": language})
 
     if not pending_files:
@@ -970,6 +991,14 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     identical behavior to today: no budget enforcement at all.
     """
     session_id = session_id or str(uuid.uuid4())
+    # Audit fix 2026-09-25: reset eo/run_guard.py's per-run rails (cancel flag,
+    # failure-breaker counters, token-spend counter) for this fresh dispatch.
+    # run_task() is only ever called for a NEW task_text; continuing a paused
+    # run goes through resume_graph() directly (see api/routes/tasks.py's
+    # /api/resume), never back through here, so this can't clobber state a
+    # resume still needs.
+    from eo import run_guard
+    run_guard.begin_run(session_id)
     import time as _time  # TEMP TIMING
 
     # NEW — perf audit follow-up (#6): eo/sga.py's attempt() docstring
@@ -1715,6 +1744,25 @@ def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, sessio
     # per this function's own docstring), so process_upload() below
     # keeps its exact original behavior too.
     if skip_generative_cache and attachment is None:
+        # Audit fix 2026-09-25: beast mode must skip SGA entirely, the same way
+        # eo/loop_v4.py's CLI `--mode beast` path already does (its own comment
+        # says "CHANGE: --mode beast also skips cache/SGA" -- this HTTP path
+        # never actually implemented that half of it: sga_attempt() below ran
+        # unconditionally regardless of `mode`, so a beast-mode task could be
+        # answered by SGA's single quick-and-dirty reply instead of ever
+        # reaching the fully-staffed pipeline beast mode exists to force.
+        if mode == "beast":
+            grounding = _workspace_grounding_and_cache_check(
+                task_text, session_id, owner_id, app_slug, topic_id, tier_override, mode,
+                _get_conv_context)
+            if "cache_hit" in grounding:
+                _record_routing_fact(grounding["workspace_id"], "cache", task_text, session_id)
+                return {"resolved": False, "response": grounding["cache_hit"]}
+            return {
+                "workspace_id": grounding["workspace_id"],
+                "grounded_task_text": grounding["grounded_task_text"],
+                "grounded_node_ids": grounding["grounded_node_ids"],
+            }
         with ThreadPoolExecutor(max_workers=2) as _fast_pool:
             _sga_future = _fast_pool.submit(sga_attempt, task_text, session_id=session_id)
             _grounding_future = _fast_pool.submit(
@@ -1862,7 +1910,10 @@ def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, sessio
 
     print(f"  [TIMING] cache check ({cache_class}): {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
     _t = _time.monotonic()  # TEMP TIMING
-    sga_result = sga_attempt(sga_input, session_id=session_id)   # CHANGED — bug #4 fix, was task_text; Patch B7, may include reference
+    # Audit fix 2026-09-25: beast mode skips SGA entirely -- see the fast-path
+    # branch above for the full reasoning; this is the same fix for the serial
+    # path taken whenever precomputed_cache_sga wasn't already supplied.
+    sga_result = sga_attempt(sga_input, session_id=session_id) if mode != "beast" else {"resolved": False}
     print(f"  [TIMING] sga_attempt: {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
     if sga_result["resolved"]:
         # PERF FIX (perf audit follow-up): write_cache() does an

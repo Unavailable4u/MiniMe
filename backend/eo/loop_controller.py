@@ -87,20 +87,62 @@ def _run_gatekeeper(results: dict, task_text: str, session_id: str, loop_num: in
                    payload={"decision": hard["action"], "loop": loop_num, "cause": hard["cause"]})
         return hard
 
+    # Audit fix 2026-09-25 -- fail SAFE, not fail open. Every rule below answers
+    # "should we spend another full pass?" with NO when there is reason to think
+    # the answer is wasted spend. Previously any gatekeeper reply that wasn't a
+    # literal STOP (empty, chatty, unparseable, or the gatekeeper LLM itself
+    # unavailable) became CONTINUE with no role list -> the ENTIRE graph re-ran,
+    # which is what turned one failed pass into a 27-minute second pass.
+    from eo import run_guard
+    if run_guard.over_token_budget(session_id):
+        decision = {"action": "STOP", "cause": "token_budget_reached"}
+        emit_event("macro_loop_decision", session_id=session_id,
+                   payload={"decision": "STOP", "loop": loop_num, "cause": decision["cause"]})
+        return decision
+    failed_roles = [k for k, v in results.items()
+                    if isinstance(v, dict) and v.get("status") == "failed"]
+    if results and len(failed_roles) * 2 >= len(results):
+        decision = {"action": "STOP", "cause": "majority_of_roles_failed",
+                    "failed_roles": failed_roles}
+        print(f"  [loop_controller] {len(failed_roles)}/{len(results)} roles failed this "
+              f"pass ({failed_roles}) -- another pass would repeat the same failures, stopping.")
+        emit_event("macro_loop_decision", session_id=session_id,
+                   payload={"decision": "STOP", "loop": loop_num, "cause": decision["cause"]})
+        return decision
+
     summary = "\n\n".join(f"[{k}]: {str(v)[:400]}" for k, v in results.items())
     from agents.generic_worker import run as generic_run
-    raw = generic_run(role="gatekeeper", task_text=(
+    from utils.llm_client import ShutdownRequested
+    try:
+      raw = generic_run(role="gatekeeper", task_text=(
         f"Original task: {task_text}\n\nWork completed so far:\n{summary}\n\n"
         "Decide: is this genuinely finished, or would another pass improve it "
         "meaningfully? Reply with exactly one line: "
         "'STOP' or 'CONTINUE: <comma-separated roles to redo>'."
-    ), session_id=session_id)
-    text = raw["text"].strip()
-    if text.upper().startswith("STOP"):
+      ), session_id=session_id)
+      text = (raw.get("text") or "").strip()
+    except ShutdownRequested:
+        raise   # cancelled / hard token stop -- never swallow
+    except Exception as exc:
+        print(f"  [loop_controller] gatekeeper unavailable ({exc.__class__.__name__}: {exc}) "
+              f"-- stopping instead of blindly re-running the whole graph.")
+        decision = {"action": "STOP", "cause": "gatekeeper_unavailable"}
+        emit_event("macro_loop_decision", session_id=session_id,
+                   payload={"decision": "STOP", "loop": loop_num, "cause": decision["cause"]})
+        return decision
+    if not text.upper().startswith("CONTINUE"):
+        # STOP, empty, or anything unparseable: stop. Only an explicit CONTINUE
+        # earns another pass.
         decision = {"action": "STOP"}
     else:
-        redo = [r.strip() for r in text.split(":", 1)[1].split(",")] if ":" in text else []
-        decision = {"action": "CONTINUE", "redo_roles": redo}
+        wanted = [r.strip() for r in text.split(":", 1)[1].split(",")] if ":" in text else []
+        # Only roles that actually exist in this run may be redone; never fall
+        # back to "the whole graph".
+        redo = [r for r in wanted if r and r in results]
+        if not redo:
+            redo = failed_roles
+        decision = ({"action": "CONTINUE", "redo_roles": redo} if redo
+                    else {"action": "STOP", "cause": "continue_without_specific_roles"})
 
     # This is the single emission point for the LLM-judgment path —
     # _hard_safety_check already emits macro_loop_decision on its own
@@ -237,6 +279,8 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
                 "status": "paused",
                 "paused_at_role": pass_results["paused_at_role"],
                 "session_id": session_id,
+                "reason": pass_results.get("reason"),     # NEW — audit fix 2026-09-25
+                "message": pass_results.get("message"),   # NEW — audit fix 2026-09-25
             }
 
         results.update(pass_results)   # merge, don't replace — a redo pass should only
@@ -252,8 +296,10 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
 
         if decision["action"] in ("STOP", "PAUSE_FOR_HUMAN"):
             break
+        if not decision.get("redo_roles"):
+            break   # audit fix 2026-09-25: never fall back to re-running the whole graph
         loop_num += 1
-        current_order = decision.get("redo_roles") or execution_order
+        current_order = decision["redo_roles"]
 
     # This is the one place run_with_looping() marks a task fully
     # finished (as opposed to paused mid-pass, handled and returned

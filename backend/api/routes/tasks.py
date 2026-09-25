@@ -63,7 +63,19 @@ from memory.bus import (  # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; wr
     read_many as bus_read_many,
 )
 from utils.error_sanitizer import user_facing_message  # NEW — Patch I.1
-from utils.llm_client import ShutdownRequested  # NEW — Patch 6.3
+from utils.llm_client import RunStopped, ShutdownRequested  # NEW — Patch 6.3; RunStopped — audit fix 2026-09-25
+
+
+def _shutdown_message(exc: ShutdownRequested) -> str:
+    """Audit fix 2026-09-25: RunStopped (deadline hit, cancelled, hard token
+    ceiling) is a ShutdownRequested subclass so it's caught by the exact same
+    `except ShutdownRequested` blocks below, but deserves a message that says
+    what actually happened instead of the generic shutdown copy."""
+    if isinstance(exc, RunStopped):
+        if exc.reason == "token_hard_limit":
+            return str(exc)
+        return f"This task was stopped: {exc}."
+    return "Server is shutting down; task was cancelled mid-run."
 
 router = APIRouter()
 
@@ -170,10 +182,10 @@ async def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   
             scope=req.scope,   # NEW — task 13d/13e
             tab=req.tab,   # NEW — Patch B6
         )
-    except ShutdownRequested:   # NEW — Patch 6.3
+    except ShutdownRequested as exc:   # NEW — Patch 6.3; RunStopped handling — audit fix 2026-09-25
         return TaskResponse(
             decision={}, tier=-1, status="cancelled", result=None,
-            message="Server is shutting down; task was cancelled mid-run.",
+            message=_shutdown_message(exc),
         )
     except Exception as exc:
         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
@@ -276,10 +288,10 @@ async def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(req
             project_unique_name=req.project_unique_name,
             owner_id=owner_id,   # FIXED
         )
-    except ShutdownRequested:   # NEW — Patch 6.3
+    except ShutdownRequested as exc:   # NEW — Patch 6.3; RunStopped handling — audit fix 2026-09-25
         return TaskResponse(
             decision={}, tier=-1, status="cancelled", result=None,
-            message="Server is shutting down; task was cancelled mid-run.",
+            message=_shutdown_message(exc),
         )
     except Exception as exc:
         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
@@ -316,10 +328,10 @@ async def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(req
             owner_id=owner_id,
             tab=req.tab,   # NEW — Patch B6
         )
-    except ShutdownRequested:   # NEW — Patch 6.3
+    except ShutdownRequested as exc:   # NEW — Patch 6.3; RunStopped handling — audit fix 2026-09-25
         return TaskResponse(
             decision=req.decision or {}, tier=-1, status="cancelled", result=None,
-            message="Server is shutting down; task was cancelled mid-run.",
+            message=_shutdown_message(exc),
         )
     except Exception as exc:
         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`

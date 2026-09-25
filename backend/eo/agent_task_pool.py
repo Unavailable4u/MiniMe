@@ -49,6 +49,8 @@ import sentry_sdk
 from memory.bus import incr as _bus_incr
 from memory.bus import read as _bus_read
 
+from eo import run_guard  # NEW — audit fix 2026-09-25: cancels the orphaned worker thread on timeout
+
 # How many agent tasks (run_task/preview_task/confirm_task/resume_graph/
 # run_task_from_template) may execute concurrently, independent of
 # api/server.py's APP_THREAD_POOL_SIZE. Deliberately much smaller than
@@ -117,13 +119,16 @@ class AgentTaskTimeout(Exception):
     """Raised by run_in_agent_pool() when a single call exceeds
     AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS.
 
-    Note: the underlying thread is NOT cancelled when this fires --
-    Python's ThreadPoolExecutor has no hard-cancel primitive for a
-    thread that's already running, so the task keeps executing in the
-    background even after this raises. This bounds how long the HTTP
-    caller waits, not how much work actually happens; true hard
-    cancellation would need cooperative checks inside the task itself,
-    out of scope for this fix."""
+    Audit fix 2026-09-25: run_in_agent_pool() now sets eo/run_guard.py's
+    cancel flag for this session the moment the deadline fires (see the
+    `except asyncio.TimeoutError` branch below) -- Python's
+    ThreadPoolExecutor still has no hard-cancel primitive for a thread
+    that's already running, but every cooperative checkpoint that matters
+    (utils/llm_client.py before each provider call, eo/executor.py before
+    each role) polls run_guard.raise_if_stopped() and unwinds within a
+    few hundred milliseconds of the NEXT checkpoint, instead of the task
+    running to completion 30+ minutes later as an orphan competing for
+    the same rate-limited keys as any retry the caller makes."""
 
     def __init__(self, timeout_seconds: float):
         self.timeout_seconds = timeout_seconds
@@ -233,9 +238,19 @@ async def run_in_agent_pool(fn, /, *args, **kwargs):
                 level="warning",
             )
 
+    # Audit fix 2026-09-25: session_id is a kwarg on every real call site
+    # (run_task/preview_task/resume_graph/run_task_from_template all take
+    # one) -- grabbed here, before the try/except, purely so the timeout
+    # branch below can tell the orphaned thread to stop.
+    _session_id_for_cancel = kwargs.get("session_id")
+
     try:
         result = await asyncio.wait_for(future, timeout=AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS)
     except asyncio.TimeoutError as exc:
+        if _session_id_for_cancel:
+            run_guard.request_cancel(
+                _session_id_for_cancel,
+                reason=f"HTTP request exceeded its {AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS:.0f}s deadline")
         raise AgentTaskTimeout(AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS) from exc
     finally:
         waited = time.monotonic() - t0

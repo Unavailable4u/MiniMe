@@ -286,6 +286,40 @@ def exceeds_tpm_ceiling(provider: str, model: str, estimated_tokens: int,
     return prospective > tpm_limit
 
 
+# Audit fix 2026-09-25 (root cause #1). llm_client._max_tokens_for() caps a
+# model's max_tokens at (tpm - 1500), and exceeds_tpm_ceiling() then refuses any
+# call where input + max_tokens > tpm -- which silently turns that "margin" into
+# a hard 1,500-token cap on INPUT for every 8K-TPM Groq model. The completion
+# budget has to be sized per call, from the actual prompt, not per model.
+_TPM_SAFETY_MARGIN = 200          # slack for estimation error on the input side
+MIN_USEFUL_OUTPUT_TOKENS = 1024   # below this a step is not worth dispatching
+
+
+def clamp_max_output_tokens(provider: str, model: str, estimated_input_tokens: int,
+                             requested_max_tokens: "int | None") -> "int | None":
+    """Returns the completion budget this specific call should ask for so that
+    estimated input + max output fits under the model's per-minute ceiling.
+
+    - No verified tpm figure, or no requested cap -> returned unchanged
+      (same "don't fabricate a number, fail open" posture as the rest of this
+      module).
+    - Room for at least MIN_USEFUL_OUTPUT_TOKENS -> min(requested, room).
+    - Not enough room for a useful completion -> requested is returned
+      UNCHANGED so exceeds_tpm_ceiling() still flags the step as unwinnable
+      and the caller reroutes to the next chain step instead of dispatching a
+      call that can only be truncated or rejected.
+    """
+    if not requested_max_tokens:
+        return requested_max_tokens
+    tpm_limit = _tpm_limit_for(provider, model)
+    if tpm_limit is None:
+        return requested_max_tokens
+    room = tpm_limit - int(estimated_input_tokens) - _TPM_SAFETY_MARGIN
+    if room < MIN_USEFUL_OUTPUT_TOKENS:
+        return requested_max_tokens
+    return min(requested_max_tokens, room)
+
+
 def _rpm_limit_for(provider: str, model: str):
     """OR-1d: QUOTA_CONFIG[provider][model]["rpm"] -- "requests" gating
     mode's per-minute ceiling. None means no verified rpm figure -> that

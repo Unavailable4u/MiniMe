@@ -169,7 +169,14 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
         draft = dict(_CLASSIFY_FAILURE_DRAFT)
     # ... rest of function unchanged ...
 
-    should_escalate = draft["confidence"] < CONFIDENCE_THRESHOLD or draft["tier"] >= 2
+    # Audit fix 2026-09-25: a tier-3 draft at HIGH confidence used to escalate
+    # to the 3-model panel too (tier >= 2 includes tier 3) -- a panel can only
+    # confirm or upgrade an already-maximal tier, so that case spent 2-3 extra
+    # LLM calls (and, if a panel member is down/rate-limited, tens of seconds
+    # of wasted wait) to buy nothing. Escalate on genuine uncertainty (low
+    # confidence, any tier) or the one tier where a second opinion can still
+    # change the outcome (tier 2, which the panel might confirm OR push to 3).
+    should_escalate = draft["confidence"] < CONFIDENCE_THRESHOLD or draft["tier"] == 2
     if should_escalate:
         print(f"  [EO] escalating to panel (confidence={draft['confidence']:.2f}, "
               f"tier={draft['tier']}) ...")

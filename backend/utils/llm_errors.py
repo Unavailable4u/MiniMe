@@ -76,6 +76,25 @@ _CONTEXT_LENGTH_PHRASES = (
     "context length exceeded",
     "too many tokens for model",
     "too many tokens for this model",
+    # Groq's wording for an input longer than the model's own context window
+    # (e.g. llama-prompt-guard-2-86m's 512 tokens). Audit 2026-09-25: this
+    # was missing, so a 400 with this text fell into MALFORMED_REQUEST and
+    # the shrink-and-retry path never ran.
+    "reduce the length of the messages",
+    "reduce the length of the prompt",
+    "prompt is too long",
+    "input is too long",
+)
+
+# A 429 whose body reports a quota LIMIT VALUE of 0 (Google: "quota_limit_value":
+# "0") means the project has been granted zero requests on that model/region --
+# a permanent entitlement problem, not a rolling window. Waiting can never fix it.
+_ZERO_QUOTA_MARKERS = (
+    "'quota_limit_value': '0'",
+    '"quota_limit_value": "0"',
+    "'quota_limit_value': 0",
+    '"quota_limit_value": 0',
+    "limit: 0,",
 )
 
 _MALFORMED_REQUEST_STATUS_CODES = {400}
@@ -208,3 +227,15 @@ def classify_error(exc, response=None) -> ErrorBucket:
     # and this is never mistaken for a bucket whose recovery action
     # (trimming, long cooldown, silent-retry ban) would be wrong here.
     return ErrorBucket.TRANSIENT_NETWORK
+
+
+def is_zero_quota(exc, response=None) -> bool:
+    """True when a rate-limit error carries an explicit zero quota (see
+    _ZERO_QUOTA_MARKERS). Callers should cool the key down for a long time and
+    move to the next chain step instead of waiting."""
+    try:
+        body = (_body_text(exc, response=response) or "") + " " + str(exc)
+    except Exception:
+        body = str(exc)
+    body = body.lower()
+    return any(marker in body for marker in _ZERO_QUOTA_MARKERS)
