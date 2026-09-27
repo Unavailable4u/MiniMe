@@ -1,10 +1,13 @@
 "use client";
 // frontend/app/components/workbench/BottomPanel.jsx — W2.3b (Build
 // Workbench plan). The panel under the editor row: Problems · Console ·
-// Terminal · History. It is the CONTAINER only — every tab shows an
-// empty state for now, and each later step fills in its own:
-//   Problems  → W8.x (lint / diagnostics)      Console → W6.2 (preview bridge)
-//   Terminal  → W3.1 (local daemon)            History → W2.6 (file versions)
+// Terminal · History. It was the CONTAINER only at first — each tab's
+// content filled in by its own later step, most already landed:
+//   Problems  → W8.x (lint / diagnostics), still empty for now
+//   Console   → W6.2 (preview bridge) — see EditorWorkbench.jsx's own
+//               `bottomPanels.console` (ConsolePanel.jsx)
+//   Terminal  → W3.1 (local daemon)
+//   History   → W2.6 (file versions)
 //
 // The tab strip is always rendered, even collapsed: a closed panel is
 // just that 32px strip, which keeps the panel discoverable without

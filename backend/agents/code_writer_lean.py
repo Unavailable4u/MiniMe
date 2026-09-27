@@ -127,11 +127,22 @@ def run(module_spec: dict = None, session_id: str = None, path: str = None,
     name = module_spec.get("name", "module")
     user_content = json.dumps(module_spec)
 
+    # Bug fix (2026-09-26): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import
+    # (eo.registry imports this module at load time; eo.dynamic_chain
+    # imports eo.registry at ITS module level, so importing it here up
+    # top would close a circular loop). Quota-ranked, cooldown-aware,
+    # spread across providers -- replaces the old module-level CHAIN,
+    # which was the only chain this call ever tried and had nothing to
+    # fall back to when its accounts rate-limited.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("code_writer_lean") or CHAIN
+
     try:
         raw = generate_text(
             SYSTEM_PROMPT,
             user_content,
-            CHAIN,
+            chain,
             agent_name="Code Writer (lean)",
             session_id=session_id,
             path=path,  # Migration Part 27 §1: generate_text() now accepts `path` for real

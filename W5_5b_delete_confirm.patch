@@ -1,0 +1,479 @@
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index cb07514..7c62c54 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -15,6 +15,7 @@ import { useViewport } from "../hooks/useViewport";   // NEW — Phase 1 (mobile
+ import WorkingPanelDrawer from "./mobile/WorkingPanelDrawer";   // NEW — Phase 1
+ import { OPEN_WORKING_PANEL_EVENT } from "./mobile/events";   // NEW — Phase 1
+ import HireReviewScreen from "./HireReviewScreen";
++import ConfirmDialog from "./ConfirmDialog";
+ // CHANGED — dock-controls simplification: PanelLeftOpen/PanelLeftClose are
+ // gone along with the Chat Box's own collapse button and collapsed rail
+ // (the section header itself is the control now, see the stacked headers
+@@ -38,7 +39,7 @@ import {
+ // NEW — W5.4: keepAllDecisions()/rejectAllDecisions() stand in for a
+ // per-hunk review nobody opened, the same shortcut PendingTray.jsx
+ // (EditorWorkbench.jsx) uses for its own Keep all/Reject buttons.
+-import { keepAllDecisions, rejectAllDecisions } from "../lib/workbench/reviewMode";
++import { deletedPathsToKeep, keepAllDecisions, rejectAllDecisions } from "../lib/workbench/reviewMode";
+ import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
+ import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
+ 
+@@ -539,6 +540,12 @@ export default function WorkspaceChatPanel({
+   const [codeProposals, setCodeProposals] = useState([]);
+   const [codeProposalPending, setCodeProposalPending] = useState(false);
+   const [codeProposalError, setCodeProposalError] = useState(null);
++  // W5.5: {paths, run} awaiting confirmation that resolving this card's
++  // proposal will delete these paths — same shape and same reason as
++  // EditorWorkbench.jsx's own pendingProposalResolve (see that file's
++  // handleReviewDone for the fuller comment); this card is the third of
++  // resolveProposal()'s three "keep" callers that needs the same gate.
++  const [pendingProposalResolve, setPendingProposalResolve] = useState(null);
+   const [draft, setDraft] = useState("");
+   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+ 
+@@ -1288,9 +1295,17 @@ export default function WorkspaceChatPanel({
+         // W5.4: "one active proposal per file" (plan §5 W5.4) — a
+         // pending proposal already covers one of these paths, so a
+         // second one here would leave two AI edits racing for the
+-        // same file's base_version. Folder refs aren't expanded
+-        // server-side yet (W5.5 — create_proposal() itself rejects
+-        // them today), so only the paths actually being sent matter.
++        // same file's base_version. W5.5 NOTE: a folder ref is still
++        // excluded from this pre-check — create_proposal() now expands
++        // it server-side (eo/code_proposals.py's _expand_refs()) into
++        // whatever files actually match, and the client has no cheap
++        // way to know that set ahead of the call. So this pre-check
++        // only catches a collision on an EXPLICIT file/range/element
++        // chip; a folder-ref edit that happens to overlap another
++        // pending proposal's files is still caught, just later and
++        // server-side, by resolve_proposal()'s own per-file
++        // base_version re-check (a 409 ProposalStaleError on whichever
++        // one resolves second) rather than up front here.
+         const targetPaths = codeRefs.filter((r) => r.kind !== "folder").map((r) => r.path);
+         if (targetPaths.length > 0) {
+           const targets = new Set(targetPaths);
+@@ -1319,6 +1334,7 @@ export default function WorkspaceChatPanel({
+             summary: proposal.summary,
+             status: proposal.status,
+             files: (proposal.files || []).map((f) => ({ path: f.path, op: f.op, original: f.original, proposed: f.proposed })),
++            refs: proposal.refs || [],
+           };
+           dock.setDockState((prev) => ({ messages: [...prev.messages, cardMessage] }));
+           dock.persistMessage(cardMessage);
+@@ -1389,24 +1405,36 @@ export default function WorkspaceChatPanel({
+   const handleResolveFromCard = useCallback(
+     async (message, mode) => {
+       const decisions = mode === "keep" ? keepAllDecisions(message) : rejectAllDecisions(message);
+-      try {
+-        const resolved = await resolveProposal(API_URL, workspaceId, message.proposalId, decisions);
+-        setCodeProposals((prev) =>
+-          prev.map((p) => (p.id === message.proposalId ? { ...p, status: resolved.status } : p))
+-        );
+-        if (usingDock) {
+-          dock.setDockState((prev) => ({
+-            messages: prev.messages.map((m) =>
+-              m.role === "code_proposal" && m.proposalId === message.proposalId ? { ...m, status: resolved.status } : m
+-            ),
+-          }));
++      const run = async () => {
++        try {
++          const resolved = await resolveProposal(API_URL, workspaceId, message.proposalId, decisions);
++          setCodeProposals((prev) =>
++            prev.map((p) => (p.id === message.proposalId ? { ...p, status: resolved.status } : p))
++          );
++          if (usingDock) {
++            dock.setDockState((prev) => ({
++              messages: prev.messages.map((m) =>
++                m.role === "code_proposal" && m.proposalId === message.proposalId ? { ...m, status: resolved.status } : m
++              ),
++            }));
++          }
++        } catch (err) {
++          setCodeProposalError(
++            err instanceof ProposalStaleError
++              ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
++              : err.message || "Couldn't apply this edit."
++          );
+         }
+-      } catch (err) {
+-        setCodeProposalError(
+-          err instanceof ProposalStaleError
+-            ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
+-            : err.message || "Couldn't apply this edit."
+-        );
++      };
++      // W5.5 — see EditorWorkbench.jsx's handleReviewDone for why a kept
++      // delete, specifically, needs an explicit confirm before this
++      // request goes out. rejectAllDecisions() never sends a "keep", so
++      // this is only ever reached on mode === "keep".
++      const deletePaths = deletedPathsToKeep(message.files || [], decisions);
++      if (deletePaths.length > 0) {
++        setPendingProposalResolve({ paths: deletePaths, run });
++      } else {
++        await run();
+       }
+     },
+     [API_URL, workspaceId, usingDock, dock.setDockState]
+@@ -2381,6 +2409,25 @@ export default function WorkspaceChatPanel({
+         )}
+       </div>
+       )}
++      {/* W5.5: keeping a proposal card that deletes a file is the one
++          resolve decision this client can't walk back — confirm by
++          name before the request goes out (deletedPathsToKeep()). */}
++      <ConfirmDialog
++        open={!!pendingProposalResolve}
++        title={
++          pendingProposalResolve?.paths.length === 1
++            ? `Delete "${pendingProposalResolve.paths[0].split("/").pop()}"?`
++            : `Delete ${pendingProposalResolve?.paths.length ?? 0} files?`
++        }
++        message={`Applying this edit will permanently delete:\n${(pendingProposalResolve?.paths || []).join("\n")}`}
++        confirmLabel="Delete"
++        onConfirm={() => {
++          const run = pendingProposalResolve?.run;
++          setPendingProposalResolve(null);
++          if (run) run();
++        }}
++        onCancel={() => setPendingProposalResolve(null)}
++      />
+     </div>
+   );
+ }
+diff --git a/frontend/app/components/workbench/CodeProposalCard.jsx b/frontend/app/components/workbench/CodeProposalCard.jsx
+index 2ffe525..644fb84 100644
+--- a/frontend/app/components/workbench/CodeProposalCard.jsx
++++ b/frontend/app/components/workbench/CodeProposalCard.jsx
+@@ -24,6 +24,21 @@ import { fileDiffStats, unreviewableReason } from "../../lib/workbench/reviewMod
+ 
+ const OP_LABELS = { create: "new", delete: "deleted" }; // mirrors ReviewPanel.jsx's own copy
+ 
++// W5.5 ("show 'included 14 of 40 files' on the chip"): a folder ref's
++// stored includedCount/totalMatched (eo/code_proposals.py's
++// _expand_folder()) rendered as one line per folder chip the
++// instruction referenced. Mirrors PendingTray.jsx's own copy — same
++// small-duplication convention as OP_LABELS above, not worth a shared
++// import for four lines.
++function folderRefLabel(ref) {
++  const name = (ref.path || "").split("/").filter(Boolean).pop() || ref.path;
++  const total = ref.totalMatched ?? 0;
++  const included = ref.includedCount ?? 0;
++  return included >= total
++    ? `${name}/ — ${total} file${total === 1 ? "" : "s"}`
++    : `${name}/ — included ${included} of ${total} files`;
++}
++
+ const STATUS_STYLES = {
+   pending: { label: "Pending review", text: "text-amber-300" },
+   accepted: { label: "Applied", text: "text-emerald-400" },
+@@ -66,6 +81,18 @@ export default function CodeProposalCard({ message, onReview, onKeepAll, onRejec
+           <span className={`shrink-0 text-[11px] font-medium ${style.text}`}>{style.label}</span>
+         </div>
+ 
++        {message.refs?.some((r) => r.kind === "folder") && (
++          <ul className="space-y-0.5">
++            {message.refs
++              .filter((r) => r.kind === "folder")
++              .map((r) => (
++                <li key={r.id || r.path} className="truncate text-[11px] text-[var(--neutral-500)]">
++                  {folderRefLabel(r)}
++                </li>
++              ))}
++          </ul>
++        )}
++
+         {message.files?.length > 0 && (
+           <ul className="space-y-1">
+             {message.files.map((f) => {
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index 07c4a4d..8442ec5 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -107,6 +107,7 @@ import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
+ import { jumpToPosition } from "../../lib/workbench/gotoPosition";
+ import {
+   buildDecisions,
++  deletedPathsToKeep,
+   dirtyOverlap,
+   keepAllDecisions,
+   rejectAllDecisions,
+@@ -292,6 +293,14 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   const [downloadError, setDownloadError] = useState(null);
+   const [pendingClose, setPendingClose] = useState(null); // {paths, dirty} awaiting the discard confirmation
+   const [pendingDelete, setPendingDelete] = useState(null); // {roots, title, message} awaiting the delete confirmation (W2.4)
++  // W5.5: {paths, run} awaiting confirmation that resolving an AI edit
++  // will delete these paths — set by handleReviewDone/handleTrayKeepAll
++  // below instead of calling resolveProposal() directly whenever
++  // deletedPathsToKeep() says the decisions about to be sent include a
++  // kept delete op. `run` is the resolve call itself, captured so the
++  // dialog's Confirm button has something to call without either
++  // handler duplicating its own resolve/error-handling body.
++  const [pendingProposalResolve, setPendingProposalResolve] = useState(null);
+   const [cursor, setCursor] = useState(null); // {line, col} of the active file's caret
+   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true); // single-pane layout only
+   // W2.5: {path: {current, mine}} — a save 409 for this path, awaiting
+@@ -1163,22 +1172,34 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   const handleReviewDone = useCallback(async () => {
+     const current = stateRef.current.review;
+     if (!current) return;
+-    reviewSubmitting(true);
+-    try {
+-      const decisions = buildDecisions(current);
+-      await resolveProposal(apiUrl, workspaceId, current.proposalId, decisions);
+-      reviewClose();
+-    } catch (err) {
+-      if (err instanceof ProposalStaleError) {
+-        reviewError(
+-          "This edit can no longer be applied — one of its files changed on the server since it was proposed. Close this review and ask again.",
+-          true
+-        );
+-      } else {
+-        reviewError(err.message || "Couldn't apply this edit.", false);
++    const decisions = buildDecisions(current);
++    const run = async () => {
++      reviewSubmitting(true);
++      try {
++        await resolveProposal(apiUrl, workspaceId, current.proposalId, decisions);
++        reviewClose();
++      } catch (err) {
++        if (err instanceof ProposalStaleError) {
++          reviewError(
++            "This edit can no longer be applied — one of its files changed on the server since it was proposed. Close this review and ask again.",
++            true
++          );
++        } else {
++          reviewError(err.message || "Couldn't apply this edit.", false);
++        }
++      } finally {
++        reviewSubmitting(false);
+       }
+-    } finally {
+-      reviewSubmitting(false);
++    };
++    // W5.5: a kept delete is the one decision this client can't walk
++    // back (see deletedPathsToKeep()'s own docstring) — confirm by
++    // name before it goes out, same as the explorer's own delete flow.
++    const fileOps = current.order.map((path) => ({ path, op: current.files[path]?.op }));
++    const deletePaths = deletedPathsToKeep(fileOps, decisions);
++    if (deletePaths.length > 0) {
++      setPendingProposalResolve({ paths: deletePaths, run });
++    } else {
++      await run();
+     }
+   }, [apiUrl, workspaceId, reviewSubmitting, reviewClose, reviewError]);
+ 
+@@ -1204,15 +1225,25 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+ 
+   const handleTrayKeepAll = useCallback(
+     async (proposal) => {
+-      try {
+-        const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, keepAllDecisions(proposal));
+-        proposalUpsert(resolved);
+-      } catch (err) {
+-        setNotice(
+-          err instanceof ProposalStaleError
+-            ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
+-            : err.message || "Couldn't apply this edit."
+-        );
++      const decisions = keepAllDecisions(proposal);
++      const run = async () => {
++        try {
++          const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, decisions);
++          proposalUpsert(resolved);
++        } catch (err) {
++          setNotice(
++            err instanceof ProposalStaleError
++              ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
++              : err.message || "Couldn't apply this edit."
++          );
++        }
++      };
++      // W5.5 — see handleReviewDone's own comment on why this gate exists.
++      const deletePaths = deletedPathsToKeep(proposal.files || [], decisions);
++      if (deletePaths.length > 0) {
++        setPendingProposalResolve({ paths: deletePaths, run });
++      } else {
++        await run();
+       }
+     },
+     [apiUrl, workspaceId, proposalUpsert]
+@@ -2006,6 +2037,26 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+         onCancel={() => setPendingDelete(null)}
+       />
+ 
++      {/* W5.5: keeping a proposal that deletes a file is the one
++          resolve decision this client can't walk back — confirm by
++          name before the request goes out (deletedPathsToKeep()). */}
++      <ConfirmDialog
++        open={!!pendingProposalResolve}
++        title={
++          pendingProposalResolve?.paths.length === 1
++            ? `Delete "${basename(pendingProposalResolve.paths[0])}"?`
++            : `Delete ${pendingProposalResolve?.paths.length ?? 0} files?`
++        }
++        message={`Applying this edit will permanently delete:\n${(pendingProposalResolve?.paths || []).join("\n")}`}
++        confirmLabel="Delete"
++        onConfirm={() => {
++          const run = pendingProposalResolve?.run;
++          setPendingProposalResolve(null);
++          if (run) run();
++        }}
++        onCancel={() => setPendingProposalResolve(null)}
++      />
++
+       {/* W3.1: switching source is a hard reset of open tabs (see
+           editorStore.js's SWITCH_SOURCE) — same discard-and-confirm
+           shape as closing a dirty tab, just for everything open at once. */}
+diff --git a/frontend/app/components/workbench/PendingTray.jsx b/frontend/app/components/workbench/PendingTray.jsx
+index 555e994..f144dcb 100644
+--- a/frontend/app/components/workbench/PendingTray.jsx
++++ b/frontend/app/components/workbench/PendingTray.jsx
+@@ -22,6 +22,21 @@ import ResponsiveSheet from "../mobile/ResponsiveSheet";
+ 
+ const OP_LABELS = { create: "new", delete: "deleted" }; // mirrors ReviewPanel.jsx's own copy
+ 
++// W5.5 ("show 'included 14 of 40 files' on the chip"): a folder ref's
++// stored includedCount/totalMatched (eo/code_proposals.py's
++// _expand_folder()) rendered as one line per folder chip the
++// instruction referenced. Mirrors CodeProposalCard.jsx's own copy —
++// same small-duplication convention as OP_LABELS above, not worth a
++// shared import for four lines.
++function folderRefLabel(ref) {
++  const name = (ref.path || "").split("/").filter(Boolean).pop() || ref.path;
++  const total = ref.totalMatched ?? 0;
++  const included = ref.includedCount ?? 0;
++  return included >= total
++    ? `${name}/ — ${total} file${total === 1 ? "" : "s"}`
++    : `${name}/ — included ${included} of ${total} files`;
++}
++
+ function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) {
+   const [busy, setBusy] = useState(null); // "keep" | "reject" | "regenerate" | null
+ 
+@@ -40,6 +55,18 @@ function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate })
+         {proposal.summary || proposal.instruction || "AI edit"}
+       </p>
+ 
++      {proposal.refs?.some((r) => r.kind === "folder") && (
++        <ul className="space-y-0.5">
++          {proposal.refs
++            .filter((r) => r.kind === "folder")
++            .map((r) => (
++              <li key={r.id || r.path} className="truncate text-[11px] text-[var(--neutral-500)]">
++                {folderRefLabel(r)}
++              </li>
++            ))}
++        </ul>
++      )}
++
+       {proposal.files?.length > 0 && (
+         <ul className="space-y-1">
+           {proposal.files.map((f) => {
+diff --git a/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs b/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
+index ad40c0d..39ec484 100644
+--- a/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
+@@ -21,6 +21,7 @@ const {
+   dirtyOverlap,
+   unreviewableReason,
+   resolvedMessage,
++  deletedPathsToKeep,
+ } = loadSource("../reviewMode.js");
+ 
+ let failures = 0;
+@@ -317,6 +318,52 @@ assertEqual(
+   "CRLF line endings normalize the same way decisionForFile()'s eol() does"
+ );
+ 
++// --- deletedPathsToKeep (W5.5) ----------------------------------------
++
++{
++  const files = [
++    { path: "a.py", op: "replace" },
++    { path: "gone.py", op: "delete" },
++    { path: "also_gone.py", op: "delete" },
++    { path: "new.py", op: "create" },
++  ];
++
++  assertEqual(
++    deletedPathsToKeep(files, [
++      { path: "a.py", decision: "keep" },
++      { path: "gone.py", decision: "keep" },
++      { path: "also_gone.py", decision: "undo" },
++      { path: "new.py", decision: "keep" },
++    ]),
++    ["gone.py"],
++    "only a delete op with an explicit 'keep' decision is a path about to actually be deleted"
++  );
++
++  assertEqual(
++    deletedPathsToKeep(files, [{ path: "gone.py", decision: "undo" }]),
++    [],
++    "a delete explicitly undone is not returned"
++  );
++
++  assertEqual(
++    deletedPathsToKeep(files, []),
++    [],
++    "a delete with NO decision defaults to undo, same as resolve_proposal() itself — not returned"
++  );
++
++  assertEqual(deletedPathsToKeep([], [{ path: "gone.py", decision: "keep" }]), [], "no files -> nothing to delete");
++  assertEqual(deletedPathsToKeep(null, null), [], "deletedPathsToKeep(null, null) doesn't throw");
++
++  assertEqual(
++    deletedPathsToKeep(files, [
++      { path: "gone.py", decision: "keep" },
++      { path: "also_gone.py", decision: "keep" },
++    ]),
++    ["gone.py", "also_gone.py"],
++    "more than one kept delete are all returned, in file order"
++  );
++}
++
+ if (failures > 0) {
+   console.error(`\n${failures} assertion(s) failed.`);
+   process.exit(1);
+diff --git a/frontend/app/lib/workbench/reviewMode.js b/frontend/app/lib/workbench/reviewMode.js
+index a56df5b..fb762a3 100644
+--- a/frontend/app/lib/workbench/reviewMode.js
++++ b/frontend/app/lib/workbench/reviewMode.js
+@@ -292,3 +292,37 @@ export function resolvedMessage(status) {
+   if (status === "rejected") return "Discarded the AI edit — nothing was changed.";
+   return "Finished reviewing the AI edit.";
+ }
++
++/**
++ * W5.5: the paths a resolve is about to actually DELETE — the one
++ * decision a person can't walk back from this UI (an "undo" always
++ * just leaves the file as it was; a kept "replace"/"create" is still
++ * sitting in normal version history to restore from — see W8.1 — but
++ * delete_file() has no undo of its own). Every one of resolveProposal()'s
++ * three callers (ReviewPanel.jsx's Done, the pending tray's Keep all,
++ * a chat card's Keep all) needs to ask "does this specific resolve
++ * delete anything?" right before sending it, so the confirm dialog can
++ * name the files by path rather than warning generically on every
++ * resolve.
++ *
++ * `files` is deliberately read from whatever the caller already has on
++ * hand rather than a `review` slice — a full proposal's `files` (the
++ * tray, a chat card) and `current.order`-derived `{path, op}` pairs
++ * (ReviewPanel.jsx's per-file review state) are both `{path, op}`-
++ * shaped supersets this only reads two keys from. `decisions` is
++ * whatever's about to be sent to resolve() — buildDecisions(),
++ * keepAllDecisions() or rejectAllDecisions()'s own output — so this
++ * mirrors resolve_proposal()'s own "no decision for a path defaults to
++ * undo" rule (eo/code_proposals.py) rather than assuming every listed
++ * file has an opinion.
++ *
++ * @param {{path:string, op?:string}[]} files
++ * @param {{path:string, decision:"keep"|"undo"}[]} decisions
++ * @returns {string[]}
++ */
++export function deletedPathsToKeep(files, decisions) {
++  const decisionByPath = new Map((decisions || []).map((d) => [d.path, d.decision]));
++  return (files || [])
++    .filter((f) => f.op === "delete" && (decisionByPath.get(f.path) ?? "undo") === "keep")
++    .map((f) => f.path);
++}

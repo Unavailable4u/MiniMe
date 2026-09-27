@@ -29,6 +29,19 @@ const KIND_ICONS = {
 };
 
 function chipLabel(ref) {
+  // W6.2: an error ref has no `path` when the console/error bridge
+  // couldn't map it to a real file:line (see PreviewPane.jsx's own
+  // comment on why that's the common case today, ahead of W6.4/6.5's
+  // click-to-code work). ADD_REF's reducer only ever copies through a
+  // fixed field set (codeContext.js's own ADD_REF case) — there's no
+  // room to smuggle a separate "display label" through it — so this
+  // reads the label back out of the one field that DOES survive and
+  // that a bridge-created error ref always has something in: the first
+  // line of its own (already-truncated) snippet.
+  if (ref.kind === "error") {
+    const firstLine = (ref.snippet || "").split("\n")[0].trim();
+    return firstLine || "Console error";
+  }
   const name = basename(ref.path) || ref.path;
   if (ref.kind === "range") {
     return ref.fromLine === ref.toLine ? `${name} L${ref.fromLine}` : `${name} L${ref.fromLine}-${ref.toLine}`;
@@ -47,7 +60,7 @@ function Chip({ entry, onRemove, onJump }) {
         type="button"
         disabled={!jumpable}
         onClick={onJump}
-        title={jumpable ? `Jump to ${entry.path}` : entry.path}
+        title={jumpable ? `Jump to ${entry.path}` : entry.path || chipLabel(entry)}
         className={`truncate max-w-[12rem] ${jumpable ? "hover:underline underline-offset-2" : "cursor-default"}`}
       >
         {chipLabel(entry)}
@@ -100,7 +113,7 @@ function ContextChips({ className }) {
             // Folder refs have no single position to jump to — W5.5
             // expands them server-side into a file set, and until then
             // there's nowhere to scroll.
-            onJump={ref.kind === "folder" ? undefined : () => requestJump(ref)}
+            onJump={ref.kind === "folder" || (ref.kind === "error" && !ref.path) ? undefined : () => requestJump(ref)}
           />
         ))}
       </div>

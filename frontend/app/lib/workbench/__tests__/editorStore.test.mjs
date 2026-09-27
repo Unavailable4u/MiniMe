@@ -27,7 +27,7 @@ const tabUtils = loadSource("../tabUtils.js");
 const layoutPrefs = loadSource("../layoutPrefs.js");
 const fileTree = loadSource("../fileTree.js");
 const reviewMode = loadSource("../reviewMode.js");
-const { editorReducer } = loadSource("../editorStore.js", {
+const { editorReducer, CONSOLE_MAX_MESSAGES } = loadSource("../editorStore.js", {
   imports: {
     react: reactStub,
     "./tabUtils": tabUtils,
@@ -44,6 +44,7 @@ const initialState = {
   layout: {},
   proposals: [],
   review: null,
+  console: [],
 };
 
 let failures = 0;
@@ -631,6 +632,43 @@ assertEqual(savedOverTruncated.buffers["big.log"].truncated, false, "SAVE_SUCCES
     editorReducer(st, { type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId: "prop_ghost" }) === st,
     true,
     "PROPOSAL_CLEAR_POSSIBLY_STALE for an unknown id is a no-op"
+  );
+}
+
+// --- CONSOLE_MESSAGE / CONSOLE_CLEAR (W6.2) -----------------------------
+
+{
+  let st = initialState;
+  st = editorReducer(st, { type: "CONSOLE_MESSAGE", entry: { id: 1, type: "console", level: "log", text: "hi" } });
+  assertEqual(st.console.length, 1, "CONSOLE_MESSAGE appends one entry");
+  assertEqual(st.console[0].text, "hi", "the appended entry is the one passed in");
+
+  st = editorReducer(st, { type: "CONSOLE_MESSAGE", entry: { id: 2, type: "error", level: "error", text: "boom" } });
+  assertEqual(st.console.map((e) => e.id), [1, 2], "a second message is appended AFTER the first (oldest first)");
+
+  assertEqual(
+    editorReducer(st, { type: "CONSOLE_CLEAR" }).console,
+    [],
+    "CONSOLE_CLEAR empties the feed"
+  );
+  assertEqual(
+    editorReducer(initialState, { type: "CONSOLE_CLEAR" }) === initialState,
+    true,
+    "CONSOLE_CLEAR on an already-empty feed is a no-op (same state reference back)"
+  );
+
+  // Cap: pushing past CONSOLE_MAX_MESSAGES drops the OLDEST entries,
+  // keeping the feed at exactly the cap and keeping the newest ones.
+  let capped = { ...initialState, console: [] };
+  for (let i = 0; i < CONSOLE_MAX_MESSAGES + 10; i++) {
+    capped = editorReducer(capped, { type: "CONSOLE_MESSAGE", entry: { id: i, type: "console", level: "log", text: String(i) } });
+  }
+  assertEqual(capped.console.length, CONSOLE_MAX_MESSAGES, `the feed never grows past CONSOLE_MAX_MESSAGES (${CONSOLE_MAX_MESSAGES})`);
+  assertEqual(capped.console[0].id, 10, "the oldest 10 entries were dropped once the cap was exceeded");
+  assertEqual(
+    capped.console[capped.console.length - 1].id,
+    CONSOLE_MAX_MESSAGES + 9,
+    "the newest entry is still the last one pushed"
   );
 }
 

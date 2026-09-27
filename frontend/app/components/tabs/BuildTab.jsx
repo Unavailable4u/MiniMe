@@ -47,8 +47,16 @@ import ContextChips from "../workbench/ContextChips";
 // mobile overlay instance below) closing the chat dock — passed in
 // rather than read from context, since neither of those is
 // code-context state.
+// CHANGED — W6.2: same reasoning again, for "Fix with AI" (a Console-tab
+// button, in EditorWorkbench.jsx) — this is the one place inside the
+// provider that can turn codeContext.js's own pendingChatMode into
+// something WorkspaceChatPanel.jsx can apply to its Ask|Edit toggle,
+// since that file has no lib/workbench import of its own (see its
+// header). Nothing here decides WHAT mode to request or WHEN — that's
+// entirely EditorWorkbench.jsx's handleFixWithAI(); this is just the
+// wire between the two.
 function CodeAwareChatPanel({ onEnterReviewMode, ...props }) {
-  const { refs, clearRefs, requestReview } = useCodeContext();
+  const { refs, clearRefs, requestReview, pendingChatMode, clearChatMode } = useCodeContext();
   const onReviewProposal = useCallback(
     (proposal) => {
       onEnterReviewMode?.();
@@ -63,6 +71,8 @@ function CodeAwareChatPanel({ onEnterReviewMode, ...props }) {
       codeChips={<ContextChips />}
       onClearCodeRefs={clearRefs}
       onReviewProposal={onReviewProposal}
+      pendingChatMode={pendingChatMode}
+      onConsumeChatMode={clearChatMode}
     />
   );
 }
@@ -1434,6 +1444,19 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
                 onDirtyChange={handleEditorDirty}
                 initialSourceOverride={forceLocalSourceOnce ? "local" : undefined}
                 onConsumeInitialSourceOverride={() => setForceLocalSourceOnce(false)}
+                // W6.2: "Fix with AI" (Console tab) requests Ask mode
+                // via codeContext.js regardless of whether the chat dock
+                // happens to be visible right now -- CodeAwareChatPanel's
+                // own effect only gets a chance to APPLY that request
+                // once it's actually mounted, which (see the two
+                // CodeAwareChatPanel call sites below) only happens while
+                // chatDockCollapsed is false. This is the other half:
+                // make sure it's false, same "open it first" step
+                // openInDock() above already takes for a chat picked from
+                // the sidebar.
+                onFixWithAIChat={() => {
+                  if (chatDockCollapsed) toggleChatDock();
+                }}
               />
             </div>
           </>

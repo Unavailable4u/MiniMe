@@ -65,6 +65,18 @@
 // proposal per file" at creation time (WorkspaceChatPanel.jsx's
 // sendCodeEditProposal).
 //
+// W6.2 addition: `console` — the live feed behind BottomPanel.jsx's
+// Console tab (components/workbench/ConsolePanel.jsx). A plain array,
+// newest LAST (so it renders top-to-bottom in arrival order, same as a
+// real devtools console), capped at CONSOLE_MAX_MESSAGES so a chatty
+// preview (a loop logging every frame) can't grow this without bound —
+// see CONSOLE_MESSAGE below for the drop-oldest rule. Populated by
+// PreviewPane.jsx's message listener (lib/preview/consoleBridge.js's
+// injected runtime is what the preview iframe actually runs); nothing
+// else in the workbench writes to it. Ephemeral like `tabs`/`buffers`
+// above: never part of `layout`, never written to localStorage, reset
+// to empty on every remount (a project switch, a page reload).
+//
 // No JSX here on purpose — every other file directly under `lib/`
 // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
 // so the provider component below is written with `createElement`
@@ -79,6 +91,9 @@ import { reviewFilesFromProposal } from "./reviewMode";
 
 const EditorStoreContext = createContext(null);
 
+// W6.2: see the `console` state comment above for what this bounds.
+export const CONSOLE_MAX_MESSAGES = 500;
+
 const initialState = {
   tabs: [],
   activePath: null,
@@ -86,6 +101,7 @@ const initialState = {
   layout: normalizeLayout(null), // W2.3b: the defaults; EditorStoreProvider's `initialLayout` overrides
   proposals: [],
   review: null, // W5.3: see this file's header comment
+  console: [], // W6.2: see this file's header comment
 };
 
 /**
@@ -522,6 +538,29 @@ export function editorReducer(state, action) {
       return { ...state, proposals };
     }
 
+    // W6.2: one row from the preview's console/error bridge
+    // (lib/preview/consoleBridge.js's injected runtime, relayed by
+    // PreviewPane.jsx's verified message listener). `entry` is already
+    // fully shaped by the caller — {id, type, level, text, stack,
+    // timestamp} — this reducer doesn't interpret it, just appends and
+    // enforces the cap. Dropping from the FRONT (oldest first) rather
+    // than refusing new ones once full: a live console should always
+    // show what JUST happened, the same trade-off a real browser
+    // devtools console (and this store's own `entry.id` scheme, a
+    // monotonically increasing counter minted by the caller) makes.
+    case "CONSOLE_MESSAGE": {
+      const next = [...state.console, action.entry];
+      const console_ = next.length > CONSOLE_MAX_MESSAGES ? next.slice(next.length - CONSOLE_MAX_MESSAGES) : next;
+      return { ...state, console: console_ };
+    }
+
+    // The Console tab's own "Clear" button. A no-op on an already-empty
+    // feed avoids a pointless re-render (same "return state unchanged"
+    // discipline REMOVE_REF/CLOSE_TABS elsewhere in this codebase follow
+    // for their own no-op cases).
+    case "CONSOLE_CLEAR":
+      return state.console.length === 0 ? state : { ...state, console: [] };
+
     default:
       return state;
   }
@@ -575,6 +614,9 @@ export function EditorStoreProvider({ children, initialLayout }) {
       proposalStatusUpdate: (proposalId, status) => dispatch({ type: "PROPOSAL_STATUS_UPDATE", proposalId, status }),
       proposalFilesChanged: (filePaths) => dispatch({ type: "PROPOSAL_FILES_CHANGED", filePaths }),
       proposalClearPossiblyStale: (proposalId) => dispatch({ type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId }),
+      // W6.2
+      consoleMessage: (entry) => dispatch({ type: "CONSOLE_MESSAGE", entry }),
+      consoleClear: () => dispatch({ type: "CONSOLE_CLEAR" }),
     }),
     [dispatch]
   );

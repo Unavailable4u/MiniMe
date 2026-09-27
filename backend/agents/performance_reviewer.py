@@ -208,9 +208,19 @@ def run(session_id: str = None, path: str = None, domain: str = None) -> dict:
     code = module_data.get("code", "") if isinstance(module_data, dict) else str(module_data)
     user_content = json.dumps({"module_name": module_name, "code": code})
 
+    # Bug fix (2026-09-26): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import
+    # (eo.registry imports this module at load time; eo.dynamic_chain
+    # imports eo.registry at ITS module level, so importing it here up
+    # top would close a circular loop). Quota-ranked, cooldown-aware,
+    # spread across providers -- CHAIN above (two Gemini keys only) is
+    # now the last-resort fallback if the live pool comes back empty.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("performance_reviewer") or CHAIN
+
     try:
         raw = generate_text(
-            SYSTEM_PROMPT, user_content, CHAIN,
+            SYSTEM_PROMPT, user_content, chain,
             agent_name="Performance Reviewer", session_id=session_id, path=path, domain=domain,
         )
         harness_code = _strip_fences(raw)

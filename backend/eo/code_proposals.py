@@ -23,6 +23,19 @@ resolved is unchanged from W5.1. _stub_generate_edit() stays in this
 module as the canned, no-LLM generator tests can pass explicitly; it
 is no longer the default.
 
+W5.5: a `kind: "folder"` ref no longer 400s. create_proposal() runs
+every incoming ref through _expand_refs() (below) BEFORE
+_paths_from_refs() ever sees it — a folder ref becomes a size-budgeted
+set of `kind: "file"` refs (skip binaries/lockfiles/node_modules/
+minified; see _expand_folder()), and what's actually stored in this
+proposal's own `refs` column gets each folder ref annotated with
+`includedCount`/`totalMatched`/`truncated` so a client can render
+"included 14 of 40 files" from the stored proposal alone, without
+recomputing it. _paths_from_refs() itself is otherwise untouched: it
+still refuses a raw `kind: "folder"` ref outright, which after this
+change only happens if some future caller reaches it directly, not via
+create_proposal() — see its own docstring.
+
 Same FakeCursor-isolatable, `eo.db`-only-touches-Postgres shape every
 other Postgres-backed store module in this package already takes (see
 eo/workspace_code_files.py, eo/chat_store.py) — nothing here imports
@@ -30,6 +43,8 @@ psycopg directly.
 """
 import functools
 import hashlib
+import os
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -66,11 +81,220 @@ _VALID_OPS = {"replace", "create", "delete"}
 # decision value at this layer.
 _VALID_DECISIONS = {"keep", "undo"}
 
-# The ref `kind`s this step knows how to turn into "one file to read
-# and propose an edit for". "folder" is deliberately NOT here — see
-# _paths_from_refs()'s own docstring for why a folder ref reaching this
-# module today is a caller bug, not a case to quietly degrade.
+# The ref `kind`s _paths_from_refs() itself knows how to turn into "one
+# file to read and propose an edit for". "folder" is deliberately NOT
+# here — a folder ref never reaches _paths_from_refs() any more (W5.5's
+# _expand_refs(), below, rewrites every folder ref into zero or more
+# `kind: "file"` refs before create_proposal() calls _paths_from_refs()
+# at all). It stays absent from this set (rather than added) so a
+# folder ref reaching _paths_from_refs() directly — skipping
+# _expand_refs(), a caller bug now instead of the expected path — still
+# fails loud instead of being silently treated as one file's path.
 _SUPPORTED_REF_KINDS = {"range", "file", "element", "error"}
+
+
+# ---------------------------------------------------------------------------
+# W5.5 — folder ref expansion
+# ---------------------------------------------------------------------------
+# "folder chips expand server-side to a size-budgeted file set (skip
+# binaries, lockfiles, node_modules, minified; show 'included 14 of 40
+# files' on the chip)" (Build Workbench plan §5, step 219). Everything in
+# this section runs BEFORE _paths_from_refs() — see _expand_refs()'s own
+# docstring for exactly where it sits in create_proposal()'s flow.
+
+# Common binary/asset extensions actually plausible in a
+# workspace_code_files tree (images, fonts, archives, compiled/media
+# output). Not an attempt at a universal binary-sniffing list — same
+# "just what this codebase's own file types need" scope
+# workspace_code_files._EXTENSION_LANGUAGE_MAP already keeps for itself —
+# these are files agents/code_editor.py's own prompt could never usefully
+# show a model as text anyway; skipping them here is what keeps a
+# folder's file-count/size budget from being spent on something that was
+# never editable prose in the first place.
+_BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".svg",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z",
+    ".pdf", ".mp3", ".mp4", ".mov", ".wav", ".avi",
+    ".wasm", ".pyc", ".so", ".dylib", ".dll", ".class", ".jar",
+    ".db", ".sqlite", ".sqlite3",
+}
+
+# Exact lockfile basenames — real project files, just never ones anyone
+# asks the model to hand-edit; including one in a folder's file set would
+# only crowd out files the instruction actually cares about.
+_LOCKFILE_BASENAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "poetry.lock", "Pipfile.lock", "composer.lock", "Cargo.lock",
+    "Gemfile.lock",
+}
+
+# A path with any of these as a DIRECTORY segment (never the final
+# component — see _skip_reason()) is skipped no matter how deep under
+# the folder ref it sits, same "everything under this folder" prefix
+# reasoning workspace_code_files.delete_file()'s own docstring already
+# gives for a folder delete, just checked per-segment here instead of as
+# a single prefix, since node_modules/.git/etc. can appear at any depth
+# under the folder someone actually chipped.
+_SKIPPED_DIR_SEGMENTS = {
+    "node_modules", ".git", "__pycache__", "dist", "build", ".next", ".venv", "venv",
+}
+
+_MINIFIED_SUFFIX = re.compile(r"\.min\.[^./]+$", re.IGNORECASE)
+
+# How many files, and how many combined bytes of their `size`
+# (workspace_code_files.list_files()'s own metadata — no content read
+# needed to decide this), ONE folder ref may pull in. Deliberately
+# smaller than agents/code_editor.py's own MAX_CONTEXT_CHARS (60_000):
+# that budget is spent RENDERING the files this module already decided
+# to include (±N lines of context, numbered, per file); this budget
+# decides inclusion up front, in the cheaper currency of "how many
+# separate files is one instruction plausibly about" — a folder ref that
+# fills this budget still leaves agents/code_editor.py's own per-file/
+# total-char limits to further trim what the model actually sees, same
+# as an explicit file ref would.
+_FOLDER_MAX_FILES = 40
+_FOLDER_MAX_TOTAL_CHARS = 200_000
+
+
+def _skip_reason(path: str) -> str | None:
+    """None = include this candidate path; otherwise a short, stable
+    reason code for why it was left out of a folder's expansion. A cheap
+    closed-set string (same convention as this module's other small
+    vocabularies: _VALID_OPS, _VALID_DECISIONS) rather than free text —
+    nothing outside this function reads the value today, but a future
+    "these were binaries, not truncation" UI hint gets to use it without
+    a data shape change.
+
+    Checked in this order: directory segment (node_modules/.git/etc. —
+    cheapest check, and the most common reason in a real project tree),
+    then exact lockfile basename, then extension, then a `.min.<ext>`
+    filename suffix.
+    """
+    segments = path.split("/")
+    if any(seg in _SKIPPED_DIR_SEGMENTS for seg in segments[:-1]):
+        return "excluded_dir"
+    name = segments[-1]
+    if name in _LOCKFILE_BASENAMES:
+        return "lockfile"
+    _, ext = os.path.splitext(name)
+    if ext.lower() in _BINARY_EXTENSIONS:
+        return "binary"
+    if _MINIFIED_SUFFIX.search(name):
+        return "minified"
+    return None
+
+
+def _expand_folder(ws_id: str, folder_path: str) -> dict:
+    """Turns one `kind: "folder"` ref's `path` into the size-budgeted set
+    of real file paths create_proposal() actually reads/edits for it.
+
+    Matching rule is the same `file_path LIKE 'prefix/%'` idea
+    workspace_code_files already uses for a folder delete/move (see that
+    module's own comment on _escape_like_prefix) — evaluated in Python
+    against workspace_code_files.list_files()'s already-fetched flat
+    map instead of a second SQL query, since list_files() (metadata
+    only, no content) is already an O(files-in-workspace) call this
+    function needs regardless of how many folder refs a proposal has.
+
+    Path-sorted before any skip/budget filtering, so "included 14 of 40"
+    means the same 14 files on a re-expand (W5.4's Regenerate replays
+    the SAME stored folder ref through create_proposal() again) — not
+    "whichever 14 a dict happened to iterate first".
+
+    Returns `{"included": [str, ...], "total_matched": int, "skipped":
+    int, "truncated": bool}`. `total_matched` counts every file under
+    the prefix BEFORE any filtering (the chip's "of 40" side); `skipped`
+    is `total_matched - len(included)` (covers BOTH a _skip_reason()
+    match and a budget cutoff — the two are distinguished only by
+    `truncated`, not by a separate count, since the chip's own "included
+    N of M" wording doesn't need the split; a per-category breakdown
+    would be easy to add here later if a UI ever wants one). `truncated`
+    is True only when the file/size BUDGET — not a skip rule — is why an
+    otherwise-includable file was left out.
+    """
+    prefix = folder_path.rstrip("/") + "/"
+    project = workspace_code_files.list_files(ws_id)
+    candidates = sorted(
+        (meta for path, meta in project.items() if path.startswith(prefix)),
+        key=lambda m: m["file_path"],
+    )
+    total_matched = len(candidates)
+
+    included: list[str] = []
+    used_chars = 0
+    truncated = False
+    for meta in candidates:
+        path = meta["file_path"]
+        if _skip_reason(path) is not None:
+            continue
+        size = meta.get("size", 0)
+        if len(included) >= _FOLDER_MAX_FILES or used_chars + size > _FOLDER_MAX_TOTAL_CHARS:
+            truncated = True
+            break
+        included.append(path)
+        used_chars += size
+
+    return {
+        "included": included,
+        "total_matched": total_matched,
+        "skipped": total_matched - len(included),
+        "truncated": truncated,
+    }
+
+
+def _expand_refs(refs: list[dict], ws_id: str) -> tuple[list[dict], list[dict]]:
+    """create_proposal()'s folder-expansion pass — runs BEFORE
+    _paths_from_refs(). Returns `(stored_refs, effective_refs)`:
+
+      - `stored_refs` is `refs`, unchanged except that every `kind:
+        "folder"` entry gains `includedCount` / `totalMatched` /
+        `truncated` keys (straight from _expand_folder() above). This is
+        what create_proposal() writes to the proposal's own `refs`
+        column, so a later read — the original create response, W5.4's
+        "reopen the tab" GET, its Regenerate replaying `proposal.refs` —
+        all show the SAME "included 14 of 40 files" numbers, computed
+        once here rather than recomputed (and potentially drifting)
+        differently by more than one reader.
+
+      - `effective_refs` is what actually reaches resolve_scope() /
+        generate_edit(): every non-folder ref unchanged, plus one
+        `kind: "file"` ref per included path (no line range — the whole
+        file is in scope, same as an explicit file chip). This is what
+        gives an expanded file real EditScope coverage instead of being
+        flagged scope_violation for edits the person's OWN folder
+        instruction asked for (see agents/code_editor.py's
+        resolve_scope()).
+
+    A folder ref whose expansion includes zero files (empty folder,
+    everything skipped, no such prefix) is dropped from `effective_refs`
+    entirely but LEFT in `stored_refs` with includedCount=0 / a real
+    totalMatched — the chip can say "included 0 of 0" (or "0 of 3, all
+    skipped") rather than the ref silently vanishing. create_proposal()
+    still fails loud if that leaves NO effective refs at all — see its
+    own "no files to edit" check, the folder-ref analogue of
+    _paths_from_refs()'s "at least one ref is required".
+    """
+    stored: list[dict] = []
+    effective: list[dict] = []
+    for ref in refs:
+        if ref.get("kind") != "folder":
+            stored.append(ref)
+            effective.append(ref)
+            continue
+        path = ref.get("path")
+        if not path:
+            raise ValueError("ref of kind 'folder' is missing 'path'")
+        info = _expand_folder(ws_id, path)
+        stored.append({
+            **ref,
+            "includedCount": len(info["included"]),
+            "totalMatched": info["total_matched"],
+            "truncated": info["truncated"],
+        })
+        for file_path in info["included"]:
+            effective.append({"kind": "file", "path": file_path, "provider": ref.get("provider")})
+    return stored, effective
 
 
 class ProposalStaleError(Exception):
@@ -167,14 +391,15 @@ def _paths_from_refs(refs: list[dict]) -> list[str]:
     ordering is deterministic given the same input, not because
     anything downstream depends on ref order specifically.
 
-    A `kind: "folder"` ref is refused outright (ValueError, which the
-    route turns into a 400) rather than silently treated as if its
-    `path` were one file's path: W5.5 ("Folder / multi-file scope") is
-    the step that expands a folder chip server-side into a size-
-    budgeted set of real file paths ("included 14 of 40 files" on the
-    chip, binaries/lockfiles/node_modules skipped); that expansion
-    logic doesn't exist yet, and pretending a folder path IS a file
-    path here would silently propose an edit "to" a folder that
+    create_proposal() always calls this with `effective_refs` —
+    _expand_refs()'s output, not the raw refs a caller sent — so by the
+    time anything reaches here, every `kind: "folder"` ref has already
+    been rewritten into zero or more `kind: "file"` refs (W5.5). A
+    `kind: "folder"` ref reaching this function directly is therefore a
+    caller bug (a test, or some future direct call, skipping
+    _expand_refs()), refused outright rather than silently treated as
+    if its `path` were one file's path — pretending a folder path IS a
+    file path here would silently propose an edit "to" a folder that
     workspace_code_files.get_file() would just read back as an always-
     empty file, then silently write nothing useful on resolve. Failing
     loud here is the same "fail loud on a bad path" posture
@@ -335,6 +560,14 @@ def create_proposal(ws_id: str, instruction: str, refs: list[dict],
     what generate_edit returns — see resolve_proposal() for the only
     path that does.
 
+    W5.5: `refs` is run through _expand_refs() first — every `kind:
+    "folder"` entry becomes zero or more `kind: "file"` refs before
+    _paths_from_refs()/get_file() ever see it, and what's stored in
+    this proposal's own `refs` column is _expand_refs()'s
+    `stored_refs` (the original refs, folder entries annotated with
+    includedCount/totalMatched/truncated), not the caller's raw list —
+    see _expand_refs()'s own docstring for why.
+
     A `generate_edit` failure does NOT raise out of this function: it
     is caught, and a status='failed' row is stored and returned
     instead (files=[], model_meta={"error": str(exc)}) — same
@@ -351,7 +584,8 @@ def create_proposal(ws_id: str, instruction: str, refs: list[dict],
     if not instruction or not instruction.strip():
         raise ValueError("instruction cannot be empty")
     refs = refs or []
-    paths = _paths_from_refs(refs)
+    stored_refs, effective_refs = _expand_refs(refs, ws_id)
+    paths = _paths_from_refs(effective_refs)
 
     current_files = {path: workspace_code_files.get_file(ws_id, path) for path in paths}
 
@@ -381,7 +615,7 @@ def create_proposal(ws_id: str, instruction: str, refs: list[dict],
             returning {_PROPOSAL_COLUMNS}
             """,
             (proposal_id, ws_id, session_id, user_id, instruction, status,
-             db.Json(files), summary, db.Json(refs), db.Json(model_meta), now),
+             db.Json(files), summary, db.Json(stored_refs), db.Json(model_meta), now),
         )
         row = cur.fetchone()
 

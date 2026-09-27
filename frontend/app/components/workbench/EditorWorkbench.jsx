@@ -107,6 +107,7 @@ import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
 import { jumpToPosition } from "../../lib/workbench/gotoPosition";
 import {
   buildDecisions,
+  deletedPathsToKeep,
   dirtyOverlap,
   keepAllDecisions,
   rejectAllDecisions,
@@ -135,6 +136,7 @@ import TerminalPanel from "../TerminalPanel";
 import BottomPanel from "./BottomPanel";
 import CodeEditor from "./CodeEditor";
 import ConflictCompareView from "./ConflictCompareView";
+import ConsolePanel from "./ConsolePanel";
 import EditorTabs from "./EditorTabs";
 import Explorer from "./Explorer";
 import HistoryPanel from "./HistoryPanel";
@@ -230,7 +232,7 @@ const EditorPane = memo(function EditorPane({
   );
 });
 
-function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFixWithAIChat }) {
   const {
     state,
     setActivePath,
@@ -256,12 +258,14 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     proposalStatusUpdate,
     proposalFilesChanged,
     proposalClearPossiblyStale,
+    // W6.2
+    consoleClear,
   } = useEditorStore();
 
   // W4.1: see this component's own import comment on why this is
   // available here even though CodeContextProvider is mounted in
   // BuildTab.jsx, above this whole component.
-  const { addRef, remapRefs, pendingJump, clearJump, pendingReview, clearReview } = useCodeContext();
+  const { addRef, remapRefs, pendingJump, clearJump, pendingReview, clearReview, requestChatMode } = useCodeContext();
 
   // W3.1: which provider backs the workbench right now — read from
   // `layout.source` (see layoutPrefs.js's own header on why it lives
@@ -292,6 +296,14 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
   const [downloadError, setDownloadError] = useState(null);
   const [pendingClose, setPendingClose] = useState(null); // {paths, dirty} awaiting the discard confirmation
   const [pendingDelete, setPendingDelete] = useState(null); // {roots, title, message} awaiting the delete confirmation (W2.4)
+  // W5.5: {paths, run} awaiting confirmation that resolving an AI edit
+  // will delete these paths — set by handleReviewDone/handleTrayKeepAll
+  // below instead of calling resolveProposal() directly whenever
+  // deletedPathsToKeep() says the decisions about to be sent include a
+  // kept delete op. `run` is the resolve call itself, captured so the
+  // dialog's Confirm button has something to call without either
+  // handler duplicating its own resolve/error-handling body.
+  const [pendingProposalResolve, setPendingProposalResolve] = useState(null);
   const [cursor, setCursor] = useState(null); // {line, col} of the active file's caret
   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true); // single-pane layout only
   // W2.5: {path: {current, mine}} — a save 409 for this path, awaiting
@@ -1163,22 +1175,34 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
   const handleReviewDone = useCallback(async () => {
     const current = stateRef.current.review;
     if (!current) return;
-    reviewSubmitting(true);
-    try {
-      const decisions = buildDecisions(current);
-      await resolveProposal(apiUrl, workspaceId, current.proposalId, decisions);
-      reviewClose();
-    } catch (err) {
-      if (err instanceof ProposalStaleError) {
-        reviewError(
-          "This edit can no longer be applied — one of its files changed on the server since it was proposed. Close this review and ask again.",
-          true
-        );
-      } else {
-        reviewError(err.message || "Couldn't apply this edit.", false);
+    const decisions = buildDecisions(current);
+    const run = async () => {
+      reviewSubmitting(true);
+      try {
+        await resolveProposal(apiUrl, workspaceId, current.proposalId, decisions);
+        reviewClose();
+      } catch (err) {
+        if (err instanceof ProposalStaleError) {
+          reviewError(
+            "This edit can no longer be applied — one of its files changed on the server since it was proposed. Close this review and ask again.",
+            true
+          );
+        } else {
+          reviewError(err.message || "Couldn't apply this edit.", false);
+        }
+      } finally {
+        reviewSubmitting(false);
       }
-    } finally {
-      reviewSubmitting(false);
+    };
+    // W5.5: a kept delete is the one decision this client can't walk
+    // back (see deletedPathsToKeep()'s own docstring) — confirm by
+    // name before it goes out, same as the explorer's own delete flow.
+    const fileOps = current.order.map((path) => ({ path, op: current.files[path]?.op }));
+    const deletePaths = deletedPathsToKeep(fileOps, decisions);
+    if (deletePaths.length > 0) {
+      setPendingProposalResolve({ paths: deletePaths, run });
+    } else {
+      await run();
     }
   }, [apiUrl, workspaceId, reviewSubmitting, reviewClose, reviewError]);
 
@@ -1204,15 +1228,25 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
 
   const handleTrayKeepAll = useCallback(
     async (proposal) => {
-      try {
-        const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, keepAllDecisions(proposal));
-        proposalUpsert(resolved);
-      } catch (err) {
-        setNotice(
-          err instanceof ProposalStaleError
-            ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
-            : err.message || "Couldn't apply this edit."
-        );
+      const decisions = keepAllDecisions(proposal);
+      const run = async () => {
+        try {
+          const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, decisions);
+          proposalUpsert(resolved);
+        } catch (err) {
+          setNotice(
+            err instanceof ProposalStaleError
+              ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
+              : err.message || "Couldn't apply this edit."
+          );
+        }
+      };
+      // W5.5 — see handleReviewDone's own comment on why this gate exists.
+      const deletePaths = deletedPathsToKeep(proposal.files || [], decisions);
+      if (deletePaths.length > 0) {
+        setPendingProposalResolve({ paths: deletePaths, run });
+      } else {
+        await run();
       }
     },
     [apiUrl, workspaceId, proposalUpsert]
@@ -1529,13 +1563,60 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     [activePath, provider, activeBuffer?.saved, activeBuffer?.version, activeBuffer?.dirty, handleRestored]
   );
 
+  // W6.2: Console tab's "Fix with AI". Two things happen, neither of
+  // them a real code edit yet:
+  //   - addRef(...) drops an `error`-kind chip into the SAME chip tray
+  //     every other ref kind uses (ContextChips.jsx already has an icon
+  //     for it — see that file's own header). `path: null` because this
+  //     build has no way to map a browser stack frame back to a project
+  //     file:line (that's W6.4/6.5's click-to-code work); `fromLine`/
+  //     `toLine` are repurposed as the entry's own id purely so two
+  //     DIFFERENT unmapped errors don't collide under codeContext.js's
+  //     refKey() (`kind:path:fromLine:toLine` — with a real path this
+  //     would be redundant, but with path=null every unmapped error
+  //     would otherwise dedupe down to the exact same key). See
+  //     ContextChips.jsx's chipLabel() and WorkspaceChatPanel.jsx's
+  //     sendCodeChatMessage() for the two places that already know NOT
+  //     to treat that id as a real line number.
+  //   - requestChatMode("ask") — NOT "edit", despite the plan's own
+  //     wording ("focuses the chat in Edit mode"). With `path: null`,
+  //     Edit mode's sendCodeEditProposal() would hit
+  //     POST .../code/proposals with a ref the backend's own
+  //     _paths_from_refs() immediately 400s on ("missing 'path'") —
+  //     every single time, since no error is mapped yet in this build.
+  //     Ask mode asks the same question through the ordinary chat path
+  //     instead (no backend ref validation at all — see
+  //     sendCodeChatMessage()'s own header), which is something this
+  //     step can actually deliver end to end; the person can still flip
+  //     to Edit themselves once they've added a concrete file to fix.
+  const handleFixWithAI = useCallback(
+    (entry) => {
+      addRef({
+        kind: "error",
+        path: null,
+        fromLine: entry.id,
+        toLine: entry.id,
+        snippet: entry.stack ? `${entry.text}\n\n${entry.stack}` : entry.text,
+      });
+      requestChatMode("ask");
+      onFixWithAIChat?.();
+    },
+    [addRef, requestChatMode, onFixWithAIChat]
+  );
+
+  const consolePanelNode = useMemo(
+    () => <ConsolePanel messages={state.console} onClear={consoleClear} onFixWithAI={handleFixWithAI} />,
+    [state.console, consoleClear, handleFixWithAI]
+  );
+
   const bottomPanels = useMemo(
     () => ({
       search: searchPanelNode,
       history: historyPanelNode,
+      console: consolePanelNode,
       ...(terminalPanelNode ? { terminal: terminalPanelNode } : {}),
     }),
-    [searchPanelNode, historyPanelNode, terminalPanelNode]
+    [searchPanelNode, historyPanelNode, consolePanelNode, terminalPanelNode]
   );
 
   // ---- autosave + unsaved-edits guards (W2.5) --------------------------
@@ -2006,6 +2087,26 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
         onCancel={() => setPendingDelete(null)}
       />
 
+      {/* W5.5: keeping a proposal that deletes a file is the one
+          resolve decision this client can't walk back — confirm by
+          name before the request goes out (deletedPathsToKeep()). */}
+      <ConfirmDialog
+        open={!!pendingProposalResolve}
+        title={
+          pendingProposalResolve?.paths.length === 1
+            ? `Delete "${basename(pendingProposalResolve.paths[0])}"?`
+            : `Delete ${pendingProposalResolve?.paths.length ?? 0} files?`
+        }
+        message={`Applying this edit will permanently delete:\n${(pendingProposalResolve?.paths || []).join("\n")}`}
+        confirmLabel="Delete"
+        onConfirm={() => {
+          const run = pendingProposalResolve?.run;
+          setPendingProposalResolve(null);
+          if (run) run();
+        }}
+        onCancel={() => setPendingProposalResolve(null)}
+      />
+
       {/* W3.1: switching source is a hard reset of open tabs (see
           editorStore.js's SWITCH_SOURCE) — same discard-and-confirm
           shape as closing a dirty tab, just for everything open at once. */}
@@ -2062,6 +2163,7 @@ export default function EditorWorkbench({
   onDirtyChange,
   initialSourceOverride, // NEW — W3.2: BuildTab's one-time "the old Local Files tab redirected here" signal
   onConsumeInitialSourceOverride, // NEW — W3.2: called once this mount has applied (or ignored) the override above, same consumed-once shape as AppShell's own initialWorkspaceId
+  onFixWithAIChat, // NEW — W6.2: Console tab's "Fix with AI" also needs the chat dock visible, which is BuildTab.jsx's own state, not something this component (or the CodeContextProvider it sits inside) can reach on its own — see handleFixWithAI's own comment for the rest of what a click does.
 }) {
   // The saved panel layout, read once when the workbench mounts — the
   // store's initializer ignores later changes to it. That's fine for the
@@ -2106,6 +2208,7 @@ export default function EditorWorkbench({
         apiUrl={apiUrl}
         reserveCorner={reserveCorner}
         onDirtyChange={onDirtyChange}
+        onFixWithAIChat={onFixWithAIChat}
       />
     </EditorStoreProvider>
   );

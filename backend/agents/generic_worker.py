@@ -941,10 +941,27 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
         chain = chain_override
     elif key_override:
         # Explicit override — the caller picked this exact account on
-        # purpose (e.g. a targeted retry), so it stays a single-step chain
-        # rather than being expanded automatically.
+        # purpose (e.g. a Panel hire, or a targeted recheck-retry), so it
+        # stays the FIRST step, honoring that choice.
+        #
+        # Bug fix (2026-09-26): this used to be the chain's ONLY step —
+        # "stays a single-step chain rather than being expanded
+        # automatically" — which meant a Panel-hired role had zero
+        # fallback the moment its one pinned account rate-limited,
+        # regardless of how many other accounts were sitting idle in the
+        # pool (exactly the failure mode this codebase already fixed for
+        # hardware_speccer.py/architecture_diagrammer.py/etc. via
+        # eo/dynamic_chain.py — this is the same fix, applied to the
+        # key_override path specifically). The pinned account is still
+        # tried FIRST and given every chance to succeed; it's only once
+        # it's exhausted that this reaches for the live, quota-ranked
+        # pool instead of dead-ending.
         agent_key = key_override if isinstance(key_override, str) else key_override[0]
         chain = [_chain_step_for(agent_key)] if agent_key else []
+        quota_status = get_quota_snapshot()
+        extra_keys = _build_fallback_chain(role, quota_status,
+                                            max_steps=_dynamic_max_chain_steps(quota_status))
+        chain += [_chain_step_for(k) for k in extra_keys if k != agent_key]
     else:
         # Fix A: real multi-step, multi-provider fallback chain instead of
         # a single _best_match() pick wrapped in a length-1 chain.

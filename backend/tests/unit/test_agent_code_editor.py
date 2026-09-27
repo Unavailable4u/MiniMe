@@ -869,3 +869,240 @@ class TestCreateProposalWiring:
     def test_bad_input_is_still_a_plain_value_error(self, store):
         with pytest.raises(ValueError, match="at least one ref"):
             code_proposals.create_proposal("ws", "x", [], None, "u")
+
+
+# ---------------------------------------------------------------------------
+# 6. W5.5 — folder ref expansion
+# ---------------------------------------------------------------------------
+def _meta(path, size=10):
+    return {"workspace_id": "ws", "file_path": path, "language": None,
+            "size": size, "version": 1, "updated_at": None, "updated_by": None}
+
+
+class TestSkipReason:
+    @pytest.mark.parametrize("path", [
+        "src/pages/node_modules/left-pad/index.js",
+        "node_modules/x.js",
+        ".git/HEAD",
+        "src/__pycache__/mod.cpython-312.pyc",
+        "frontend/dist/bundle.js",
+        "backend/build/out.py",
+        "app/.next/server/x.js",
+        "env/.venv/lib/x.py",
+        "env/venv/lib/x.py",
+    ])
+    def test_excluded_directory_segment(self, path):
+        assert code_proposals._skip_reason(path) == "excluded_dir"
+
+    @pytest.mark.parametrize("name", [
+        "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
+        "Pipfile.lock", "composer.lock", "Cargo.lock", "Gemfile.lock",
+    ])
+    def test_lockfile(self, name):
+        assert code_proposals._skip_reason(f"src/pages/{name}") == "lockfile"
+
+    @pytest.mark.parametrize("path", [
+        "src/pages/logo.png", "assets/font.woff2", "public/archive.zip",
+        "docs/manual.pdf", "media/clip.mp4", "bin/lib.so",
+    ])
+    def test_binary_extension(self, path):
+        assert code_proposals._skip_reason(path) == "binary"
+
+    def test_minified(self):
+        assert code_proposals._skip_reason("src/pages/vendor.min.js") == "minified"
+
+    def test_minified_is_case_insensitive(self):
+        assert code_proposals._skip_reason("src/pages/Vendor.MIN.JS") == "minified"
+
+    def test_a_directory_named_like_a_skip_reason_is_fine_as_a_filename(self):
+        # Only checked as a DIRECTORY segment (segments[:-1]) — a file
+        # literally named "dist" (no extension) is not itself skipped.
+        assert code_proposals._skip_reason("src/pages/dist") is None
+
+    def test_ordinary_file_is_not_skipped(self):
+        assert code_proposals._skip_reason("src/pages/index.jsx") is None
+
+
+class TestExpandFolder:
+    def test_included_excludes_and_totals(self, monkeypatch):
+        project = {
+            "src/pages/index.jsx": _meta("src/pages/index.jsx"),
+            "src/pages/about.jsx": _meta("src/pages/about.jsx"),
+            "src/pages/node_modules/x/index.js": _meta("src/pages/node_modules/x/index.js"),
+            "src/pages/logo.png": _meta("src/pages/logo.png"),
+            "src/pages/vendor.min.js": _meta("src/pages/vendor.min.js"),
+            "src/other/unrelated.jsx": _meta("src/other/unrelated.jsx"),  # not under the prefix at all
+        }
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        info = code_proposals._expand_folder("ws", "src/pages")
+        assert info["included"] == ["src/pages/about.jsx", "src/pages/index.jsx"]
+        assert info["total_matched"] == 5  # everything under src/pages/, before filtering
+        assert info["skipped"] == 3
+        assert info["truncated"] is False
+
+    def test_trailing_slash_on_the_ref_path_is_fine(self, monkeypatch):
+        project = {"src/pages/index.jsx": _meta("src/pages/index.jsx")}
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        assert code_proposals._expand_folder("ws", "src/pages/")["included"] == ["src/pages/index.jsx"]
+
+    def test_no_matching_files_at_all(self, monkeypatch):
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: {})
+        info = code_proposals._expand_folder("ws", "src/pages")
+        assert info == {"included": [], "total_matched": 0, "skipped": 0, "truncated": False}
+
+    def test_sibling_paths_that_merely_share_the_prefix_string_are_excluded(self, monkeypatch):
+        # "src/pages-old/x.js" must NOT match a "src/pages" folder ref —
+        # the match is on "src/pages/" (with the trailing slash), not a
+        # bare string prefix.
+        project = {
+            "src/pages/index.jsx": _meta("src/pages/index.jsx"),
+            "src/pages-old/index.jsx": _meta("src/pages-old/index.jsx"),
+        }
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        assert code_proposals._expand_folder("ws", "src/pages")["included"] == ["src/pages/index.jsx"]
+
+    def test_file_count_budget_truncates(self, monkeypatch):
+        project = {f"src/pages/p{i}.jsx": _meta(f"src/pages/p{i}.jsx") for i in range(5)}
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        monkeypatch.setattr(code_proposals, "_FOLDER_MAX_FILES", 3)
+        info = code_proposals._expand_folder("ws", "src/pages")
+        assert len(info["included"]) == 3
+        assert info["total_matched"] == 5
+        assert info["truncated"] is True
+        # Path-sorted, so the SAME 3 files are chosen on a re-expand.
+        assert info["included"] == ["src/pages/p0.jsx", "src/pages/p1.jsx", "src/pages/p2.jsx"]
+
+    def test_size_budget_truncates(self, monkeypatch):
+        project = {
+            "src/pages/a.jsx": _meta("src/pages/a.jsx", size=100),
+            "src/pages/b.jsx": _meta("src/pages/b.jsx", size=100),
+            "src/pages/c.jsx": _meta("src/pages/c.jsx", size=100),
+        }
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        monkeypatch.setattr(code_proposals, "_FOLDER_MAX_TOTAL_CHARS", 150)
+        info = code_proposals._expand_folder("ws", "src/pages")
+        assert info["included"] == ["src/pages/a.jsx"]
+        assert info["truncated"] is True
+
+    def test_skip_rule_does_not_by_itself_set_truncated(self, monkeypatch):
+        # Leaving out a binary/lockfile/etc. is not the same signal as
+        # hitting the size/file budget — only the budget sets `truncated`.
+        project = {
+            "src/pages/index.jsx": _meta("src/pages/index.jsx"),
+            "src/pages/logo.png": _meta("src/pages/logo.png"),
+        }
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        info = code_proposals._expand_folder("ws", "src/pages")
+        assert info["skipped"] == 1
+        assert info["truncated"] is False
+
+
+class TestExpandRefs:
+    def test_non_folder_refs_pass_through_unchanged_in_both_lists(self):
+        refs = [_ref("m.py"), _ref("x.py", kind="range", fromLine=1, toLine=2)]
+        stored, effective = code_proposals._expand_refs(refs, "ws")
+        assert stored == refs
+        assert effective == refs
+
+    def test_folder_ref_is_annotated_and_expanded_to_file_refs(self, monkeypatch):
+        project = {
+            "src/pages/index.jsx": _meta("src/pages/index.jsx"),
+            "src/pages/about.jsx": _meta("src/pages/about.jsx"),
+            "src/pages/logo.png": _meta("src/pages/logo.png"),
+        }
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        folder = _ref("src/pages", kind="folder", provider="cloud")
+        stored, effective = code_proposals._expand_refs([folder], "ws")
+
+        (stored_folder,) = stored
+        assert stored_folder["kind"] == "folder" and stored_folder["path"] == "src/pages"
+        assert stored_folder["includedCount"] == 2
+        assert stored_folder["totalMatched"] == 3
+        assert stored_folder["truncated"] is False
+        # The original ref's own fields (id, provider, ...) survive the
+        # annotation rather than being replaced.
+        assert stored_folder["id"] == folder["id"]
+        assert stored_folder["provider"] == "cloud"
+
+        assert [r["kind"] for r in effective] == ["file", "file"]
+        assert {r["path"] for r in effective} == {"src/pages/index.jsx", "src/pages/about.jsx"}
+        assert all(r["provider"] == "cloud" for r in effective)
+        # Expanded file refs carry no line range — the whole file is in
+        # scope, same as an explicit file chip.
+        assert all("fromLine" not in r and "toLine" not in r for r in effective)
+
+    def test_folder_and_file_refs_can_be_mixed(self, monkeypatch):
+        project = {"src/pages/index.jsx": _meta("src/pages/index.jsx")}
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        refs = [_ref("m.py"), _ref("src/pages", kind="folder")]
+        stored, effective = code_proposals._expand_refs(refs, "ws")
+        assert [r["path"] for r in stored] == ["m.py", "src/pages"]
+        assert [r["path"] for r in effective] == ["m.py", "src/pages/index.jsx"]
+
+    def test_empty_folder_is_annotated_but_dropped_from_effective(self, monkeypatch):
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: {})
+        folder = _ref("src/empty", kind="folder")
+        stored, effective = code_proposals._expand_refs([folder], "ws")
+        assert stored[0]["includedCount"] == 0 and stored[0]["totalMatched"] == 0
+        assert effective == []
+
+    def test_folder_ref_missing_path_raises(self):
+        with pytest.raises(ValueError, match="missing 'path'"):
+            code_proposals._expand_refs([{"kind": "folder"}], "ws")
+
+
+class TestFolderRefIntegration:
+    """create_proposal() end to end with a folder ref — the plan's own
+    Done-when for W5.5: 'add a loading state to every page in
+    src/pages/' yields one proposal spanning several files."""
+
+    def test_create_proposal_reads_every_included_file_and_stores_counts(self, monkeypatch):
+        project = {
+            "src/pages/index.jsx": _meta("src/pages/index.jsx"),
+            "src/pages/about.jsx": _meta("src/pages/about.jsx"),
+            "src/pages/vendor.min.js": _meta("src/pages/vendor.min.js"),  # excluded
+        }
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        files_read = {
+            "src/pages/index.jsx": {"content": "A", "version": 1, "file_path": "src/pages/index.jsx"},
+            "src/pages/about.jsx": {"content": "B", "version": 2, "file_path": "src/pages/about.jsx"},
+        }
+        monkeypatch.setattr(workspace_code_files, "get_file", lambda ws, path: dict(files_read[path]))
+        monkeypatch.setattr(code_proposals.db, "cursor", lambda **kw: _CursorCtx(_Cursor()))
+        monkeypatch.setattr(code_proposals, "write_audit", lambda *a, **k: None)
+        monkeypatch.setattr(code_proposals, "emit_workspace_event", lambda *a, **k: None)
+
+        seen = {}
+
+        def fake_generate_edit(ws_id, instruction, refs, current_files):
+            seen["paths"] = sorted(current_files)
+            return {
+                "summary": "add a loading state",
+                "files": [{"path": p, "op": "replace", "content": c["content"] + "\nloading"}
+                          for p, c in current_files.items()],
+            }
+
+        proposal = code_proposals.create_proposal(
+            "ws", "add a loading state to every page in src/pages/",
+            [_ref("src/pages", kind="folder")], None, "user-1",
+            generate_edit=fake_generate_edit,
+        )
+
+        assert seen["paths"] == ["src/pages/about.jsx", "src/pages/index.jsx"]
+        assert proposal["status"] == "pending"
+        assert {f["path"] for f in proposal["files"]} == {"src/pages/about.jsx", "src/pages/index.jsx"}
+
+        (stored_ref,) = proposal["refs"]
+        assert stored_ref["includedCount"] == 2
+        assert stored_ref["totalMatched"] == 3
+        assert stored_ref["truncated"] is False
+
+    def test_a_folder_with_nothing_includable_is_still_a_plain_value_error(self, monkeypatch):
+        # Every candidate under the prefix is skipped (all binaries) ->
+        # zero effective refs -> the same "no files to edit" ValueError
+        # _paths_from_refs() already raises for an empty ref list.
+        project = {"assets/logo.png": _meta("assets/logo.png")}
+        monkeypatch.setattr(workspace_code_files, "list_files", lambda ws_id: dict(project))
+        with pytest.raises(ValueError, match="at least one ref"):
+            code_proposals.create_proposal(
+                "ws", "x", [_ref("assets", kind="folder")], None, "u")

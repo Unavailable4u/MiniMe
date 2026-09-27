@@ -146,10 +146,20 @@ def run(task_text: str = None, session_id: str = None, path: str = None,
     if conv_context:
         user_content = f"Recent conversation:\n{conv_context}\n\n{user_content}"   # NEW — Part 23
 
+    # Bug fix (2026-09-26): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import
+    # (eo.registry imports this module at load time; eo.dynamic_chain
+    # imports eo.registry at ITS module level, so importing it here up
+    # top would close a circular loop). Quota-ranked, cooldown-aware,
+    # spread across providers -- CHAIN above is now the last-resort
+    # fallback if the live pool comes back empty.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("prompt_writer_lean") or CHAIN
+
     raw = generate_text(
         system_prompt=SYSTEM_PROMPT,
         user_content=user_content,   # CHANGED — Part 23, was f"Task: {task_text}"
-        chain=CHAIN,
+        chain=chain,
         agent_name="Prompt Writer (lean)",
         session_id=session_id,
         path=path,   # Migration Part 27 §1: generate_text() now accepts `path` for real

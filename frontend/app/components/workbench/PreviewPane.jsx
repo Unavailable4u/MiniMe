@@ -37,7 +37,24 @@ import { AlertTriangle, ExternalLink, Loader2, Monitor, Play, RefreshCw, Smartph
 import { useEditorStore } from "../../lib/workbench/editorStore";
 import { detectKind } from "../../lib/preview/detectKind";
 import { bundleStatic } from "../../lib/preview/bundleStatic";
+import { injectConsoleBridge } from "../../lib/preview/consoleBridge";
 import { usePyodideWorker } from "../../hooks/usePyodideWorker";
+
+// W6.2: a fresh nonce per successful build, NOT per component mount —
+// each rebuild re-injects the bridge into a brand-new srcDoc string, so
+// a stale nonce from a PREVIOUS build could otherwise still validate
+// against a message that (implausibly, but not impossibly, given the
+// iframe itself is recreated via `key={reloadNonce}` on every rebuild
+// too) arrives from an old, not-yet-torn-down frame. crypto.randomUUID()
+// is used when available (every modern browser); the fallback covers
+// only a non-secure-context edge case (a plain http:// dev server) where
+// it's undefined — still random enough that a page running INSIDE the
+// sandboxed iframe (the only thing that could possibly guess it) has
+// nothing to gain from trying.
+function makeNonce() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `mm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 const DEBOUNCE_MS = 400;
 
@@ -120,13 +137,25 @@ function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warning
 }
 
 function StaticPreview({ provider, filesMeta, entryPath }) {
-  const { state } = useEditorStore();
+  const { state, consoleMessage } = useEditorStore();
   const [device, setDevice] = useState("desktop");
   const [built, setBuilt] = useState(null); // {html, warnings} | null while building the first time
   const [buildError, setBuildError] = useState(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const cacheRef = useRef(new Map());
   const debounceRef = useRef(null);
+  // W6.2: the iframe this render's build is destined for, and the nonce
+  // baked into that SAME build's injected bridge — both refs (not
+  // state) since nothing here needs to re-render when either changes,
+  // only the message listener below needs to read the current value at
+  // the moment a postMessage actually arrives.
+  const iframeRef = useRef(null);
+  const nonceRef = useRef(null);
+  // Monotonically increasing id for the console feed's own React keys
+  // (ConsolePanel.jsx renders one row per entry) — a bridge message
+  // carries no id of its own (see consoleBridge.js's own header on why
+  // that's the parent's job, not the sandboxed page's).
+  const consoleIdRef = useRef(0);
 
   const buffers = state.buffers;
 
@@ -137,7 +166,16 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
         const entryContent = buffers[entryPath]?.edited ?? (await provider.read(entryPath)).content ?? "";
         const resolveFile = makeResolver({ provider, filesMeta, buffers, cacheRef });
         const result = await bundleStatic({ entryPath, entryContent, resolveFile });
-        setBuilt(result);
+        // W6.2: inject the console/error bridge into every build, not
+        // only on reload — the plan's own "Done when" is "a throw...
+        // shows in Console within a second" while typing, so a rebuild
+        // triggered by a keystroke needs the bridge just as much as the
+        // first render does. A fresh nonce per build (not per mount) —
+        // see makeNonce()'s own comment above for why.
+        const nonce = makeNonce();
+        nonceRef.current = nonce;
+        const html = injectConsoleBridge(result.html, nonce);
+        setBuilt({ html, warnings: result.warnings });
         setBuildError(null);
       } catch (err) {
         setBuildError(err?.message || String(err));
@@ -151,6 +189,53 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
     // rather than by narrowing this dependency list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entryPath, filesMeta, buffers, reloadNonce]);
+
+  // W6.2: the parent half of the bridge — one listener for this pane's
+  // whole lifetime (not re-subscribed per build), reading the CURRENT
+  // iframe/nonce through the refs above at message time. Two checks,
+  // both required (plan §5, step W6.2's own "Security" line):
+  //   - `event.source === iframeRef.current?.contentWindow` — a sandboxed
+  //     iframe has an opaque origin (event.origin is always the string
+  //     "null"), so origin checks are useless; comparing the WINDOW
+  //     object itself is what actually proves this message came from
+  //     OUR iframe and not some other frame/tab that happens to be
+  //     sending postMessage's around.
+  //   - `event.data.nonce === nonceRef.current` — the source check alone
+  //     isn't enough once the SAME iframe has been reused across
+  //     rebuilds within one `key={reloadNonce}` lifetime... it hasn't
+  //     (a new build swaps `built.html` but the iframe itself is only
+  //     recreated on `reloadNonce` changing, per its own `key` prop
+  //     below) — so without the nonce check, a bridge instance installed
+  //     by an EARLIER build (still running, since a rebuild doesn't
+  //     tear down the previous iframe's JS execution until React
+  //     actually replaces the srcDoc) could keep posting messages that
+  //     look valid. Comparing against the CURRENT nonce is what makes a
+  //     stale bridge instance's messages get silently ignored instead.
+  // Every payload is otherwise treated as untrusted data (this module
+  // never eval()s or otherwise executes anything from `event.data`) —
+  // it's read into plain strings/numbers only, same posture
+  // consoleBridge.js's own header describes for the bridge's own
+  // handling of console arguments.
+  useEffect(() => {
+    function onMessage(event) {
+      if (event.source !== iframeRef.current?.contentWindow) return;
+      const data = event.data;
+      if (!data || data.source !== "minime-preview" || data.nonce !== nonceRef.current) return;
+      consoleIdRef.current += 1;
+      consoleMessage({
+        id: consoleIdRef.current,
+        type: typeof data.type === "string" ? data.type : "console",
+        level: typeof data.level === "string" ? data.level : "log",
+        text: typeof data.text === "string" ? data.text : "",
+        stack: typeof data.stack === "string" ? data.stack : null,
+        sourceLine: typeof data.sourceLine === "number" ? data.sourceLine : null,
+        sourceColumn: typeof data.sourceColumn === "number" ? data.sourceColumn : null,
+        timestamp: typeof data.timestamp === "number" ? data.timestamp : Date.now(),
+      });
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [consoleMessage]);
 
   function handleReload() {
     cacheRef.current.clear(); // a manual reload means "don't trust anything cached", unlike the live-typing path which is fine reusing unopened files' last-known content
@@ -185,6 +270,7 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
         ) : (
           <iframe
             key={reloadNonce}
+            ref={iframeRef}
             title="Preview"
             srcDoc={built.html}
             sandbox="allow-scripts"

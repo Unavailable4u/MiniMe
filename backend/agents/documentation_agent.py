@@ -116,7 +116,19 @@ def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
     # real sleeps (1/2/4/8s) in between, on top of generate_text() already
     # having walked every step in CHAIN once per attempt. generate_text()
     # is the single source of retry/fallback behavior now.
-    raw_text = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Documentation Agent",
+    #
+    # Bug fix (2026-09-26): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import
+    # (eo.registry imports this module at load time; eo.dynamic_chain
+    # imports eo.registry at ITS module level, so importing it here up
+    # top would close a circular loop). Quota-ranked, cooldown-aware,
+    # spread across providers -- CHAIN above (Mistral/Gemini, 4 hand-picked
+    # accounts) is now only the last-resort fallback if the live pool
+    # comes back completely empty.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("documentation_agent") or CHAIN
+
+    raw_text = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Documentation Agent",
                               session_id=session_id, tier=tier, domain=domain)
     doc = json.loads(_strip_fences(raw_text))
     write(KEYS["doc_output"], doc)
