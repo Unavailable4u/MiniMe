@@ -101,7 +101,7 @@ function refKey(ref) {
   return `${ref.kind}:${ref.path}:${ref.fromLine ?? ""}:${ref.toLine ?? ""}`;
 }
 
-const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null };
+const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null };
 
 /**
  * Pure reducer — see editorStore.js's own header for why this shape
@@ -200,6 +200,24 @@ export function codeContextReducer(state, action) {
     case "CLEAR_PENDING_REVIEW":
       return state.pendingReview == null ? state : { ...state, pendingReview: null };
 
+    // W6.2: "Fix with AI" on a Console row (ConsolePanel.jsx, rendered
+    // inside EditorWorkbench.jsx's bottom panel) — the OTHER thing a
+    // click there needs, besides the error chip ADD_REF already gives
+    // it. `mode` is "ask" | "edit" (WorkspaceChatPanel.jsx's own
+    // codeChatMode vocabulary); today's caller always requests "ask" —
+    // see ConsolePanel.jsx's own comment on why an unmapped console
+    // error can't safely default to Edit mode. Same one-slot,
+    // replace-on-repeat-click shape as pendingJump/pendingReview above:
+    // BuildTab.jsx's CodeAwareChatPanel is the consumer (it can't be
+    // WorkspaceChatPanel.jsx itself — that file has no lib/workbench
+    // import, see its own header — so this rides through as a plain
+    // prop the same way `codeRefs`/`onReviewProposal` already do).
+    case "SET_PENDING_CHAT_MODE":
+      return { ...state, pendingChatMode: action.mode };
+
+    case "CLEAR_PENDING_CHAT_MODE":
+      return state.pendingChatMode == null ? state : { ...state, pendingChatMode: null };
+
     default:
       return state;
   }
@@ -232,13 +250,22 @@ export function CodeContextProvider({ children }) {
       clearJump: () => dispatch({ type: "CLEAR_PENDING_JUMP" }),
       requestReview: (proposalId) => dispatch({ type: "SET_PENDING_REVIEW", proposalId }),
       clearReview: () => dispatch({ type: "CLEAR_PENDING_REVIEW" }),
+      // W6.2
+      requestChatMode: (mode) => dispatch({ type: "SET_PENDING_CHAT_MODE", mode }),
+      clearChatMode: () => dispatch({ type: "CLEAR_PENDING_CHAT_MODE" }),
     }),
     [dispatch]
   );
 
   const value = useMemo(
-    () => ({ refs: state.refs, pendingJump: state.pendingJump, pendingReview: state.pendingReview, ...actions }),
-    [state.refs, state.pendingJump, state.pendingReview, actions]
+    () => ({
+      refs: state.refs,
+      pendingJump: state.pendingJump,
+      pendingReview: state.pendingReview,
+      pendingChatMode: state.pendingChatMode,
+      ...actions,
+    }),
+    [state.refs, state.pendingJump, state.pendingReview, state.pendingChatMode, actions]
   );
 
   return createElement(CodeContextContext.Provider, { value }, children);

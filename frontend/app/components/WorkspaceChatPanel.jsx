@@ -15,6 +15,7 @@ import { useViewport } from "../hooks/useViewport";   // NEW — Phase 1 (mobile
 import WorkingPanelDrawer from "./mobile/WorkingPanelDrawer";   // NEW — Phase 1
 import { OPEN_WORKING_PANEL_EVENT } from "./mobile/events";   // NEW — Phase 1
 import HireReviewScreen from "./HireReviewScreen";
+import ConfirmDialog from "./ConfirmDialog";
 // CHANGED — dock-controls simplification: PanelLeftOpen/PanelLeftClose are
 // gone along with the Chat Box's own collapse button and collapsed rail
 // (the section header itself is the control now, see the stacked headers
@@ -38,7 +39,7 @@ import {
 // NEW — W5.4: keepAllDecisions()/rejectAllDecisions() stand in for a
 // per-hunk review nobody opened, the same shortcut PendingTray.jsx
 // (EditorWorkbench.jsx) uses for its own Keep all/Reject buttons.
-import { keepAllDecisions, rejectAllDecisions } from "../lib/workbench/reviewMode";
+import { deletedPathsToKeep, keepAllDecisions, rejectAllDecisions } from "../lib/workbench/reviewMode";
 import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
 
@@ -318,6 +319,13 @@ function ThinkingElapsed() {
 // codeContext.js's requestReview(proposal.id) plus switching the Build
 // tab to its Editor sub-tab (and, on the mobile overlay instance,
 // closing the chat dock), neither of which this file knows how to do.
+// NEW — W6.2: `pendingChatMode`/`onConsumeChatMode` are Console tab's
+// "Fix with AI" (ConsolePanel.jsx) asking this panel to switch its
+// Ask|Edit toggle — same "plain prop, not a lib/workbench import" shape
+// as every other codeContext-adjacent prop above; CodeAwareChatPanel is
+// what forwards codeContext.js's own pendingChatMode/clearChatMode
+// under these names. `pendingChatMode === null` (the default, every
+// non-Build call site) means nothing to apply.
 export default function WorkspaceChatPanel({
   collapsed = false,
   onToggleCollapse = null,
@@ -332,6 +340,8 @@ export default function WorkspaceChatPanel({
   codeChips = null,
   onClearCodeRefs = null,
   onReviewProposal = null,
+  pendingChatMode = null,
+  onConsumeChatMode = null,
 }) {
   const legacy = useSession();
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone, API_URL } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8; API_URL NEW — W5.1b, for codeProposals.js's plain fetch() calls
@@ -528,6 +538,24 @@ export default function WorkspaceChatPanel({
   // sendCodeEditProposal below and the toggle's own JSX further down
   // for what flipping this to "edit" actually does now.
   const [codeChatMode, setCodeChatMode] = useState("ask");
+  // W6.2: "Fix with AI" (ConsolePanel.jsx, via BuildTab.jsx's
+  // CodeAwareChatPanel) asking this panel to switch modes — see
+  // codeContext.js's own comment on why this has to arrive as a plain
+  // prop rather than this file reading useCodeContext() itself. Applied
+  // on every CHANGE of `pendingChatMode` (not just its first non-null
+  // value), same "a repeat request must still register" requirement
+  // codeContext.test.mjs's own SET_PENDING_CHAT_MODE tests enforce at
+  // the reducer level — clicking Fix with AI twice in a row, even
+  // requesting the SAME mode both times, must reset the toggle both
+  // times, in case the person had since flipped it to Edit themselves.
+  // `onConsumeChatMode` is called right after applying it so the same
+  // request can't reapply itself if this component re-renders for an
+  // unrelated reason.
+  useEffect(() => {
+    if (pendingChatMode == null) return;
+    setCodeChatMode(pendingChatMode);
+    onConsumeChatMode?.();
+  }, [pendingChatMode, onConsumeChatMode]);
   // NEW — W5.1b: proposals created by THIS panel instance this
   // session, newest first. CHANGED — W5.3: each "pending" entry now has
   // a real Review button into ReviewPanel.jsx's Keep/Undo merge view
@@ -539,6 +567,12 @@ export default function WorkspaceChatPanel({
   const [codeProposals, setCodeProposals] = useState([]);
   const [codeProposalPending, setCodeProposalPending] = useState(false);
   const [codeProposalError, setCodeProposalError] = useState(null);
+  // W5.5: {paths, run} awaiting confirmation that resolving this card's
+  // proposal will delete these paths — same shape and same reason as
+  // EditorWorkbench.jsx's own pendingProposalResolve (see that file's
+  // handleReviewDone for the fuller comment); this card is the third of
+  // resolveProposal()'s three "keep" callers that needs the same gate.
+  const [pendingProposalResolve, setPendingProposalResolve] = useState(null);
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
 
@@ -1236,6 +1270,15 @@ export default function WorkspaceChatPanel({
         .map((ref) =>
           ref.kind === "folder"
             ? `(folder attached: ${ref.path}/)`
+            : // W6.2: a console/error-bridge ref has no real `path` when it
+              // couldn't be mapped to a project file (the common case ahead
+              // of W6.4/6.5's click-to-code work — see PreviewPane.jsx's
+              // own comment) — the fromLine/toLine on one of these are also
+              // not real line numbers (ConsolePanel.jsx repurposes them as
+              // a dedup key, see its own comment), so the `path#Lstart-Lend`
+              // header below would be actively misleading for this kind.
+              ref.kind === "error"
+            ? "```\n" + (ref.snippet || "") + "\n```"
             : "```" + (ref.fromLine != null ? `${ref.path}#L${ref.fromLine}-L${ref.toLine}` : ref.path) + "\n" + (ref.snippet || "") + "\n```"
         )
         .join("\n\n");
@@ -1288,9 +1331,17 @@ export default function WorkspaceChatPanel({
         // W5.4: "one active proposal per file" (plan §5 W5.4) — a
         // pending proposal already covers one of these paths, so a
         // second one here would leave two AI edits racing for the
-        // same file's base_version. Folder refs aren't expanded
-        // server-side yet (W5.5 — create_proposal() itself rejects
-        // them today), so only the paths actually being sent matter.
+        // same file's base_version. W5.5 NOTE: a folder ref is still
+        // excluded from this pre-check — create_proposal() now expands
+        // it server-side (eo/code_proposals.py's _expand_refs()) into
+        // whatever files actually match, and the client has no cheap
+        // way to know that set ahead of the call. So this pre-check
+        // only catches a collision on an EXPLICIT file/range/element
+        // chip; a folder-ref edit that happens to overlap another
+        // pending proposal's files is still caught, just later and
+        // server-side, by resolve_proposal()'s own per-file
+        // base_version re-check (a 409 ProposalStaleError on whichever
+        // one resolves second) rather than up front here.
         const targetPaths = codeRefs.filter((r) => r.kind !== "folder").map((r) => r.path);
         if (targetPaths.length > 0) {
           const targets = new Set(targetPaths);
@@ -1319,6 +1370,7 @@ export default function WorkspaceChatPanel({
             summary: proposal.summary,
             status: proposal.status,
             files: (proposal.files || []).map((f) => ({ path: f.path, op: f.op, original: f.original, proposed: f.proposed })),
+            refs: proposal.refs || [],
           };
           dock.setDockState((prev) => ({ messages: [...prev.messages, cardMessage] }));
           dock.persistMessage(cardMessage);
@@ -1389,24 +1441,36 @@ export default function WorkspaceChatPanel({
   const handleResolveFromCard = useCallback(
     async (message, mode) => {
       const decisions = mode === "keep" ? keepAllDecisions(message) : rejectAllDecisions(message);
-      try {
-        const resolved = await resolveProposal(API_URL, workspaceId, message.proposalId, decisions);
-        setCodeProposals((prev) =>
-          prev.map((p) => (p.id === message.proposalId ? { ...p, status: resolved.status } : p))
-        );
-        if (usingDock) {
-          dock.setDockState((prev) => ({
-            messages: prev.messages.map((m) =>
-              m.role === "code_proposal" && m.proposalId === message.proposalId ? { ...m, status: resolved.status } : m
-            ),
-          }));
+      const run = async () => {
+        try {
+          const resolved = await resolveProposal(API_URL, workspaceId, message.proposalId, decisions);
+          setCodeProposals((prev) =>
+            prev.map((p) => (p.id === message.proposalId ? { ...p, status: resolved.status } : p))
+          );
+          if (usingDock) {
+            dock.setDockState((prev) => ({
+              messages: prev.messages.map((m) =>
+                m.role === "code_proposal" && m.proposalId === message.proposalId ? { ...m, status: resolved.status } : m
+              ),
+            }));
+          }
+        } catch (err) {
+          setCodeProposalError(
+            err instanceof ProposalStaleError
+              ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
+              : err.message || "Couldn't apply this edit."
+          );
         }
-      } catch (err) {
-        setCodeProposalError(
-          err instanceof ProposalStaleError
-            ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
-            : err.message || "Couldn't apply this edit."
-        );
+      };
+      // W5.5 — see EditorWorkbench.jsx's handleReviewDone for why a kept
+      // delete, specifically, needs an explicit confirm before this
+      // request goes out. rejectAllDecisions() never sends a "keep", so
+      // this is only ever reached on mode === "keep".
+      const deletePaths = deletedPathsToKeep(message.files || [], decisions);
+      if (deletePaths.length > 0) {
+        setPendingProposalResolve({ paths: deletePaths, run });
+      } else {
+        await run();
       }
     },
     [API_URL, workspaceId, usingDock, dock.setDockState]
@@ -2381,6 +2445,25 @@ export default function WorkspaceChatPanel({
         )}
       </div>
       )}
+      {/* W5.5: keeping a proposal card that deletes a file is the one
+          resolve decision this client can't walk back — confirm by
+          name before the request goes out (deletedPathsToKeep()). */}
+      <ConfirmDialog
+        open={!!pendingProposalResolve}
+        title={
+          pendingProposalResolve?.paths.length === 1
+            ? `Delete "${pendingProposalResolve.paths[0].split("/").pop()}"?`
+            : `Delete ${pendingProposalResolve?.paths.length ?? 0} files?`
+        }
+        message={`Applying this edit will permanently delete:\n${(pendingProposalResolve?.paths || []).join("\n")}`}
+        confirmLabel="Delete"
+        onConfirm={() => {
+          const run = pendingProposalResolve?.run;
+          setPendingProposalResolve(null);
+          if (run) run();
+        }}
+        onCancel={() => setPendingProposalResolve(null)}
+      />
     </div>
   );
 }

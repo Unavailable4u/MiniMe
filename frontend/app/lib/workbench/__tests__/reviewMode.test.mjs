@@ -21,6 +21,7 @@ const {
   dirtyOverlap,
   unreviewableReason,
   resolvedMessage,
+  deletedPathsToKeep,
 } = loadSource("../reviewMode.js");
 
 let failures = 0;
@@ -316,6 +317,52 @@ assertEqual(
   { added: 0, removed: 0 },
   "CRLF line endings normalize the same way decisionForFile()'s eol() does"
 );
+
+// --- deletedPathsToKeep (W5.5) ----------------------------------------
+
+{
+  const files = [
+    { path: "a.py", op: "replace" },
+    { path: "gone.py", op: "delete" },
+    { path: "also_gone.py", op: "delete" },
+    { path: "new.py", op: "create" },
+  ];
+
+  assertEqual(
+    deletedPathsToKeep(files, [
+      { path: "a.py", decision: "keep" },
+      { path: "gone.py", decision: "keep" },
+      { path: "also_gone.py", decision: "undo" },
+      { path: "new.py", decision: "keep" },
+    ]),
+    ["gone.py"],
+    "only a delete op with an explicit 'keep' decision is a path about to actually be deleted"
+  );
+
+  assertEqual(
+    deletedPathsToKeep(files, [{ path: "gone.py", decision: "undo" }]),
+    [],
+    "a delete explicitly undone is not returned"
+  );
+
+  assertEqual(
+    deletedPathsToKeep(files, []),
+    [],
+    "a delete with NO decision defaults to undo, same as resolve_proposal() itself — not returned"
+  );
+
+  assertEqual(deletedPathsToKeep([], [{ path: "gone.py", decision: "keep" }]), [], "no files -> nothing to delete");
+  assertEqual(deletedPathsToKeep(null, null), [], "deletedPathsToKeep(null, null) doesn't throw");
+
+  assertEqual(
+    deletedPathsToKeep(files, [
+      { path: "gone.py", decision: "keep" },
+      { path: "also_gone.py", decision: "keep" },
+    ]),
+    ["gone.py", "also_gone.py"],
+    "more than one kept delete are all returned, in file order"
+  );
+}
 
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);

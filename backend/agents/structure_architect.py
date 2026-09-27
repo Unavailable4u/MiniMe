@@ -317,7 +317,20 @@ def _code_plan(fixed_code: dict, session_id: str, tier: int, domain: str = None)
         + "\n\nNew/updated modules this cycle:\n" + json.dumps(modules_for_prompt, indent=2)
     )
 
-    raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Structure Architect",
+    # Bug fix (2026-09-26): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import
+    # (eo.registry imports this module at load time; eo.dynamic_chain
+    # imports eo.registry at ITS module level, so importing it here up
+    # top would close a circular loop). Quota-ranked, cooldown-aware,
+    # spread across providers -- CHAIN above is now the last-resort
+    # fallback if the live pool comes back empty. (AGENT_CAPABILITIES
+    # tagging isn't required for this to help: build_fallback_chain()
+    # falls through to ranking the WHOLE account pool by live headroom
+    # whenever no natural_roles match exists for this role name.)
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("structure_architect") or CHAIN
+
+    raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Structure Architect",
                          session_id=session_id, tier=tier, domain=domain)
     cleaned = _strip_fences(raw)
 
@@ -368,7 +381,15 @@ def _no_code_plan(task_text: str, session_id: str, tier: int, domain: str = None
         user_prompt += (DROPPABLE_CONTEXT_MARKER +
                          f"Plan produced for this task so far:\n{json.dumps(current_plan, indent=2)}")
 
-    raw = generate_text(NO_CODE_SYSTEM_PROMPT, user_prompt, CHAIN,
+    # Bug fix (2026-09-26): same deferred-import / dynamic-chain wiring as
+    # _code_plan() above -- see that function's comment for the full
+    # reasoning. Kept as a separate build_fallback_chain() call (not a
+    # shared variable) since this function has its own call site and its
+    # own independent chance of landing on a different live-ranked chain.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("structure_architect") or CHAIN
+
+    raw = generate_text(NO_CODE_SYSTEM_PROMPT, user_prompt, chain,
                          agent_name="Structure Architect (no-code)",
                          session_id=session_id, tier=tier, domain=domain)
     cleaned = _strip_fences(raw)

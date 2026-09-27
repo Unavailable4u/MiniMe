@@ -22,6 +22,21 @@ import ResponsiveSheet from "../mobile/ResponsiveSheet";
 
 const OP_LABELS = { create: "new", delete: "deleted" }; // mirrors ReviewPanel.jsx's own copy
 
+// W5.5 ("show 'included 14 of 40 files' on the chip"): a folder ref's
+// stored includedCount/totalMatched (eo/code_proposals.py's
+// _expand_folder()) rendered as one line per folder chip the
+// instruction referenced. Mirrors CodeProposalCard.jsx's own copy —
+// same small-duplication convention as OP_LABELS above, not worth a
+// shared import for four lines.
+function folderRefLabel(ref) {
+  const name = (ref.path || "").split("/").filter(Boolean).pop() || ref.path;
+  const total = ref.totalMatched ?? 0;
+  const included = ref.includedCount ?? 0;
+  return included >= total
+    ? `${name}/ — ${total} file${total === 1 ? "" : "s"}`
+    : `${name}/ — included ${included} of ${total} files`;
+}
+
 function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) {
   const [busy, setBusy] = useState(null); // "keep" | "reject" | "regenerate" | null
 
@@ -39,6 +54,18 @@ function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) 
       <p className="truncate text-sm text-[var(--neutral-200)]" title={proposal.instruction || undefined}>
         {proposal.summary || proposal.instruction || "AI edit"}
       </p>
+
+      {proposal.refs?.some((r) => r.kind === "folder") && (
+        <ul className="space-y-0.5">
+          {proposal.refs
+            .filter((r) => r.kind === "folder")
+            .map((r) => (
+              <li key={r.id || r.path} className="truncate text-[11px] text-[var(--neutral-500)]">
+                {folderRefLabel(r)}
+              </li>
+            ))}
+        </ul>
+      )}
 
       {proposal.files?.length > 0 && (
         <ul className="space-y-1">

@@ -43,7 +43,7 @@ function assert(cond, msg) {
   }
 }
 
-const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null };
+const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null };
 
 // --- ADD_REF -----------------------------------------------------------
 
@@ -190,6 +190,23 @@ assert(noopClearReview === afterClearReview, "CLEAR_PENDING_REVIEW with nothing 
 const setAgain = codeContextReducer(withReview, { type: "SET_PENDING_REVIEW", proposalId: "prop_1" });
 assertEqual(setAgain.pendingReview, "prop_1", "SET_PENDING_REVIEW with the same id still produces a fresh state object");
 assert(setAgain !== withReview, "...i.e. it is NOT short-circuited to the same object");
+
+// --- pending chat mode (W6.2) --------------------------------------------
+
+const withChatMode = codeContextReducer(initialState, { type: "SET_PENDING_CHAT_MODE", mode: "ask" });
+assertEqual(withChatMode.pendingChatMode, "ask", "SET_PENDING_CHAT_MODE records the requested mode");
+assertEqual(withChatMode.pendingReview, null, "...without touching pendingReview");
+const afterClearChatMode = codeContextReducer(withChatMode, { type: "CLEAR_PENDING_CHAT_MODE" });
+assertEqual(afterClearChatMode.pendingChatMode, null, "CLEAR_PENDING_CHAT_MODE resets it");
+const noopClearChatMode = codeContextReducer(afterClearChatMode, { type: "CLEAR_PENDING_CHAT_MODE" });
+assert(noopClearChatMode === afterClearChatMode, "CLEAR_PENDING_CHAT_MODE with nothing pending returns the SAME state object");
+
+// Same "still a fresh object on a repeat click" requirement as
+// SET_PENDING_REVIEW above — a second "Fix with AI" click before the
+// first request is consumed must still register as a change.
+const setChatModeAgain = codeContextReducer(withChatMode, { type: "SET_PENDING_CHAT_MODE", mode: "ask" });
+assertEqual(setChatModeAgain.pendingChatMode, "ask", "SET_PENDING_CHAT_MODE with the same mode still produces a fresh state object");
+assert(setChatModeAgain !== withChatMode, "...i.e. it is NOT short-circuited to the same object");
 
 // --- contextBudget -----------------------------------------------------------
 

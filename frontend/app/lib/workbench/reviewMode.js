@@ -292,3 +292,37 @@ export function resolvedMessage(status) {
   if (status === "rejected") return "Discarded the AI edit — nothing was changed.";
   return "Finished reviewing the AI edit.";
 }
+
+/**
+ * W5.5: the paths a resolve is about to actually DELETE — the one
+ * decision a person can't walk back from this UI (an "undo" always
+ * just leaves the file as it was; a kept "replace"/"create" is still
+ * sitting in normal version history to restore from — see W8.1 — but
+ * delete_file() has no undo of its own). Every one of resolveProposal()'s
+ * three callers (ReviewPanel.jsx's Done, the pending tray's Keep all,
+ * a chat card's Keep all) needs to ask "does this specific resolve
+ * delete anything?" right before sending it, so the confirm dialog can
+ * name the files by path rather than warning generically on every
+ * resolve.
+ *
+ * `files` is deliberately read from whatever the caller already has on
+ * hand rather than a `review` slice — a full proposal's `files` (the
+ * tray, a chat card) and `current.order`-derived `{path, op}` pairs
+ * (ReviewPanel.jsx's per-file review state) are both `{path, op}`-
+ * shaped supersets this only reads two keys from. `decisions` is
+ * whatever's about to be sent to resolve() — buildDecisions(),
+ * keepAllDecisions() or rejectAllDecisions()'s own output — so this
+ * mirrors resolve_proposal()'s own "no decision for a path defaults to
+ * undo" rule (eo/code_proposals.py) rather than assuming every listed
+ * file has an opinion.
+ *
+ * @param {{path:string, op?:string}[]} files
+ * @param {{path:string, decision:"keep"|"undo"}[]} decisions
+ * @returns {string[]}
+ */
+export function deletedPathsToKeep(files, decisions) {
+  const decisionByPath = new Map((decisions || []).map((d) => [d.path, d.decision]));
+  return (files || [])
+    .filter((f) => f.op === "delete" && (decisionByPath.get(f.path) ?? "undo") === "keep")
+    .map((f) => f.path);
+}

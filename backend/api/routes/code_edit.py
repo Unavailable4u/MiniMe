@@ -82,8 +82,11 @@ def create_code_proposal(
     W5.4's Pusher-driven proposal card is still the intended long-term
     UX now that a real (slower) agent call sits behind this.
 
-    A bad request shape (empty instruction, no refs, an unsupported or
-    folder ref kind) is a 400. A generation FAILURE is not — see
+    A bad request shape (empty instruction, no refs, or an unsupported
+    ref kind) is a 400. A `folder` ref kind is no longer one of these
+    as of W5.5 — it's expanded server-side into a size-budgeted set of
+    file refs (see eo/code_proposals.py's _expand_refs()) rather than
+    rejected. A generation FAILURE is not a 400 either — see
     create_proposal()'s own docstring for why that still returns 200
     with a status='failed' proposal body instead."""
     _require_workspace(ws_id, owner_id)
