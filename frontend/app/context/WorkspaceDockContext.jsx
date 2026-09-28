@@ -875,6 +875,48 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
 
     const isStaleRun = (key, dockSessionId) => states.get(key)?.sessionId !== dockSessionId;
 
+    // NEW — 2026-09-27 deadline-resume fix. /api/task, /api/task/preview,
+    // /api/resume and /api/task/confirm are all backed by
+    // eo/agent_task_pool.py's run_in_agent_pool(), which can fail at the
+    // HTTP layer itself — AgentTaskTimeout (504), AgentPoolSaturated /
+    // DatabaseUnavailable (503) — before ever producing a real
+    // TaskResponse body. Those handlers (api/server.py) all return
+    // FastAPI's own `{"detail": "..."}` shape, which has neither
+    // `status` nor `message` — MessageBubble.jsx's ResultBody only shows
+    // a readable error line off `data.message`/`status === "error"`, so
+    // this class of failure used to fall through every branch there and
+    // render as a raw JSON dump of `{"detail": ...}` instead. Normalized
+    // here, once, for every caller below, rather than teaching
+    // MessageBubble.jsx about a `detail` field it otherwise has no
+    // reason to know exists.
+    //
+    // 504 specifically means eo/agent_task_pool.py's own grace-period
+    // retry (see that module's AGENT_TASK_DEADLINE_GRACE_SECONDS
+    // comment) already tried to let the run land a real "paused"
+    // response instead of reaching this normalizer at all — getting
+    // here means that ALSO elapsed, but eo/executor.py's `except
+    // RunStopped` checkpoints usually still land a resumable
+    // paused_execution:{session_id} snapshot moments later anyway. For
+    // the two callers that already know how to turn a real
+    // status:"paused" response into a working Resume affordance
+    // (sendTask, resumeRun — both set `pausedRun` on it), shaping this
+    // the exact same way lets that same, already-correct handling offer
+    // "try resuming" here too instead of a dead end — no separate
+    // "deadline" branch needed at either call site. The other two
+    // callers (preview, confirmHireReview) have no such wiring for their
+    // own flows, so `treatDeadlineAsPaused: false` there keeps a 504 a
+    // plain, non-actionable error rather than showing a Resume prompt
+    // with nothing behind it.
+    const normalizeTaskErrorBody = (res, data, { treatDeadlineAsPaused = true } = {}) => {
+      if (!data || typeof data !== "object" || data.status !== undefined || typeof data.detail !== "string") {
+        return data;   // already a real TaskResponse (or something else entirely) — leave it alone
+      }
+      if (treatDeadlineAsPaused && res.status === 504) {
+        return { status: "paused", message: data.detail };
+      }
+      return { status: "error", message: data.detail };
+    };
+
     // Persists `data` as an assistant message against the session this
     // run was actually dispatched for (dockSessionId), always. Only
     // touches this dock key's live `messages`/extra state (loading,
@@ -964,7 +1006,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
               ...(dockWorkspaceId ? { app_slug: dockWorkspaceId } : {}),
             }),
           });
-          const data = await res.json();
+          const data = normalizeTaskErrorBody(res, await res.json(), { treatDeadlineAsPaused: false });
           if (data.status === "preview_ready") {
             if (isStaleRun(key, dockSessionId)) {
               console.warn(`[dock:${key}] preview for session ${dockSessionId} arrived after this dock switched chats — dropped.`);
@@ -1001,7 +1043,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
             ...(scope ? { scope } : {}),
           }),
         });
-        const data = await res.json();
+        const data = normalizeTaskErrorBody(res, await res.json());
         if (data.status === "paused") {
           // CO3 patch 3: previously this only set in-memory pausedRun
           // state and returned — nothing was ever appended to
@@ -1033,7 +1075,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           headers: await authHeaders({ json: true }),
           body: JSON.stringify({ session_id: pausedRun.sessionId, ...decision }),
         });
-        const data = await res.json();
+        const data = normalizeTaskErrorBody(res, await res.json());
         if (!isStaleRun(key, dockSessionId)) setState(key, { pausedApproval: null });
         if (data.status === "paused") {
           // CO3 patch 3: same gap as sendTask() above — a resume that
@@ -1075,7 +1117,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
             ...(dockWorkspaceId ? { app_slug: dockWorkspaceId } : {}),
           }),
         });
-        const data = await res.json();
+        const data = normalizeTaskErrorBody(res, await res.json(), { treatDeadlineAsPaused: false });
         finishRun(key, dockSessionId, taskText, data, {}, legStartedAt);
       } catch (err) {
         finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) }, {}, legStartedAt);

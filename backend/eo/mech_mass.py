@@ -147,8 +147,7 @@ FALLBACK_CHAIN = [
 # Deliberately terse and JSON-only, same "respond only valid JSON, no
 # preamble" convention every other programmatically-parsed LLM call in
 # this codebase already uses (eo/mech_motion.py's own
-# _MOTION_SYSTEM_PROMPT, eo/device_archetype.py's own
-# _ARCHETYPE_SYSTEM_PROMPT).
+# _MOTION_SYSTEM_PROMPT).
 _MASS_SYSTEM_PROMPT = """You are a hardware-component mass estimator \
 for a BOM part used in a small 3D-printed hobby-electronics/hobby- \
 robotics enclosure. Given a part's name/description, give your best \

@@ -88,12 +88,48 @@ AGENT_TASK_MAX_QUEUE_DEPTH = int(os.getenv("AGENT_TASK_MAX_QUEUE_DEPTH", "50"))
 # (MAX_CHAIN_STEPS, the rate-limit/ledger wait budgets, etc.) bound
 # each individual retry/wait, but nothing above generate_text() ever
 # bounded the WHOLE call -- that section measured a genuinely
-# multi-minute worst case across a 3-step fallback chain. 300s is a
+# multi-minute worst case across a 3-step fallback chain. 600s is a
 # deliberately generous default, comfortably above that measured worst
 # case, so this only fires on a call that's actually stuck, not merely
-# slow. Override via env if your own /api/task SLA needs it tighter.
+# slow.
+#
+# CHANGED — 2026-09-27: raised from 300s to 600s (longer/multi-role
+# runs were routinely tripping the old ceiling well before they were
+# actually stuck). Safe to raise now that hitting this deadline no
+# longer just abandons the run: eo/executor.py's own `except RunStopped`
+# checkpoints (2026-09-27 deadline-resume fix, same date) turn a
+# deadline hit into a resumable pause instead of a silent, unresumable
+# cancel, so a longer ceiling costs the person more wall-clock wait
+# before that pause happens, not more lost work if it does. Override
+# via env if your own /api/task SLA needs it tighter (or looser).
 AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS = float(
-    os.getenv("AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS", "300")
+    os.getenv("AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS", "600")
+)
+
+# NEW — 2026-09-27 deadline-resume fix. Setting the cancel flag doesn't
+# stop the orphaned thread instantly -- it stops at its own NEXT
+# cooperative checkpoint (eo/executor.py's two `except RunStopped`
+# blocks), which is usually near-instant but, mid-role, can be as far
+# away as "whichever in-flight provider HTTP call currently has the
+# thread" (raise_if_stopped() is only polled BEFORE each attempt in
+# utils/llm_client.py's fallback chain, not during one). This is a
+# short SECOND wait, after the flag is set, for that checkpoint to
+# land: if the thread reaches it in time, run_in_agent_pool() below
+# returns the real {"status": "paused", ...} result instead of raising
+# AgentTaskTimeout -- so the HTTP response looks exactly like any other
+# pause (approval_roles, manual, token-budget), and the frontend's
+# existing `data.status === "paused"` handling (WorkspaceDockContext.jsx's
+# sendTask/resumeRun) shows the Resume affordance with no changes needed
+# on that side at all. If the checkpoint DOESN'T land within this grace
+# window either (the thread is still stuck inside a single slow call),
+# this still falls back to today's 504 -- but the checkpoint keeps
+# running in the background regardless, and usually reaches
+# paused_execution:{session_id} moments later anyway (see
+# eo/executor.py's own comment on that residual gap: the person's next
+# POST /api/resume for this session_id picks it up even though this
+# particular HTTP request never saw it).
+AGENT_TASK_DEADLINE_GRACE_SECONDS = float(
+    os.getenv("AGENT_TASK_DEADLINE_GRACE_SECONDS", "30")
 )
 
 
@@ -251,7 +287,18 @@ async def run_in_agent_pool(fn, /, *args, **kwargs):
             run_guard.request_cancel(
                 _session_id_for_cancel,
                 reason=f"HTTP request exceeded its {AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS:.0f}s deadline")
-        raise AgentTaskTimeout(AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS) from exc
+        # NEW — 2026-09-27 deadline-resume fix: give the now-cancelled
+        # thread AGENT_TASK_DEADLINE_GRACE_SECONDS to reach its own next
+        # checkpoint and actually return (paused, or even a genuine late
+        # completion) before giving up on it for good -- see this
+        # module's own comment on AGENT_TASK_DEADLINE_GRACE_SECONDS for
+        # why this is worth the extra wait. Still the SAME future/thread;
+        # this is not a second attempt, just a longer patience window on
+        # the one already running.
+        try:
+            result = await asyncio.wait_for(future, timeout=AGENT_TASK_DEADLINE_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            raise AgentTaskTimeout(AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS) from exc
     finally:
         waited = time.monotonic() - t0
         stats_key = _STATS_QUEUED_KEY if waited >= _IMMEDIATE_THRESHOLD_SECONDS else _STATS_STARTED_KEY

@@ -1,0 +1,1029 @@
+diff --git a/frontend/app/components/workbench/PreviewPane.jsx b/frontend/app/components/workbench/PreviewPane.jsx
+index 53c304b..2463d79 100644
+--- a/frontend/app/components/workbench/PreviewPane.jsx
++++ b/frontend/app/components/workbench/PreviewPane.jsx
+@@ -33,11 +33,12 @@
+ // own header for why "allow-scripts" alone, no allow-same-origin, no
+ // allow-forms, is enough and deliberately not more).
+ import { useEffect, useMemo, useRef, useState } from "react";
+-import { AlertTriangle, ExternalLink, Loader2, Monitor, Play, RefreshCw, Smartphone, Tablet } from "lucide-react";
++import { AlertTriangle, Crosshair, ExternalLink, Loader2, Monitor, Play, RefreshCw, Smartphone, Tablet } from "lucide-react";
+ import { useEditorStore } from "../../lib/workbench/editorStore";
+ import { detectKind } from "../../lib/preview/detectKind";
+ import { bundleStatic } from "../../lib/preview/bundleStatic";
+ import { injectConsoleBridge } from "../../lib/preview/consoleBridge";
++import { injectInspectorRuntime } from "../../lib/preview/inspectorRuntime";
+ import { usePyodideWorker } from "../../hooks/usePyodideWorker";
+ 
+ // W6.2: a fresh nonce per successful build, NOT per component mount —
+@@ -92,7 +93,7 @@ function makeResolver({ provider, filesMeta, buffers, cacheRef }) {
+   };
+ }
+ 
+-function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings }) {
++function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings, inspecting, onToggleInspect }) {
+   return (
+     <div className="shrink-0 flex items-center justify-between gap-2 px-2 h-8 border-b border-[var(--neutral-800)]">
+       <div className="flex items-center gap-0.5">
+@@ -111,6 +112,23 @@ function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warning
+             <Icon size={13} />
+           </button>
+         ))}
++        {onToggleInspect && (
++          <>
++            <span className="mx-1 h-4 w-px bg-[var(--neutral-800)]" />
++            <button
++              type="button"
++              onClick={onToggleInspect}
++              title={inspecting ? "Stop inspecting (Esc)" : "Inspect element"}
++              aria-label="Inspect element"
++              aria-pressed={inspecting}
++              className={`touch-target p-1 rounded ${
++                inspecting ? "bg-[var(--accent)] text-[var(--accent-text)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
++              }`}
++            >
++              <Crosshair size={13} />
++            </button>
++          </>
++        )}
+       </div>
+       <div className="flex items-center gap-1">
+         {warnings?.length > 0 && (
+@@ -156,7 +174,17 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+   // carries no id of its own (see consoleBridge.js's own header on why
+   // that's the parent's job, not the sandboxed page's).
+   const consoleIdRef = useRef(0);
+-
++  // W6.4: `inspecting` is the PARENT's source of truth for the
++  // crosshair toggle (the frame's own copy is just a mirror of the last
++  // minime:inspect it was sent — see inspectorRuntime.js's header for
++  // the Esc case that has to flow back the other way). `lastSelection`
++  // is the most recent minime:select payload, shown as a one-line
++  // readout below the toolbar; W6.5 (click-to-code) is what will
++  // actually DO something with a selection beyond displaying it, so it
++  // stays plain local state here rather than a shared store field
++  // nothing else reads yet.
++  const [inspecting, setInspecting] = useState(false);
++  const [lastSelection, setLastSelection] = useState(null);
+   const buffers = state.buffers;
+ 
+   useEffect(() => {
+@@ -174,7 +202,7 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+         // see makeNonce()'s own comment above for why.
+         const nonce = makeNonce();
+         nonceRef.current = nonce;
+-        const html = injectConsoleBridge(result.html, nonce);
++        const html = injectInspectorRuntime(injectConsoleBridge(result.html, nonce), nonce);
+         setBuilt({ html, warnings: result.warnings });
+         setBuildError(null);
+       } catch (err) {
+@@ -221,6 +249,24 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+       if (event.source !== iframeRef.current?.contentWindow) return;
+       const data = event.data;
+       if (!data || data.source !== "minime-preview" || data.nonce !== nonceRef.current) return;
++      // W6.4: the inspector runtime posts through the same channel with
++      // the same source/nonce as the console bridge, so its messages
++      // must be peeled off BEFORE the console handling below — otherwise
++      // a minime:select would land in the Console tab as an empty row.
++      if (data.type === "minime:select") {
++        setLastSelection({
++          mm: typeof data.mm === "string" ? data.mm : "",
++          tag: typeof data.tag === "string" ? data.tag : "",
++          classes: Array.isArray(data.classes) ? data.classes.filter((c) => typeof c === "string") : [],
++          dynamic: data.dynamic === true,
++          instanceCount: typeof data.instanceCount === "number" ? data.instanceCount : 1,
++        });
++        return;
++      }
++      if (data.type === "minime:inspectExited") {
++        setInspecting(false);
++        return;
++      }
+       consoleIdRef.current += 1;
+       consoleMessage({
+         id: consoleIdRef.current,
+@@ -237,6 +283,33 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+     return () => window.removeEventListener("message", onMessage);
+   }, [consoleMessage]);
+ 
++  // W6.4: parent -> frame. The runtime ignores anything without this
++  // build's own nonce (inspectorRuntime.js's message listener), so a
++  // stale toggle aimed at a previous build's iframe can't flip a newer
++  // one.
++  function postInspectState(on) {
++    iframeRef.current?.contentWindow?.postMessage(
++      { source: "minime-parent", nonce: nonceRef.current, type: "minime:inspect", on },
++      "*"
++    );
++  }
++
++  function handleToggleInspect() {
++    const next = !inspecting;
++    setInspecting(next);
++    postInspectState(next);
++  }
++
++  // A rebuild swaps srcDoc, which reloads the frame into a FRESH
++  // runtime whose own `inspecting` starts false — without this, turning
++  // inspect mode on and then typing a character (debounced rebuild)
++  // would silently drop it. Re-sent on every load, not just when true,
++  // so a runtime that somehow kept state can't disagree with the
++  // toolbar either.
++  function handleIframeLoad() {
++    postInspectState(inspecting);
++  }
++
+   function handleReload() {
+     cacheRef.current.clear(); // a manual reload means "don't trust anything cached", unlike the live-typing path which is fine reusing unopened files' last-known content
+     setReloadNonce((n) => n + 1);
+@@ -259,7 +332,29 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+ 
+   return (
+     <div className="h-full min-h-0 flex flex-col">
+-      <DeviceToolbar device={device} onDeviceChange={setDevice} onReload={handleReload} onOpenNewTab={handleOpenNewTab} warnings={built?.warnings} />
++      <DeviceToolbar
++        device={device}
++        onDeviceChange={setDevice}
++        onReload={handleReload}
++        onOpenNewTab={handleOpenNewTab}
++        warnings={built?.warnings}
++        inspecting={inspecting}
++        onToggleInspect={handleToggleInspect}
++      />
++      {lastSelection && (
++        <div
++          className="shrink-0 flex items-center gap-2 px-2 py-1 border-b border-[var(--neutral-800)] font-mono text-[10px] text-[var(--neutral-400)]"
++          title={lastSelection.mm}
++        >
++          <span className="truncate">
++            {lastSelection.tag}
++            {lastSelection.classes.length > 0 ? `.${lastSelection.classes.join(".")}` : ""}
++          </span>
++          <span className="shrink-0 text-[var(--neutral-600)]">{lastSelection.mm}</span>
++          {lastSelection.dynamic && <span className="shrink-0 text-amber-400">dynamic — nearest source element</span>}
++          {lastSelection.instanceCount > 1 && <span className="shrink-0 text-[var(--neutral-500)]">×{lastSelection.instanceCount}</span>}
++        </div>
++      )}
+       <div className="flex-1 min-h-0 overflow-auto bg-[var(--neutral-900)] flex justify-center">
+         {buildError ? (
+           <div className="p-4 text-xs text-red-400 whitespace-pre-wrap">{buildError}</div>
+@@ -271,6 +366,7 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+           <iframe
+             key={reloadNonce}
+             ref={iframeRef}
++            onLoad={handleIframeLoad}
+             title="Preview"
+             srcDoc={built.html}
+             sandbox="allow-scripts"
+diff --git a/frontend/app/lib/preview/__tests__/bundleStatic.test.mjs b/frontend/app/lib/preview/__tests__/bundleStatic.test.mjs
+index e0b5d9f..54a1388 100644
+--- a/frontend/app/lib/preview/__tests__/bundleStatic.test.mjs
++++ b/frontend/app/lib/preview/__tests__/bundleStatic.test.mjs
+@@ -9,9 +9,16 @@
+ //
+ // Run: node frontend/app/lib/preview/__tests__/bundleStatic.test.mjs
+ import * as parse5 from "parse5";
++// W6.4: bundleStatic.js now also imports "./instrument" (instrumentSource)
++// to stamp data-mm onto the entry HTML — see that file's own header for
++// why. The REAL module, same "real, actually-installed package" spirit
++// as parse5 above, not a stub: this file's own assertions about
++// instrumentation (below) are only meaningful against the genuine
++// instrumentHtml() logic instrument.test.mjs already covers on its own.
++import * as instrument from "../../preview/instrument.js";
+ import { loadSource } from "../../workbench/__tests__/loadSource.mjs";
+ 
+-const { bundleStatic } = loadSource("../../preview/bundleStatic.js", { imports: { parse5 } });
++const { bundleStatic } = loadSource("../../preview/bundleStatic.js", { imports: { parse5, "./instrument": instrument } });
+ 
+ let failures = 0;
+ function assert(cond, msg) {
+@@ -166,9 +173,50 @@ function fileMap(map) {
+   assert(!result.threw, "bundleStatic never throws outward, even on bad input — it returns a result with a warning instead");
+ }
+ 
++// --- W6.4: entry HTML is instrumented with data-mm, scripts are not ----
++
++{
++  const entryContent = [
++    "<!DOCTYPE html>",
++    "<html><head><title>x</title>",
++    '<link rel="stylesheet" href="style.css">',
++    "</head><body>",
++    '<div class="card"><p>hi</p></div>',
++    '<script src="app.js"></script>',
++    "</body></html>",
++  ].join("\n");
++
++  const result = await bundleStatic({
++    entryPath: "index.html",
++    entryContent,
++    resolveFile: fileMap({ "style.css": "body { color: red; }", "app.js": 'document.querySelector("p");' }),
++  });
++
++  assert(result.html.includes('<div class="card" data-mm='), "the entry HTML's own elements get a data-mm attribute (W6.4's inspector needs this to resolve a click)");
++  assert(result.html.includes("<p data-mm="), "nested elements are instrumented too, not just the top-level one");
++  assert(!result.html.includes("<style") || !/style[^>]*data-mm=/.test(result.html), "a <style> tag itself is never instrumented (instrument.js's own HTML_SKIP_TAGS)");
++  assert(
++    result.html.includes('<script>document.querySelector("p");</script>'),
++    "an inlined SCRIPT file's own content is left completely untouched -- see bundleStatic.js's own header for why only the entry HTML is instrumented, never a resolved script"
++  );
++}
++
++{
++  // instrumentSource's own "never break the preview" contract (a
++  // genuine parse failure returns the ORIGINAL content untouched, plus
++  // a note) surfaces here as a bundleStatic warning rather than being
++  // silently swallowed -- same "the person should be able to see why
++  // the inspector isn't working for this file" reasoning as any other
++  // warning this function already produces.
++  const result = await bundleStatic({ entryPath: "index.html", entryContent: null, resolveFile: fileMap({}) });
++  assert(!result.warnings.some((w) => w.includes("undefined")), "a null entryContent doesn't produce a garbled 'undefined' warning");
++}
++
+ if (failures > 0) {
+   console.error(`\n${failures} assertion(s) failed.`);
+   process.exit(1);
+ } else {
+   console.log("\nAll assertions passed.");
+ }
++
++
+diff --git a/frontend/app/lib/preview/__tests__/inspectorRuntime.test.mjs b/frontend/app/lib/preview/__tests__/inspectorRuntime.test.mjs
+new file mode 100644
+index 0000000..6d373da
+--- /dev/null
++++ b/frontend/app/lib/preview/__tests__/inspectorRuntime.test.mjs
+@@ -0,0 +1,387 @@
++// W6.4 (Build Workbench plan) — tests for lib/preview/inspectorRuntime.js.
++//
++// Two tiers, same split consoleBridge.test.mjs already established (see
++// that file's own header for why): structural/string checks on
++// buildInspectorScript()'s OUTPUT (no DOM needed), plus — new here,
++// because "click reports the right mm" is this step's own literal
++// "Done when" and deserves more than a string match — REAL EXECUTION of
++// that same script against a minimal, purpose-built fake DOM, using
++// Node's built-in `vm` module (no new dependency: vm ships with Node).
++//
++// The fake DOM below is NOT a general-purpose jsdom replacement — it
++// implements exactly the handful of methods inspectorRuntime.js's own
++// script actually calls (closest() for '[data-mm]' only,
++// querySelectorAll('[data-mm="..."]') for the exact-match case,
++// getAttribute, getBoundingClientRect, a stub getComputedStyle,
++// addEventListener that just RECORDS handlers so this file can invoke
++// them directly instead of needing a real event loop). Anything the
++// real script called that this fake DOM didn't implement would throw
++// during the vm.Script.runInContext() calls below, so a passing run
++// here is real evidence the script only ever touches the DOM surface
++// this test accounts for.
++//
++// Run: node frontend/app/lib/preview/__tests__/inspectorRuntime.test.mjs
++import vm from "node:vm";
++import * as parse5 from "parse5";
++import { loadSource } from "../../workbench/__tests__/loadSource.mjs";
++import { instrumentHtml } from "../../preview/instrument.js";
++
++const { buildInspectorScript, injectInspectorRuntime, MAX_TEXT_PREVIEW_LENGTH, MAX_HTML_PREVIEW_LENGTH, MAX_ANCESTORS } = loadSource(
++  "../../preview/inspectorRuntime.js",
++  { imports: { parse5 } }
++);
++
++let failures = 0;
++function assert(cond, msg) {
++  if (!cond) {
++    failures++;
++    console.error(`FAIL: ${msg}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// ===========================================================================
++// Tier 1 — structural checks on the generated script string
++// ===========================================================================
++
++const script = buildInspectorScript("abc123");
++
++assert(script.includes('"abc123"') || script.includes("'abc123'"), "the nonce is embedded, quoted as a string literal");
++assert(!script.includes("eval("), "never eval (plan's own security note, same as consoleBridge.js)");
++assert(!script.includes("new Function("), "never the Function constructor either");
++assert(!/<\/script/i.test(script), "never contains a literal '</script' — would truncate the injected tag");
++assert(script.includes("'minime:select'"), "posts the plan's own minime:select message type");
++assert(script.includes("'minime:inspectExited'"), "notifies the parent when Esc exits inspect mode locally");
++assert(script.includes("'minime:inspect'"), "listens for the parent's minime:inspect toggle");
++assert(script.includes("'minime:highlight'"), "listens for the parent's minime:highlight");
++assert(script.includes("addEventListener('click', mmOnClick, true)"), "the click listener is registered on the CAPTURE phase, per the plan's own line");
++assert(script.includes("event.preventDefault()") && script.includes("event.stopPropagation()"), "a click while inspecting is prevented/stopped so the page's own handler never fires");
++assert(script.includes("'Escape'"), "Esc is wired to exit inspect mode");
++assert(script.includes("__mmInspectorInstalled__"), "guards against double-installation if injected twice");
++assert(script.includes("closest('[data-mm]')"), "resolution walks up to the nearest element carrying data-mm — the 'nearest static ancestor' rule from the plan");
++
++const hostileNonce = `x"; window.__pwned__=1; //`;
++const hostileScript = buildInspectorScript(hostileNonce);
++const encoded = JSON.stringify(hostileNonce);
++assert(hostileScript.includes(encoded), "a nonce with a quote is safely JSON-encoded");
++assertEqual(
++  hostileScript.split(encoded).join("").includes("__pwned__"),
++  false,
++  "outside its one safely-quoted occurrence, a hostile nonce's payload never appears in the output"
++);
++
++assert(typeof MAX_TEXT_PREVIEW_LENGTH === "number" && MAX_TEXT_PREVIEW_LENGTH > 0, "MAX_TEXT_PREVIEW_LENGTH is a real positive cap");
++assertEqual(MAX_HTML_PREVIEW_LENGTH, 1024, "MAX_HTML_PREVIEW_LENGTH matches the plan's own explicit htmlPreview(≤1KB)");
++assert(typeof MAX_ANCESTORS === "number" && MAX_ANCESTORS > 0, "MAX_ANCESTORS is a real positive cap");
++
++// ===========================================================================
++// Tier 2 — real execution against a minimal fake DOM (Node's `vm` module)
++// ===========================================================================
++
++// A plain, hand-rolled element — NOT jsdom. Implements exactly what
++// inspectorRuntime.js's script calls on an element: getAttribute,
++// closest('[data-mm]'), getBoundingClientRect, className/tagName,
++// textContent, outerHTML. See this file's own header for why a fake
++// this narrow is the right amount of test infrastructure here.
++class FakeElement {
++  constructor(tag, attrs = {}, children = [], rect = { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) {
++    this.tagName = tag.toUpperCase();
++    this._attrs = attrs;
++    this.className = attrs.class || "";
++    this.children = children;
++    this._rect = rect;
++    for (const c of children) c.parentElement = this;
++    this.parentElement = null;
++  }
++  getAttribute(name) {
++    return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null;
++  }
++  closest(selector) {
++    const m = /^\[([a-zA-Z-]+)\]$/.exec(selector);
++    if (!m) throw new Error("fake closest() only supports '[attr]' selectors, got: " + selector);
++    let node = this;
++    while (node) {
++      if (node.getAttribute(m[1]) != null) return node;
++      node = node.parentElement;
++    }
++    return null;
++  }
++  getBoundingClientRect() {
++    return this._rect;
++  }
++  get textContent() {
++    return this._text || this.children.map((c) => c.textContent).join("");
++  }
++  get outerHTML() {
++    return `<${this.tagName.toLowerCase()}>${this.textContent}</${this.tagName.toLowerCase()}>`;
++  }
++  // Flattens this element and every descendant, depth-first — backs the
++  // fake document's querySelectorAll/querySelector below.
++  *walk() {
++    yield this;
++    for (const c of this.children) yield* c.walk();
++  }
++}
++
++/**
++ * Builds a fresh sandbox (fake window/document + a `posted` array the
++ * test reads afterward) and runs buildInspectorScript(nonce) in it via
++ * vm.createContext/vm.Script — REAL execution of the REAL generated
++ * source, not a reimplementation of its logic. `handlers` captures
++ * every window.addEventListener call by event name so the test can
++ * invoke them directly (there is no real browser event loop to dispatch
++ * through in a vm context).
++ */
++function makeSandbox(root, nonce) {
++  const posted = [];
++  const handlers = {};
++  const sandbox = {
++    window: {
++      parent: { postMessage: (msg) => posted.push(msg) },
++      addEventListener: (type, fn) => {
++        handlers[type] = fn;
++      },
++      getComputedStyle: () => ({
++        color: "rgb(0, 0, 0)",
++        backgroundColor: "rgb(255, 255, 255)",
++        fontSize: "16px",
++        padding: "8px",
++        margin: "4px",
++        display: "block",
++      }),
++    },
++    document: {
++      body: {}, // truthy -- just needs to exist for mmEnsureOverlay()'s guard
++      documentElement: { appendChild: () => {} },
++      createElement: () => ({ style: {} }), // the overlay/label boxes -- never asserted on directly, only that creating them doesn't throw
++      querySelector: (selector) => {
++        const m = /^\[data-mm="(.*)"\]$/.exec(selector);
++        if (!m) throw new Error("fake querySelector only supports the exact-match data-mm form, got: " + selector);
++        for (const el of root.walk()) if (el.getAttribute("data-mm") === m[1].replace(/\\"/g, '"')) return el;
++        return null;
++      },
++      querySelectorAll: (selector) => {
++        const m = /^\[data-mm="(.*)"\]$/.exec(selector);
++        if (!m) throw new Error("fake querySelectorAll only supports the exact-match data-mm form, got: " + selector);
++        const wanted = m[1].replace(/\\"/g, '"');
++        return [...root.walk()].filter((el) => el.getAttribute("data-mm") === wanted);
++      },
++    },
++  };
++  const context = vm.createContext(sandbox);
++  new vm.Script(buildInspectorScript(nonce)).runInContext(context);
++  return { handlers, posted, window: sandbox.window, document: sandbox.document };
++}
++
++function fakeEvent(target, extra = {}) {
++  return { target, preventDefault() {}, stopPropagation() {}, ...extra };
++}
++
++function postFromParent(sandbox, nonce, msg) {
++  sandbox.handlers.message({ source: sandbox.window.parent, data: { source: "minime-parent", nonce, ...msg } });
++}
++
++// A small static tree: an instrumented <div> (mm=D) containing a <span>
++// with NO data-mm of its own (as if it were inserted at runtime by the
++// page's own script, per the plan's "elements created at runtime (no
++// data-mm) resolve to the nearest static ancestor" rule) and a second,
++// separately-instrumented <button> (mm=B). `walk()`-based lookups make
++// this tree usable by the fake document above without any separate
++// registration step.
++const spanNoMm = new FakeElement("span", {}, [], { x: 0, y: 0, top: 0, left: 0, right: 40, bottom: 20, width: 40, height: 20 });
++spanNoMm._text = "hi";
++const divMm = new FakeElement(
++  "div",
++  { "data-mm": "app.html:2:0:5:6", class: "card highlighted" },
++  [spanNoMm],
++  { x: 10, y: 10, top: 10, left: 10, right: 210, bottom: 110, width: 200, height: 100 }
++);
++const buttonMm = new FakeElement("button", { "data-mm": "app.html:6:0:6:30", class: "btn-primary" }, [], {
++  x: 0,
++  y: 200,
++  top: 200,
++  left: 0,
++  right: 120,
++  bottom: 240,
++  width: 120,
++  height: 40,
++});
++const root = new FakeElement("div", {}, [divMm, buttonMm]);
++
++{
++  const s = makeSandbox(root, "n1");
++  postFromParent(s, "n1", { type: "minime:inspect", on: true });
++  s.handlers.click(fakeEvent(spanNoMm));
++  assertEqual(s.posted.length, 1, "a click while inspecting posts exactly one message");
++  const msg = s.posted[0];
++  assertEqual(msg.type, "minime:select", "the posted message is a minime:select");
++  assertEqual(msg.nonce, "n1", "the message carries this build's own nonce");
++  assertEqual(msg.mm, "app.html:2:0:5:6", "clicking the un-instrumented span resolves to its instrumented PARENT's mm — the exact plan requirement");
++  assertEqual(msg.dynamic, true, "flagged dynamic, since the actual click target had no data-mm of its own");
++  assertEqual(msg.tag, "div", "tag reflects the RESOLVED element (div), not the click target (span)");
++  assertEqual(msg.classes, ["card", "highlighted"], "classes are split into an array");
++  assertEqual(msg.rect, { x: 10, y: 10, top: 10, left: 10, right: 210, bottom: 110, width: 200, height: 100 }, "rect is the resolved element's own bounding box");
++  assertEqual(msg.styles.background, "rgb(255, 255, 255)", "styles.background comes from computed backgroundColor");
++  assertEqual(msg.instanceCount, 1, "only one element in the document carries this exact mm");
++  assertEqual(msg.ancestors, [], "no data-mm'd ANCESTOR above the div itself in this tree (root carries none)");
++}
++
++{
++  // Clicking an element that already HAS its own data-mm (the button) —
++  // dynamic:false, tag/classes/mm all describe the button directly, not
++  // some ancestor.
++  const s = makeSandbox(root, "n2");
++  postFromParent(s, "n2", { type: "minime:inspect", on: true });
++  s.handlers.click(fakeEvent(buttonMm));
++  const msg = s.posted[0];
++  assertEqual(msg.mm, "app.html:6:0:6:30", "a click directly on an instrumented element resolves to itself");
++  assertEqual(msg.dynamic, false, "not flagged dynamic — the click target WAS the resolved element");
++  assertEqual(msg.tag, "button", "tag is the button's own");
++}
++
++{
++  // Not inspecting -> a click is a plain no-op, nothing posted, nothing
++  // prevented on the page's own behavior.
++  const s = makeSandbox(root, "n3");
++  s.handlers.click(fakeEvent(buttonMm));
++  assertEqual(s.posted, [], "a click while inspect mode is OFF posts nothing at all");
++}
++
++{
++  // instanceCount > 1: two elements sharing the exact same mm (as a
++  // .map() render would produce multiple DOM copies of one template).
++  const dupA = new FakeElement("li", { "data-mm": "list.html:3:2:3:20" }, [], { x: 0, y: 0, top: 0, left: 0, right: 10, bottom: 10, width: 10, height: 10 });
++  const dupB = new FakeElement("li", { "data-mm": "list.html:3:2:3:20" }, [], { x: 0, y: 20, top: 20, left: 0, right: 10, bottom: 30, width: 10, height: 10 });
++  const listRoot = new FakeElement("ul", {}, [dupA, dupB]);
++  const s = makeSandbox(listRoot, "n4");
++  postFromParent(s, "n4", { type: "minime:inspect", on: true });
++  s.handlers.click(fakeEvent(dupA));
++  assertEqual(s.posted[0].instanceCount, 2, "instanceCount counts every element sharing this exact data-mm value, not just the one clicked");
++}
++
++{
++  // Esc: exits inspect mode locally AND tells the parent, so the
++  // toolbar's own toggle can resync — a plain "handled internally" exit
++  // would leave the parent's crosshair stuck showing 'on'.
++  const s = makeSandbox(root, "n5");
++  postFromParent(s, "n5", { type: "minime:inspect", on: true });
++  s.handlers.keydown({ key: "Escape" });
++  assertEqual(s.posted.length, 1, "Esc posts exactly one message");
++  assertEqual(s.posted[0].type, "minime:inspectExited", "...and it's the inspectExited notification");
++  s.handlers.click(fakeEvent(buttonMm));
++  assertEqual(s.posted.length, 1, "after Esc, inspect mode is truly off -- a further click posts nothing new");
++}
++
++{
++  // Ancestor chain: a deeper tree where BOTH the immediate parent and an
++  // outer grandparent carry their own data-mm.
++  const inner = new FakeElement("span", { "data-mm": "nested.html:3:4:3:20" }, [], { x: 0, y: 0, top: 0, left: 0, right: 5, bottom: 5, width: 5, height: 5 });
++  const mid = new FakeElement("div", { "data-mm": "nested.html:2:2:4:8" }, [inner]);
++  const outer = new FakeElement("section", { "data-mm": "nested.html:1:0:5:10" }, [mid]);
++  const s = makeSandbox(outer, "n6");
++  postFromParent(s, "n6", { type: "minime:inspect", on: true });
++  s.handlers.click(fakeEvent(inner));
++  assertEqual(s.posted[0].ancestors, ["nested.html:2:2:4:8", "nested.html:1:0:5:10"], "ancestors lists every data-mm'd ANCESTOR, nearest first, not including the clicked element's own mm");
++}
++
++{
++  // Wire-format check for the message payload the parent -> frame
++  // direction uses to verify its own security, unrelated to the mm
++  // resolution logic above: an inspect toggle with the WRONG nonce is
++  // silently ignored (this is what stops a stale/forged parent message
++  // from a previous build from still being able to flip inspect mode on
++  // in a fresh iframe instance).
++  const s = makeSandbox(root, "n7");
++  postFromParent(s, "wrong-nonce", { type: "minime:inspect", on: true });
++  s.handlers.click(fakeEvent(buttonMm));
++  assertEqual(s.posted, [], "a minime:inspect message with the wrong nonce is ignored -- inspect mode never actually turned on");
++}
++
++{
++  // minime:highlight with an unknown mm must not throw (there's nothing
++  // asserted about the (untested) visual box here -- only that this
++  // path never crashes the runtime, since a stale/renamed mm reaching
++  // this is entirely plausible once W6.5 starts sending it on ordinary
++  // cursor movement).
++  const s = makeSandbox(root, "n8");
++  let threw = false;
++  try {
++    postFromParent(s, "n8", { type: "minime:highlight", mm: "does-not-exist" });
++  } catch (e) {
++    threw = true;
++  }
++  assert(!threw, "minime:highlight for an mm with no matching element never throws");
++}
++
++// ===========================================================================
++// Tier 3 — injectInspectorRuntime, and the same golden fixture W6.3's own
++// instrument.test.mjs already established (data-mm survives the full
++// instrument -> inject -> serialize round trip byte for byte)
++// ===========================================================================
++
++{
++  const fixture =
++    "<!DOCTYPE html>\n" +
++    "<html><head><title>x</title><meta charset=\"utf-8\"><style>.a{color:red}</style></head>\n" +
++    "<body>\n" +
++    '  <div class="a">\n' +
++    "    <p>hi</p>\n" +
++    '    <img src="x.png">\n' +
++    "  </div>\n" +
++    "  <script>console.log(1)</script>\n" +
++    "</body></html>";
++
++  const instrumented = instrumentHtml(fixture, "index.html");
++  const withInspector = injectInspectorRuntime(instrumented.code, "golden-nonce");
++
++  // Same golden value instrument.test.mjs's own test already asserts
++  // for this exact fixture -- confirms injectInspectorRuntime's own
++  // parse5 round trip never disturbs a data-mm value W6.3 already
++  // pinned down.
++  assert(withInspector.includes('data-mm="index.html:4:2:7:8"'), "the div's W6.3 golden data-mm value survives injectInspectorRuntime's parse+serialize round trip unchanged");
++
++  const doc = parse5.parse(withInspector, { sourceCodeLocationInfo: false });
++  const scripts = [];
++  (function walk(node) {
++    if (node.tagName === "script") scripts.push((node.childNodes || []).map((c) => c.value || "").join(""));
++    for (const child of node.childNodes || []) walk(child);
++  })(doc);
++  assert(scripts.length >= 1 && scripts[0].includes("__mmInspectorInstalled__"), "the inspector script is injected as the FIRST script in document order");
++}
++
++{
++  // Composability with the W6.2 console bridge -- PreviewPane.jsx calls
++  // both injectors on the same html/nonce, one after the other.
++  const html = "<html><head></head><body><script>1;</script></body></html>";
++  // A tiny stand-in for injectConsoleBridge's own output shape (a
++  // <script> containing a recognizable marker), so this test doesn't
++  // need to import consoleBridge.js just to prove ORDER/composability.
++  const withConsoleMarker = html.replace("<head>", "<head><script>/* __CONSOLE_MARKER__ */</script>");
++  const combined = injectInspectorRuntime(withConsoleMarker, "n9");
++  const firstScriptStart = combined.indexOf("<script>");
++  assert(combined.includes("__mmInspectorInstalled__"), "the inspector script is present alongside another already-injected script");
++  assert(combined.indexOf("__mmInspectorInstalled__") < combined.indexOf("__CONSOLE_MARKER__"), "injectInspectorRuntime inserts itself as the FIRST child of <head> -- ahead of whatever was already injected before it, since PreviewPane.jsx calls the console bridge first and this one second");
++}
++
++{
++  // Never breaks the preview on unparseable input.
++  assertEqual(typeof injectInspectorRuntime("", "n10"), "string", "an empty string input doesn't throw");
++}
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll inspectorRuntime.js tests passed.");
++}
+diff --git a/frontend/app/lib/preview/bundleStatic.js b/frontend/app/lib/preview/bundleStatic.js
+index 84bbfc2..4121559 100644
+--- a/frontend/app/lib/preview/bundleStatic.js
++++ b/frontend/app/lib/preview/bundleStatic.js
+@@ -30,8 +30,23 @@
+ // operating on strings, testable with plain node exactly like
+ // instrument.test.mjs tests instrument.js, using a stub resolveFile
+ // instead of a real FileProvider.
+-
++//
++// W6.4: the ENTRY html is run through instrumentSource() (W6.3) before
++// this function's own parse5 pass — every element gets a `data-mm`
++// attribute, which is what lets the inspector runtime (W6.4's other
++// half, lib/preview/inspectorRuntime.js) trace a click back to a source
++// range at all. Deliberately NOT applied to a resolved SCRIPT
++// candidate's own content below, even though instrumentSource()
++// dispatches .js the same as .jsx/.tsx: a plain static-preview script
++// file is ordinary DOM-manipulation JS with no JSX in it, so running it
++// through instrumentJsx() would only ever find zero JSXElements while
++// still paying to load @babel/parser for every single static preview —
++// exactly the cost instrument.js's own header says a "pure-HTML
++// preview" is supposed to avoid. The elements a click could ever land
++// on are already covered by instrumenting the HTML alone; a script only
++// ever manipulates nodes that markup already produced.
+ import * as parse5 from "parse5";
++import { instrumentSource } from "./instrument";
+ 
+ const EXTERNAL_RE = /^([a-z]+:)?\/\//i; // http:, https:, //cdn... (protocol-relative), or any other-scheme URL
+ const DATA_URI_RE = /^data:/i;
+@@ -77,6 +92,17 @@ function resolveRelative(entryPath, url) {
+  */
+ export async function bundleStatic({ entryPath, entryContent, resolveFile }) {
+   const warnings = [];
++
++  // W6.4 — see this module's own header for why only the entry HTML,
++  // never a resolved script file, gets instrumented. A genuine parse
++  // failure here (instrumentSource's own try/catch already returns the
++  // ORIGINAL content untouched — see instrument.js's "never break the
++  // preview" contract) surfaces as a warning rather than silently
++  // disabling the inspector for this file with no visible sign why.
++  const instrumentedEntry = await instrumentSource(entryContent, entryPath);
++  if (instrumentedEntry.note) warnings.push(`${entryPath}: ${instrumentedEntry.note}`);
++  entryContent = instrumentedEntry.code;
++
+   let document;
+   try {
+     document = parse5.parse(entryContent, { sourceCodeLocationInfo: false });
+@@ -85,7 +111,7 @@ export async function bundleStatic({ entryPath, entryContent, resolveFile }) {
+     // this) but the contract here is the same "never break the
+     // preview" one instrument.js follows: fall back to the untouched
+     // source rather than propagate.
+-    return { html: entryContent, warnings: [`Couldn't parse ${entryPath}: ${err.message}`] };
++    return { html: entryContent, warnings: [...warnings, `Couldn't parse ${entryPath}: ${err.message}`] };
+   }
+ 
+   // Collected as {node, kind} pairs during the walk, then resolved and
+diff --git a/frontend/app/lib/preview/inspectorRuntime.js b/frontend/app/lib/preview/inspectorRuntime.js
+new file mode 100644
+index 0000000..7ca0b5b
+--- /dev/null
++++ b/frontend/app/lib/preview/inspectorRuntime.js
+@@ -0,0 +1,324 @@
++// frontend/app/lib/preview/inspectorRuntime.js — W6.4 (Build Workbench
++// plan). "Inspector runtime + message protocol": the injected script
++// that turns a live preview into something you can point at and select
++// an ELEMENT in, resolved back to the exact source range W6.3's
++// instrumentSource() stamped onto it (the `data-mm="path:l:c:l:c"`
++// contract — see instrument.js's own header, which this module never
++// re-derives, only reads).
++//
++// Same two-half shape as consoleBridge.js (that file's own header
++// explains why): buildInspectorScript(nonce) is the runtime, as a
++// plain ES5-flavored string (this executes INSIDE the preview's own
++// iframe, running whatever JS engine that page's own <!DOCTYPE> gets —
++// no arrow functions/template literals/optional chaining, no
++// eval/new Function anywhere in it); injectInspectorRuntime(html,
++// nonce) is the parse5 tree-mutate-then-serialize step that actually
++// gets it into a bundled document, following the exact same
++// "never break the preview" contract every other file in this
++// directory already commits to.
++//
++// Protocol (plan §5, step W6.4's own "Build" line) — every message
++// either direction carries `nonce` so PreviewPane.jsx's listener can
++// tell a message from THIS build's bridge apart from a stale one, same
++// reasoning as consoleBridge.js's own header:
++//
++//   frame  -> parent   {source:"minime-preview", nonce, type:"minime:select",
++//                        mm, tag, classes, textPreview, htmlPreview,
++//                        rect, styles, ancestors, instanceCount, dynamic}
++//   frame  -> parent   {source:"minime-preview", nonce, type:"minime:inspectExited"}
++//                       -- NOT in the plan's own message list, but a direct
++//                       consequence of "Esc exits inspect mode": if the
++//                       FRAME can turn inspect mode off on its own (Esc),
++//                       the PARENT's crosshair toggle has to find out, or
++//                       it's left showing "on" for a mode that's actually
++//                       off. This is that notification.
++//   parent -> frame    {source:"minime-parent", nonce, type:"minime:inspect", on}
++//   parent -> frame    {source:"minime-parent", nonce, type:"minime:highlight", mm}
++//
++// `minime:highlight` is received and drawn by this module (a highlight
++// outline distinct from the hover outline) but nothing in THIS step
++// sends one — the trigger ("cursor movement in the editor... so the
++// preview outlines the element you're editing") is W6.5's own job. This
++// just makes sure the wire format and the frame-side handler for it
++// already exist so W6.5 only has to add a sender.
++//
++// Caps (same "cap sizes" discipline consoleBridge.js's own header
++// documents, same numbers where the shape overlaps — an arg/message is
++// an arg/message either bridge is posting):
++import * as parse5 from "parse5";
++
++export const MAX_TEXT_PREVIEW_LENGTH = 200;
++export const MAX_HTML_PREVIEW_LENGTH = 1024; // plan's own explicit "htmlPreview(≤1KB)"
++export const MAX_ANCESTORS = 10;
++
++/**
++ * The runtime script, as a string, with `nonce` baked in via
++ * JSON.stringify — same safety note as consoleBridge.js's own
++ * buildBridgeScript() (a nonce containing a quote/backslash must not
++ * break out of the embedded string literal).
++ *
++ * @param {string} nonce
++ * @returns {string}
++ */
++export function buildInspectorScript(nonce) {
++  return (
++    "(function(){\n" +
++    "if (window.__mmInspectorInstalled__) return;\n" +
++    "window.__mmInspectorInstalled__ = true;\n" +
++    "var MM_NONCE = " + JSON.stringify(String(nonce)) + ";\n" +
++    "var MAX_TEXT = " + MAX_TEXT_PREVIEW_LENGTH + ";\n" +
++    "var MAX_HTML = " + MAX_HTML_PREVIEW_LENGTH + ";\n" +
++    "var MAX_ANCESTORS = " + MAX_ANCESTORS + ";\n" +
++    "var inspecting = false;\n" +
++    "var overlayEl = null;\n" + // hover outline, follows the cursor
++    "var labelEl = null;\n" + // small tag/size readout next to the hover outline
++    "var highlightEl = null;\n" + // minime:highlight's own outline -- independent of hover, can be showing at the same time
++    "function mmTruncate(str, max) {\n" +
++    "  if (typeof str !== 'string') return str;\n" +
++    "  return str.length > max ? (str.slice(0, max) + '…') : str;\n" +
++    "}\n" +
++    "function mmPost(payload) {\n" +
++    "  try {\n" +
++    "    var msg = { source: 'minime-preview', nonce: MM_NONCE };\n" +
++    "    for (var k in payload) if (Object.prototype.hasOwnProperty.call(payload, k)) msg[k] = payload[k];\n" +
++    "    window.parent.postMessage(msg, '*');\n" +
++    "  } catch (e) { /* must never break the preview itself */ }\n" +
++    "}\n" +
++    // A box drawn with `position: fixed` in the FRAME's own viewport
++    // coordinates -- getBoundingClientRect() is already viewport-relative,
++    // so this needs no scroll-offset math, and stays correctly placed
++    // under the cursor even if the preview's own page scrolls.
++    "function mmMakeBox(color) {\n" +
++    "  var el = document.createElement('div');\n" +
++    "  el.style.position = 'fixed';\n" +
++    "  el.style.zIndex = '2147483647';\n" + // max safe z-index -- must always win over the page's own content
++    "  el.style.pointerEvents = 'none';\n" +
++    "  el.style.border = '1.5px solid ' + color;\n" +
++    "  el.style.background = color + '1a';\n" + // ~10% alpha fill, same color as the border
++    "  el.style.boxSizing = 'border-box';\n" +
++    "  el.style.transition = 'none';\n" +
++    "  document.documentElement.appendChild(el);\n" +
++    "  return el;\n" +
++    "}\n" +
++    "function mmPositionBox(el, rect) {\n" +
++    "  el.style.left = rect.left + 'px';\n" +
++    "  el.style.top = rect.top + 'px';\n" +
++    "  el.style.width = rect.width + 'px';\n" +
++    "  el.style.height = rect.height + 'px';\n" +
++    "  el.style.display = 'block';\n" +
++    "}\n" +
++    // Created lazily (on first use, not at install time) -- this script
++    // is injected as the first child of <head> so it runs before
++    // document.body exists; nothing needs the overlay/label DOM nodes
++    // until a real hover, which can only happen once the page has
++    // actually loaded.
++    "function mmEnsureOverlay() {\n" +
++    "  if (!document.body) return false;\n" +
++    "  if (!overlayEl) overlayEl = mmMakeBox('#4f7cff');\n" +
++    "  if (!highlightEl) highlightEl = mmMakeBox('#f59e0b');\n" +
++    "  if (!labelEl) {\n" +
++    "    labelEl = document.createElement('div');\n" +
++    "    labelEl.style.position = 'fixed';\n" +
++    "    labelEl.style.zIndex = '2147483647';\n" +
++    "    labelEl.style.pointerEvents = 'none';\n" +
++    "    labelEl.style.background = '#4f7cff';\n" +
++    "    labelEl.style.color = '#fff';\n" +
++    "    labelEl.style.font = '11px monospace';\n" +
++    "    labelEl.style.padding = '2px 5px';\n" +
++    "    labelEl.style.borderRadius = '3px';\n" +
++    "    labelEl.style.whiteSpace = 'nowrap';\n" +
++    "    labelEl.style.display = 'none';\n" +
++    "    document.documentElement.appendChild(labelEl);\n" +
++    "  }\n" +
++    "  return true;\n" +
++    "}\n" +
++    "function mmHideHover() {\n" +
++    "  if (overlayEl) overlayEl.style.display = 'none';\n" +
++    "  if (labelEl) labelEl.style.display = 'none';\n" +
++    "}\n" +
++    "function mmHideHighlight() {\n" +
++    "  if (highlightEl) highlightEl.style.display = 'none';\n" +
++    "}\n" +
++    // The heart of "elements created at runtime (no data-mm) resolve to
++    // the nearest static ancestor" -- Element.closest('[data-mm]')
++    // already walks up through exactly the ancestors this needs, so
++    // there is no separate DOM-walking loop to get wrong here. Returns
++    // null when NOTHING up to (and including) <html> has a data-mm --
++    // an entirely-dynamic page with no static instrumented markup at
++    // all, which callers treat as "nothing to select".
++    "function mmResolve(target) {\n" +
++    "  if (!target || typeof target.closest !== 'function') return null;\n" +
++    "  var el = target.closest('[data-mm]');\n" +
++    "  if (!el) return null;\n" +
++    "  return { el: el, dynamic: el !== target };\n" +
++    "}\n" +
++    "function mmAncestorChain(el) {\n" +
++    "  var chain = [];\n" +
++    "  var node = el.parentElement;\n" +
++    "  while (node && chain.length < MAX_ANCESTORS) {\n" +
++    "    var mm = node.getAttribute && node.getAttribute('data-mm');\n" +
++    "    if (mm) chain.push(mm);\n" +
++    "    node = node.parentElement;\n" +
++    "  }\n" +
++    "  return chain;\n" +
++    "}\n" +
++    // getComputedStyle's shorthand properties (padding/margin) DO return
++    // a single resolved string for most engines when read this way
++    // (e.g. '8px 16px') -- good enough for a hover/select readout, not a
++    // claim of pixel-perfect style introspection.
++    "function mmStyles(el) {\n" +
++    "  var computed = window.getComputedStyle(el);\n" +
++    "  return {\n" +
++    "    color: computed.color,\n" +
++    "    background: computed.backgroundColor,\n" +
++    "    fontSize: computed.fontSize,\n" +
++    "    padding: computed.padding,\n" +
++    "    margin: computed.margin,\n" +
++    "    display: computed.display\n" +
++    "  };\n" +
++    "}\n" +
++    "function mmRect(rect) {\n" +
++    "  return { x: rect.x, y: rect.y, top: rect.top, left: rect.left, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };\n" +
++    "}\n" +
++    "function mmLabelText(el, dynamic) {\n" +
++    "  var rect = el.getBoundingClientRect();\n" +
++    "  var cls = el.className && typeof el.className === 'string' ? el.className.trim().split(/\\s+/).filter(Boolean) : [];\n" +
++    "  var text = el.tagName.toLowerCase() + (cls.length ? '.' + cls.join('.') : '') + ' ' + Math.round(rect.width) + '×' + Math.round(rect.height);\n" +
++    "  return dynamic ? (text + ' · dynamic — nearest source element') : text;\n" +
++    "}\n" +
++    "function mmOnMouseMove(event) {\n" +
++    "  if (!inspecting || !mmEnsureOverlay()) return;\n" +
++    "  var resolved = mmResolve(event.target);\n" +
++    "  if (!resolved) { mmHideHover(); return; }\n" +
++    "  var rect = resolved.el.getBoundingClientRect();\n" +
++    "  mmPositionBox(overlayEl, rect);\n" +
++    "  labelEl.textContent = mmLabelText(resolved.el, resolved.dynamic);\n" +
++    "  labelEl.style.display = 'block';\n" +
++    // Label sits just above the outlined box, flipping below it near
++    // the top of the viewport so it's never clipped off-screen.
++    "  var labelTop = rect.top - 20;\n" +
++    "  labelEl.style.left = Math.max(0, rect.left) + 'px';\n" +
++    "  labelEl.style.top = (labelTop < 0 ? rect.bottom + 2 : labelTop) + 'px';\n" +
++    "}\n" +
++    "function mmOnClick(event) {\n" +
++    "  if (!inspecting) return;\n" +
++    // Capture-phase + prevent/stop, per the plan's own line -- a real
++    // <button type=submit> or <a href> must not actually submit/navigate
++    // while the person is trying to SELECT it, not activate it.
++    "  event.preventDefault();\n" +
++    "  event.stopPropagation();\n" +
++    "  var resolved = mmResolve(event.target);\n" +
++    "  if (!resolved) return;\n" +
++    "  var el = resolved.el;\n" +
++    "  var mm = el.getAttribute('data-mm');\n" +
++    "  var rect = el.getBoundingClientRect();\n" +
++    "  var cls = el.className && typeof el.className === 'string' ? el.className.trim().split(/\\s+/).filter(Boolean) : [];\n" +
++    "  var instanceCount = 1;\n" +
++    "  try { instanceCount = document.querySelectorAll('[data-mm=\"' + mm.replace(/\"/g, '\\\\\"') + '\"]').length; } catch (e) {}\n" +
++    "  mmPost({\n" +
++    "    type: 'minime:select',\n" +
++    "    mm: mm,\n" +
++    "    tag: el.tagName.toLowerCase(),\n" +
++    "    classes: cls,\n" +
++    "    textPreview: mmTruncate((el.textContent || '').replace(/\\s+/g, ' ').trim(), MAX_TEXT),\n" +
++    "    htmlPreview: mmTruncate(el.outerHTML || '', MAX_HTML),\n" +
++    "    rect: mmRect(rect),\n" +
++    "    styles: mmStyles(el),\n" +
++    "    ancestors: mmAncestorChain(el),\n" +
++    "    instanceCount: instanceCount,\n" +
++    "    dynamic: resolved.dynamic\n" +
++    "  });\n" +
++    "}\n" +
++    "function mmSetInspecting(on) {\n" +
++    "  inspecting = !!on;\n" +
++    "  if (!inspecting) { mmHideHover(); }\n" +
++    "}\n" +
++    "function mmOnKeyDown(event) {\n" +
++    "  if (event.key === 'Escape' && inspecting) {\n" +
++    "    mmSetInspecting(false);\n" +
++    "    mmPost({ type: 'minime:inspectExited' });\n" +
++    "  }\n" +
++    "}\n" +
++    "window.addEventListener('mousemove', mmOnMouseMove, true);\n" +
++    "window.addEventListener('click', mmOnClick, true);\n" + // capture: true -- must see the click before the page's own handlers do
++    "window.addEventListener('keydown', mmOnKeyDown, true);\n" +
++    "window.addEventListener('message', function (event) {\n" +
++    "  if (event.source !== window.parent) return;\n" +
++    "  var data = event.data;\n" +
++    "  if (!data || data.source !== 'minime-parent' || data.nonce !== MM_NONCE) return;\n" +
++    "  if (data.type === 'minime:inspect') {\n" +
++    "    mmSetInspecting(!!data.on);\n" +
++    "  } else if (data.type === 'minime:highlight') {\n" +
++    "    if (!mmEnsureOverlay()) return;\n" +
++    "    if (!data.mm) { mmHideHighlight(); return; }\n" +
++    "    var target = null;\n" +
++    "    try { target = document.querySelector('[data-mm=\"' + String(data.mm).replace(/\"/g, '\\\\\"') + '\"]'); } catch (e) {}\n" +
++    "    if (!target) { mmHideHighlight(); return; }\n" +
++    "    mmPositionBox(highlightEl, target.getBoundingClientRect());\n" +
++    "  }\n" +
++    "});\n" +
++    "})();"
++  );
++}
++
++function findFirst(node, tagName) {
++  if (node.tagName === tagName) return node;
++  for (const child of node.childNodes || []) {
++    const found = findFirst(child, tagName);
++    if (found) return found;
++  }
++  return null;
++}
++
++/**
++ * Inserts buildInspectorScript(nonce) as the first child of `html`'s
++ * <head> (falling back to <html>) — same placement, same "return the
++ * input untouched rather than ever break the preview" contract, and
++ * (necessarily) the same parse5 approach consoleBridge.js's own
++ * injectConsoleBridge() already uses; see that function's docstring for
++ * why this can't just be a naive string-splice on arbitrary HTML.
++ *
++ * Composable with injectConsoleBridge(): PreviewPane.jsx calls both,
++ * one after the other, on the same `html` string with the SAME nonce —
++ * two independent parse5 round trips rather than one combined injector,
++ * matching this directory's existing "one file, one concern" split
++ * (bundleStatic/instrument/consoleBridge are all already separate
++ * modules the caller composes, not one do-everything function).
++ *
++ * @param {string} html - bundleStatic()'s own output (already possibly
++ *   run through injectConsoleBridge())
++ * @param {string} nonce - the SAME nonce PreviewPane.jsx passed to
++ *   injectConsoleBridge() for this build, so one parent-side listener
++ *   can verify messages from either bridge against one value
++ * @returns {string}
++ */
++export function injectInspectorRuntime(html, nonce) {
++  let document;
++  try {
++    document = parse5.parse(html, { sourceCodeLocationInfo: false });
++  } catch {
++    return html;
++  }
++
++  const target = findFirst(document, "head") || findFirst(document, "html");
++  if (!target) return html;
++
++  const scriptNode = {
++    nodeName: "script",
++    tagName: "script",
++    attrs: [],
++    namespaceURI: target.namespaceURI,
++    childNodes: [],
++    parentNode: target,
++  };
++  scriptNode.childNodes = [{ nodeName: "#text", value: buildInspectorScript(nonce), parentNode: scriptNode }];
++
++  target.childNodes = target.childNodes || [];
++  target.childNodes.unshift(scriptNode);
++
++  try {
++    return parse5.serialize(document);
++  } catch {
++    return html;
++  }
++}

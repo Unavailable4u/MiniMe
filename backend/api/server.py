@@ -72,6 +72,7 @@ from api.deps import _verify_supabase_jwt
 from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
 from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
 from eo import db  # NEW — startup DB pool warm-up, see _lifespan()
+from eo import laya_gate  # NEW — Laya migration: startup checkpoint preload, see _lifespan()
 from eo.db import DatabaseUnavailable  # NEW — perf audit §4.6 / #9 (part 2)
 from eo.agent_task_pool import AgentPoolSaturated, AgentTaskTimeout  # NEW — perf audit items #6/#7
 from utils.llm_client import request_shutdown  # NEW — Patch 6.2
@@ -234,6 +235,13 @@ async def _lifespan(app: FastAPI):
     # db.warm_pool() is a blocking psycopg_pool call, so it's run on a
     # worker thread rather than the event loop.
     await anyio.to_thread.run_sync(db.warm_pool)
+    # NEW — Laya migration audit (2026-09-27): load the Laya checkpoint
+    # once here (blocking -> worker thread, same as db.warm_pool above)
+    # so the first real request doesn't pay the multi-second load.
+    # preload() never raises: if Laya can't load, every Laya call site
+    # fails open to its own pre-Laya default (see eo/laya_gate.py) and
+    # the app still starts.
+    await anyio.to_thread.run_sync(laya_gate.preload)
     # NEW — Patch A2: connect every `enabled` server in
     # backend/config/mcp_servers.json exactly once, at real server
     # startup (not on every --reload parent-process import, same
@@ -306,12 +314,29 @@ async def _agent_pool_saturated_handler(request: Request, exc: AgentPoolSaturate
 # hanging indefinitely behind a stuck LLM fallback chain. See
 # AgentTaskTimeout's own docstring — the underlying task keeps running
 # in the background; this only bounds how long the HTTP caller waits.
+#
+# CHANGED — 2026-09-27 deadline-resume fix: eo/agent_task_pool.py now
+# gives the orphaned thread a short grace window to reach a checkpoint
+# before this handler is even reached at all (see its own
+# AGENT_TASK_DEADLINE_GRACE_SECONDS comment) — the common case, this
+# whole handler is skipped and the real {"status": "paused", ...} body
+# goes out instead. Reaching this 504 at all now means that grace window
+# ALSO elapsed, so the wording below no longer claims the run was
+# "abandoned" (eo/executor.py's own `except RunStopped` checkpoints mean
+# it usually still lands a resumable pause moments later, even though
+# this particular request gave up first) — POST /api/resume with the
+# same session_id a little later is genuinely worth trying, not a dead
+# end.
 @app.exception_handler(AgentTaskTimeout)
 async def _agent_task_timeout_handler(request: Request, exc: AgentTaskTimeout):
     return JSONResponse(
         status_code=504,
         content={
-            "detail": "Agent task exceeded its wall-clock deadline and was abandoned by the server.",
+            "detail": (
+                "This is taking longer than the server allows for a single request. "
+                "It's still running in the background — try Resume in a moment to "
+                "pick up where it left off."
+            ),
         },
     )
 

@@ -9,9 +9,16 @@
 //
 // Run: node frontend/app/lib/preview/__tests__/bundleStatic.test.mjs
 import * as parse5 from "parse5";
+// W6.4: bundleStatic.js now also imports "./instrument" (instrumentSource)
+// to stamp data-mm onto the entry HTML — see that file's own header for
+// why. The REAL module, same "real, actually-installed package" spirit
+// as parse5 above, not a stub: this file's own assertions about
+// instrumentation (below) are only meaningful against the genuine
+// instrumentHtml() logic instrument.test.mjs already covers on its own.
+import * as instrument from "../../preview/instrument.js";
 import { loadSource } from "../../workbench/__tests__/loadSource.mjs";
 
-const { bundleStatic } = loadSource("../../preview/bundleStatic.js", { imports: { parse5 } });
+const { bundleStatic } = loadSource("../../preview/bundleStatic.js", { imports: { parse5, "./instrument": instrument } });
 
 let failures = 0;
 function assert(cond, msg) {
@@ -166,9 +173,50 @@ function fileMap(map) {
   assert(!result.threw, "bundleStatic never throws outward, even on bad input — it returns a result with a warning instead");
 }
 
+// --- W6.4: entry HTML is instrumented with data-mm, scripts are not ----
+
+{
+  const entryContent = [
+    "<!DOCTYPE html>",
+    "<html><head><title>x</title>",
+    '<link rel="stylesheet" href="style.css">',
+    "</head><body>",
+    '<div class="card"><p>hi</p></div>',
+    '<script src="app.js"></script>',
+    "</body></html>",
+  ].join("\n");
+
+  const result = await bundleStatic({
+    entryPath: "index.html",
+    entryContent,
+    resolveFile: fileMap({ "style.css": "body { color: red; }", "app.js": 'document.querySelector("p");' }),
+  });
+
+  assert(result.html.includes('<div class="card" data-mm='), "the entry HTML's own elements get a data-mm attribute (W6.4's inspector needs this to resolve a click)");
+  assert(result.html.includes("<p data-mm="), "nested elements are instrumented too, not just the top-level one");
+  assert(!result.html.includes("<style") || !/style[^>]*data-mm=/.test(result.html), "a <style> tag itself is never instrumented (instrument.js's own HTML_SKIP_TAGS)");
+  assert(
+    result.html.includes('<script>document.querySelector("p");</script>'),
+    "an inlined SCRIPT file's own content is left completely untouched -- see bundleStatic.js's own header for why only the entry HTML is instrumented, never a resolved script"
+  );
+}
+
+{
+  // instrumentSource's own "never break the preview" contract (a
+  // genuine parse failure returns the ORIGINAL content untouched, plus
+  // a note) surfaces here as a bundleStatic warning rather than being
+  // silently swallowed -- same "the person should be able to see why
+  // the inspector isn't working for this file" reasoning as any other
+  // warning this function already produces.
+  const result = await bundleStatic({ entryPath: "index.html", entryContent: null, resolveFile: fileMap({}) });
+  assert(!result.warnings.some((w) => w.includes("undefined")), "a null entryContent doesn't produce a garbled 'undefined' warning");
+}
+
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);
   process.exit(1);
 } else {
   console.log("\nAll assertions passed.");
 }
+
+

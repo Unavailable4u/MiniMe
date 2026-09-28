@@ -375,6 +375,11 @@ const PAUSE_REASON_FALLBACK_MESSAGE = {
   budget_exceeded: "This run reached its tool-call budget for this task.",
   token_budget_exceeded: "This run reached its token budget.",
   repeated_failures: "This run stopped after repeated failures.",
+  // NEW — 2026-09-27 deadline-resume fix: eo/executor.py's own
+  // `except RunStopped` checkpoints always send a real `message` alongside
+  // this reason (see that file's _DEADLINE_PAUSE_MESSAGE), so this is only
+  // ever hit as a defensive fallback — same as every other entry here.
+  deadline_exceeded: "This run took longer than the server allows for a single request.",
 };
 
 function ApprovalActions({ step, onResume }) {
