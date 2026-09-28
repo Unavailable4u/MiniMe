@@ -24,6 +24,18 @@ check that short-circuits straight to escalation -- zero SGA calls spent
 -- whenever the task text itself asks for review, approval, verification,
 or iteration by another agent. SYSTEM_PROMPT is also updated as a
 secondary defense for phrasings the keyword check doesn't catch.
+
+Laya migration (Tier 2, 2026-09-28): a third, model-based pre-check now
+runs after those two keyword checks miss -- see _laya_escalation_
+probability()/_PREGATE_* below. A local Laya call estimates whether the
+task is one SGA would just ESCALATE anyway; if it is confident enough,
+SGA is skipped and the task goes straight to the Inspector, saving the
+Stage 1-3 LLM calls (and up to ~1-3s+) that would only have ended in
+ESCALATE. The error is deliberately one-sided: a wrong "escalate" only
+costs SGA's fast-answer shortcut for that task (the Inspector path is
+the normal, correct path for anything SGA would not have answered), it
+can never produce a worse answer. Both keyword checks above are kept
+as-is and run first -- deterministic and free beats a model call.
 """
 import concurrent.futures
 import itertools
@@ -36,6 +48,7 @@ import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo import conversation_memory  # NEW — Part 23 fix, see _call_one() below
+from eo import laya_gate  # NEW — Laya migration (Tier 2), see _laya_escalation_probability() below
 from memory.bus import incr, read  # NEW — perf audit follow-up (#1): resolve/escalate stats
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
@@ -216,6 +229,83 @@ def _requests_simulation_domain(task_text: str) -> bool:
     this tab's own known dispatch shape."""
     return bool(_SIMULATION_DISPATCH_RE.match((task_text or "").strip()))
 
+
+# ---------------------------------------------------------------------
+# Laya pre-gate (Tier 2 of the Laya migration, 2026-09-28)
+#
+# WHAT: one local Laya `noul` call, P(this task needs escalation), made
+# only after both keyword checks above miss. LAYA_SGA_PREGATE controls it:
+#   "on"      -- skip SGA when P >= LAYA_SGA_PREGATE_THRESHOLD (default)
+#   "observe" -- compute and log the verdict, but never skip (use this to
+#                measure it against get_sga_stats() before trusting it)
+#   "off"     -- disabled; no Laya call is made at all
+# Any other value is treated as "off" (a typo must not silently change
+# routing) with a warning.
+#
+# COST, stated plainly: this ADDS one Laya call before every SGA attempt
+# the keyword checks did not already short-circuit. ~40ms on a GPU, but
+# roughly 0.8s on CPU (measured on a dev laptop) -- comparable to a fast
+# Stage 1 SGA call. It only pays off for tasks it correctly skips, so
+# check get_sga_stats()["escalated_by_reason"]["laya_pregate"] against
+# resolve_rate before leaving it on for a CPU-only deployment.
+#
+# UNVERIFIED: the untuned English checkpoint's probabilities are loose
+# (they reportedly run over-confident, and it inverted a similar
+# "context contradicts the answer" question in Tier 1 testing), so the
+# 0.85 threshold is a starting guess. Its input budget is ~300 tokens, so
+# the task text is clipped (head + tail) to _PREGATE_CHARS.
+# ---------------------------------------------------------------------
+def _parse_pregate_mode(raw) -> str:
+    mode = (raw or "on").strip().lower()
+    if mode in ("on", "observe", "off"):
+        return mode
+    logger.warning("[sga] unknown LAYA_SGA_PREGATE=%r -- treating as 'off'", raw)
+    return "off"
+
+
+_PREGATE_MODE = _parse_pregate_mode(os.environ.get("LAYA_SGA_PREGATE", "on"))
+_PREGATE_THRESHOLD = float(os.environ.get("LAYA_SGA_PREGATE_THRESHOLD", "0.85"))
+_PREGATE_CHARS = 1000
+
+_PREGATE_QUESTION = {
+    "sga_would_escalate": {
+        "type": "noul",
+        "instructions": (
+            "Can a fast, general-purpose assistant answer this request "
+            "well in ONE quick reply? Answer TRUE (escalate) only if it "
+            "clearly needs real research, multi-step planning, writing or "
+            "editing code across several files, running or testing "
+            "something, or another agent's review, approval or iteration."
+        ),
+        "criteria": {
+            "false": "a single quick reply is enough: a simple question, "
+                     "a short explanation, a small self-contained snippet, "
+                     "casual conversation, or a lookup from general knowledge",
+            "true": "cannot be done well in one quick reply: needs real "
+                    "research, multi-step planning, multi-file code work, "
+                    "running or testing, or another agent's review, "
+                    "approval or iteration",
+        },
+        "labels": {"false": "QUICK_ANSWER", "true": "ESCALATE"},
+    },
+}
+
+
+def _laya_escalation_probability(task_text):
+    """Returns Laya's P(SGA would escalate this task) as a float, or None
+    if Laya is unavailable, the text is empty, or anything at all goes
+    wrong -- callers treat None as "no opinion" and carry on to the normal
+    SGA relay, exactly as before this pre-gate existed. Never raises."""
+    try:
+        text = laya_gate.clip(task_text or "", _PREGATE_CHARS, "both")
+        if not text.strip():
+            return None
+        result = laya_gate.predict({"task": text}, _PREGATE_QUESTION,
+                                    site="sga.attempt.pregate")
+        return float(result["answers"]["sga_would_escalate"]["noul"])
+    except Exception:
+        return None
+
 # Tuning defaults — describe when it's worth hedging with another SGA
 # agent in parallel. Evaluated only AFTER a stage's calls actually
 # settle (a resolved answer, a real per-call failure, or hitting
@@ -345,6 +435,9 @@ _SGA_ESCALATED_REASON_KEYS = {
     # before Stage 1 even starts.
     "verification_keyword": "sga_stats:escalated:verification_keyword",
     "simulation_domain": "sga_stats:escalated:simulation_domain",
+    # Laya pre-gate (Tier 2) -- model-based, zero SGA calls spent, decided
+    # before Stage 1 starts. Only counted when LAYA_SGA_PREGATE=on.
+    "laya_pregate": "sga_stats:escalated:laya_pregate",
     # Every stage actually ran (or the 1/2/3s predicted-latency budget
     # ran out) and none produced a non-ESCALATE answer.
     "no_confident_answer": "sga_stats:escalated:no_confident_answer",
@@ -372,7 +465,8 @@ def _note_escalated(reason: str) -> None:
 def get_sga_stats() -> dict:
     """Returns {"resolved_by_stage": {1: int, 2: int, 3: int},
     "escalated_by_reason": {"verification_keyword": int,
-    "simulation_domain": int, "no_confident_answer": int},
+    "simulation_domain": int, "laya_pregate": int,
+    "no_confident_answer": int},
     "total_resolved": int, "total_escalated": int, "resolve_rate":
     float | None}. resolve_rate is None (not 0.0) with no data yet,
     same "don't confuse cold with zero" convention
@@ -550,7 +644,9 @@ def attempt(task_text: str, session_id: str = None) -> dict:
     "category": str|None} on a successful SGA answer, or
     {"resolved": False} if all three stages escalate/time out, OR the
     task explicitly asked for review/approval/verification/iteration that
-    SGA cannot itself provide (see _requests_verification() above) — the
+    SGA cannot itself provide (see _requests_verification() above), OR
+    (Laya pre-gate, LAYA_SGA_PREGATE=on) a local model is confident SGA
+    would only escalate it -- the
     caller (eo/loop_v4.py) then falls through to eo/inspector.classify()
     exactly as it does today for every task.
 
@@ -571,6 +667,21 @@ def attempt(task_text: str, session_id: str = None) -> dict:
         skip_reason = ("Test tab simulation dispatch — requires the multi-persona "
                         "simulate pipeline, not a single blended SGA answer")
         skip_stat_reason = "simulation_domain"
+
+    # Laya pre-gate: only after both free keyword checks missed (see the
+    # block above _parse_pregate_mode() for the modes and the cost note).
+    if not skip_reason and _PREGATE_MODE != "off":
+        p_escalate = _laya_escalation_probability(task_text)
+        if p_escalate is not None:
+            would_skip = p_escalate >= _PREGATE_THRESHOLD
+            logger.info("[sga] laya pre-gate: P(escalate)=%.3f threshold=%.2f mode=%s -> %s",
+                        p_escalate, _PREGATE_THRESHOLD, _PREGATE_MODE,
+                        "skip SGA" if (would_skip and _PREGATE_MODE == "on") else
+                        ("would skip (observe only)" if would_skip else "run SGA"))
+            if would_skip and _PREGATE_MODE == "on":
+                skip_reason = (f"Laya pre-gate: task looks like one SGA would only "
+                                f"escalate (P={p_escalate:.2f})")
+                skip_stat_reason = "laya_pregate"
 
     if skip_reason:
         emit_event("agent_start", session_id, agent="sga_relay",

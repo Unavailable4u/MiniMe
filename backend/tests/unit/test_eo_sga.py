@@ -277,3 +277,151 @@ def test_rotate_start_cycles_which_agent_leads():
     for order in orders:
         assert set(order) == {"sga_1", "sga_2", "sga_3"}
         assert len(order) == 3
+
+
+# ---------------------------------------------------------------------
+# Laya pre-gate (Tier 2) -- model-based skip of the SGA relay
+#
+# laya_gate.predict is monkeypatched; no model is loaded. conftest turns
+# the gate off suite-wide, so each test here opts in via _gate().
+# ---------------------------------------------------------------------
+
+def _laya_reply(p):
+    return {"answers": {"sga_would_escalate": {"noul": p}}}
+
+
+def _gate(monkeypatch, mode="on", p=0.95, threshold=0.85):
+    """Turns the gate on and fakes Laya; returns the list of predict()
+    calls as (state, questions, site) tuples."""
+    calls = []
+
+    def fake_predict(state, questions, site="unknown"):
+        calls.append((state, questions, site))
+        return None if p is None else _laya_reply(p)
+    monkeypatch.setattr(sga, "_PREGATE_MODE", mode)
+    monkeypatch.setattr(sga, "_PREGATE_THRESHOLD", threshold)
+    monkeypatch.setattr(sga.laya_gate, "predict", fake_predict)
+    return calls
+
+
+def _resolving_call_one(monkeypatch):
+    m = MagicMock(return_value={"answer": "It's 4.", "memorable": False, "category": None})
+    monkeypatch.setattr(sga, "_call_one", m)
+    return m
+
+
+def test_pregate_on_skips_sga_when_laya_is_confident_it_would_escalate(monkeypatch):
+    calls = _gate(monkeypatch, p=0.95)
+    call_one = _resolving_call_one(monkeypatch)
+
+    assert sga.attempt("Refactor the auth module across the whole repo") == {"resolved": False}
+    call_one.assert_not_called()
+    assert len(calls) == 1
+    assert sga.get_sga_stats()["escalated_by_reason"]["laya_pregate"] == 1
+
+
+def test_pregate_passes_a_site_label_and_the_task_to_laya(monkeypatch):
+    calls = _gate(monkeypatch, p=0.1)
+    _resolving_call_one(monkeypatch)
+    sga.attempt("What is 2+2?")
+    state, questions, site = calls[0]
+    assert state == {"task": "What is 2+2?"}
+    assert "sga_would_escalate" in questions
+    assert site == "sga.attempt.pregate"
+
+
+def test_pregate_below_threshold_runs_the_normal_relay(monkeypatch):
+    _gate(monkeypatch, p=0.40)
+    call_one = _resolving_call_one(monkeypatch)
+    result = sga.attempt("What is 2+2?")
+    assert result["resolved"] is True and call_one.call_count == 1
+    assert sga.get_sga_stats()["escalated_by_reason"]["laya_pregate"] == 0
+
+
+def test_pregate_threshold_is_inclusive(monkeypatch):
+    _gate(monkeypatch, p=0.85, threshold=0.85)
+    call_one = _resolving_call_one(monkeypatch)
+    assert sga.attempt("something") == {"resolved": False}
+    call_one.assert_not_called()
+
+
+def test_pregate_laya_unavailable_falls_through_to_the_normal_relay(monkeypatch):
+    _gate(monkeypatch, p=None)
+    call_one = _resolving_call_one(monkeypatch)
+    assert sga.attempt("What is 2+2?")["resolved"] is True
+    assert call_one.call_count == 1
+
+
+def test_pregate_never_raises_even_if_laya_blows_up(monkeypatch):
+    _gate(monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("laya exploded")
+    monkeypatch.setattr(sga.laya_gate, "predict", boom)
+    call_one = _resolving_call_one(monkeypatch)
+    assert sga.attempt("What is 2+2?")["resolved"] is True
+    assert call_one.call_count == 1
+
+
+def test_pregate_malformed_laya_result_is_treated_as_no_opinion(monkeypatch):
+    _gate(monkeypatch)
+    monkeypatch.setattr(sga.laya_gate, "predict", lambda *a, **k: {"answers": {}})
+    call_one = _resolving_call_one(monkeypatch)
+    assert sga.attempt("What is 2+2?")["resolved"] is True
+    assert call_one.call_count == 1
+
+
+def test_pregate_observe_mode_calls_laya_but_never_skips(monkeypatch):
+    calls = _gate(monkeypatch, mode="observe", p=0.99)
+    call_one = _resolving_call_one(monkeypatch)
+    assert sga.attempt("Refactor everything")["resolved"] is True
+    assert len(calls) == 1
+    assert call_one.call_count == 1
+    assert sga.get_sga_stats()["escalated_by_reason"]["laya_pregate"] == 0
+
+
+def test_pregate_off_never_calls_laya(monkeypatch):
+    calls = _gate(monkeypatch, mode="off", p=0.99)
+    call_one = _resolving_call_one(monkeypatch)
+    assert sga.attempt("Refactor everything")["resolved"] is True
+    assert calls == []
+    assert call_one.call_count == 1
+
+
+def test_keyword_checks_run_first_and_spend_no_laya_call(monkeypatch):
+    calls = _gate(monkeypatch, p=0.0)
+    call_one = _resolving_call_one(monkeypatch)
+    assert sga.attempt("Write code and don't stop until a reviewer approves it.") == {"resolved": False}
+    assert calls == []
+    call_one.assert_not_called()
+    stats = sga.get_sga_stats()["escalated_by_reason"]
+    assert stats["verification_keyword"] == 1 and stats["laya_pregate"] == 0
+
+
+def test_pregate_clips_a_long_task_to_the_input_budget(monkeypatch):
+    calls = _gate(monkeypatch, p=0.1)
+    _resolving_call_one(monkeypatch)
+    task = "HEAD-MARK " + "x" * 5000 + " TAIL-MARK"
+    sga.attempt(task)
+    sent = calls[0][0]["task"]
+    assert len(sent) == sga._PREGATE_CHARS
+    assert sent.startswith("HEAD-MARK") and sent.endswith("TAIL-MARK")
+
+
+def test_pregate_empty_task_makes_no_laya_call(monkeypatch):
+    calls = _gate(monkeypatch, p=0.99)
+    _resolving_call_one(monkeypatch)
+    sga.attempt("   ")
+    assert calls == []
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("on", "on"), ("ON", "on"), (" observe ", "observe"), ("off", "off"),
+    (None, "on"), ("", "on"), ("of", "off"), ("true", "off"),
+])
+def test_parse_pregate_mode(raw, expected):
+    assert sga._parse_pregate_mode(raw) == expected
+
+
+def test_stats_include_the_laya_pregate_reason_key():
+    assert "laya_pregate" in sga.get_sga_stats()["escalated_by_reason"]

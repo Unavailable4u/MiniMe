@@ -221,8 +221,8 @@ CHAIN = [
     # 2026-07-30 -- see agents/test_writer.py's matching fix for the same
     # swap). This chain runs on EVERY incoming task, so this was the
     # highest-traffic of the 3 call sites using the retired model.
-    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1", "max_tokens": 3000},
-    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_2", "max_tokens": 3000},
+    {"provider": "groq", "model": "qwen/qwen3.8-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1", "max_tokens": 3000},
+    {"provider": "groq", "model": "qwen/qwen3.8-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_2", "max_tokens": 3000},
     # Gemini/Mistral/HF rollout, Patch 6 (§4b/§6): dedicated fallback-only
     # accounts, not shared with any other agent's chain -- see module
     # docstring for why this doesn't reopen the isolation gap the original

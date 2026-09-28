@@ -576,3 +576,17 @@ def patch_generate_text(return_value=None, side_effect=None):
         yield patcher
     finally:
         mp.undo()
+
+
+# ---------------------------------------------------------------------------
+# Laya migration (Tier 2): eo/sga.py's Laya pre-gate defaults to "on", which
+# would make every test that reaches the real sga.attempt() (e.g.
+# test_event_emission's loop_v4.main() run) try to load and query the real
+# Laya model -- slow, and its verdict could change the event sequence those
+# tests assert on. Off for the whole suite; tests that exercise the gate
+# opt back in by monkeypatching sga._PREGATE_MODE themselves.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _laya_sga_pregate_off(monkeypatch):
+    from eo import sga
+    monkeypatch.setattr(sga, "_PREGATE_MODE", "off")
