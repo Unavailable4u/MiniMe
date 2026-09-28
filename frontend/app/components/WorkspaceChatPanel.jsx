@@ -22,7 +22,7 @@ import ConfirmDialog from "./ConfirmDialog";
 // below). ChevronUp/ChevronDown are what those headers show instead, and
 // X is the single "close the whole dock" button that replaces the old
 // trio of per-half collapse buttons.
-import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle, Send } from "lucide-react";   // CHANGED — Send added for the compact icon-only composer below
+import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle, Send, Square, Play } from "lucide-react";   // CHANGED — Send added for the compact icon-only composer below; Square/Play added for the merged send/pause/resume composer button
 import { ingestFileByExtension } from "../lib/ingestDispatch";
 // NEW — W5.1b: createProposal, subscribeToProposalEvents. NEW — W5.4:
 // resolveProposal/ProposalStaleError (the card's own Keep all/Reject —
@@ -270,6 +270,82 @@ function currentWorkLabel(liveSteps, decisionEvents) {
   return "Thinking…";
 }
 
+// NEW — merged send/pause/resume composer control, the chatbox
+// counterpart of WorkingPanel.jsx's own PauseResumeButton (same
+// "fire-and-forget, disable while pending" shape — a pause/resume
+// request can't itself know the exact moment the run reacts, only
+// that it asked; `loading`/`paused` flipping is what actually swaps
+// this button's icon back, same as that component's own comment
+// explains). Lives here (rather than a third copy of the same
+// three-icon-state logic pasted into both the compact and the
+// full-width composer below) so the composer always shows exactly one
+// of: Send (idle, enabled once there's a draft), Stop-a-running-run
+// (loading, not paused — mirrors Claude's own chatbox: the send icon
+// is replaced by a stop/pause affordance the moment a run is in
+// flight, instead of just disabling into a dead button with nothing
+// the person can do about it), or Resume (loading AND paused — same
+// quick "approve, resume as-is" call the Working Panel's own button
+// and the pause/approval card make).
+//
+// `compact` picks which of the two existing composer's visual shells
+// this renders inside (icon-only pill vs. the wider desktop form's
+// bigger tap target) — the state logic itself doesn't change either
+// way.
+function ChatSendButton({ compact, loading, paused, disabledSend, onPauseRequest, onResume }) {
+  const [pending, setPending] = useState(false);
+
+  async function handlePauseOrResume() {
+    setPending(true);
+    try {
+      await (paused ? onResume({ action: "approve" }) : onPauseRequest());
+    } finally {
+      // Same "leave it true briefly, the icon swap comes from
+      // loading/paused catching up, not from this flag" reasoning as
+      // WorkingPanel.jsx's PauseResumeButton.
+      setPending(false);
+    }
+  }
+
+  const compactClass =
+    "flex items-center justify-center p-1.5 rounded-md bg-[var(--accent)] text-[var(--accent-text)] disabled:opacity-50 transition-colors";
+  const fullClass =
+    "flex items-center justify-center bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 self-end min-w-[64px]";
+
+  if (loading) {
+    const label = paused ? "Resume the run" : "Stop generating";
+    return (
+      <button
+        type="button"
+        onClick={handlePauseOrResume}
+        disabled={pending}
+        title={label}
+        aria-label={label}
+        className={compact ? compactClass : fullClass}
+      >
+        {pending ? (
+          <Loader2 size={compact ? 15 : 16} className="animate-spin" />
+        ) : paused ? (
+          <Play size={compact ? 15 : 16} />
+        ) : (
+          <Square size={compact ? 15 : 16} fill="currentColor" />
+        )}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="submit"
+      disabled={disabledSend}
+      title="Send"
+      aria-label="Send"
+      className={compact ? compactClass : fullClass}
+    >
+      {compact ? <Send size={15} /> : "Send"}
+    </button>
+  );
+}
+
 // NEW — elapsed-time readout for the "Working…" row. Purely local:
 // starts its own clock the moment it mounts (which is the moment
 // `loading` flips true, since the parent only renders this while
@@ -410,6 +486,15 @@ export default function WorkspaceChatPanel({
   // subscription, no new request, no added latency or server load.
   const liveSteps = dock.state.liveSteps;
   const decisionEvents = dock.state.decisionEvents;
+  // NEW — merged send/pause/resume composer button. Same "awaiting an
+  // approval checkpoint OR a manual pause_requested flag" test as
+  // WorkingPanel.jsx's own PauseResumeButton — see that component's
+  // comment for why both have to be checked (a manual pause never sets
+  // any step's status, so checking liveSteps alone would miss it).
+  const pausedRun = dock.state.pausedRun;
+  const isRunPaused = liveSteps.some((s) => s.status === "awaiting_approval") || !!pausedRun;
+  const requestPause = dock.requestPause;
+  const resumeRun = dock.resumeRun;
   const hasMoreOlder = dock.state.hasMoreOlder;   // NEW — perf audit item #3
   const loadingOlder = dock.state.loadingOlder;   // NEW — perf audit item #3
   const mode = dockMode;
@@ -2236,14 +2321,14 @@ export default function WorkspaceChatPanel({
                   />
 
                   <div className="pr-1 pb-1 shrink-0">
-                    <button
-                      type="submit"
-                      disabled={loading || !draft.trim()}
-                      title="Send"
-                      className="flex items-center justify-center p-1.5 rounded-md bg-[var(--accent)] text-[var(--accent-text)] disabled:opacity-50 transition-colors"
-                    >
-                      <Send size={15} />
-                    </button>
+                    <ChatSendButton
+                      compact
+                      loading={loading}
+                      paused={isRunPaused}
+                      disabledSend={loading || !draft.trim()}
+                      onPauseRequest={requestPause}
+                      onResume={resumeRun}
+                    />
                   </div>
                 </div>
               </form>
@@ -2299,13 +2384,13 @@ export default function WorkspaceChatPanel({
                 rows={1}
                 className="flex-1 resize-none bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm outline-none focus:border-[var(--neutral-600)] disabled:opacity-50 leading-relaxed"
               />
-              <button
-                type="submit"
-                disabled={loading || !draft.trim()}
-                className="bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 self-end"
-              >
-                Send
-              </button>
+              <ChatSendButton
+                loading={loading}
+                paused={isRunPaused}
+                disabledSend={loading || !draft.trim()}
+                onPauseRequest={requestPause}
+                onResume={resumeRun}
+              />
             </form>
           );
         })()}
@@ -2340,7 +2425,13 @@ export default function WorkspaceChatPanel({
           open={!workingPanelCollapsed}
           onClose={() => setWorkingPanelCollapsed(true)}
         >
-          <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} onNavigateSubTab={onNavigateSubTab} />
+          {/* isOpen — NEW, scroll-to-bottom-on-open fix: MobileDrawer never
+              unmounts WorkingPanel, it only slides it off-screen (see that
+              component's own docstring), so this is the only signal
+              WorkingPanel gets that the drawer was actually reopened.
+              Mirrors the same `!workingPanelCollapsed` value driving the
+              drawer's own `open` prop just above. */}
+          <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} onNavigateSubTab={onNavigateSubTab} isOpen={!workingPanelCollapsed} />
         </WorkingPanelDrawer>
       ) : (
       <div

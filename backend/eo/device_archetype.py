@@ -55,9 +55,10 @@ rather than a hand-rolled single-key call -- this module has no reason
 to reintroduce the exact single-point-of-failure that dynamic_chain.py
 exists to close.
 """
-import json
 import logging
 import re
+
+from eo import laya_gate
 
 _logger = logging.getLogger(__name__)
 
@@ -178,7 +179,8 @@ def classify_archetype(prd: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Patch A.2 — LLM fallback for ambiguous cases
+# Patch A.2 — Laya fallback for ambiguous cases (was an LLM fallback;
+# see resolve_ambiguous_archetype()'s own docstring for the migration)
 # ---------------------------------------------------------------------------
 
 _VALID_ENCLOSURE_MODES = {"full", "partial", "none"}
@@ -186,121 +188,117 @@ _VALID_MOBILITY_TYPES = {
     "static", "wheeled", "legged", "flying", "handheld", "wearable",
 }
 
-# FALLBACK_CHAIN: last-resort static chain, used ONLY if
-# eo/dynamic_chain.py's build_fallback_chain() comes back empty (every
-# registered account excluded/cooling down at once -- should be very
-# rare). Same belt-and-suspenders shape and same first model pin as
-# agents/hardware_speccer.py's own FALLBACK_CHAIN -- see that module's
-# docstring for the full reasoning; not copied wholesale (this call is
-# a single short classification, not a multi-thousand-token spec
-# generation, so one entry is enough here).
-FALLBACK_CHAIN = [
-    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY", "timeout": 30},
-]
+# Laya migration audit (2026-09-27): was a single free-text LLM call
+# asked to return JSON for two fields; now two `choice` questions in one
+# local forward pass, each constrained to exactly the closed set
+# classify_archetype() itself already promises (_VALID_ENCLOSURE_MODES /
+# _VALID_MOBILITY_TYPES above) -- see eo/laya_gate.py for the shared
+# loader. Same field semantics as the old SYSTEM_PROMPT below, just
+# phrased as Laya criteria instead of English instructions to an LLM.
+# ~1,000 chars per chunk fits Laya's ~300-token state budget (see
+# eo/laya_gate.py); 4 chunks covers the first ~4,000 chars of a PRD.
+_CHUNK_CHARS = 1000
+_MAX_CHUNKS = 4
 
-# Deliberately terse and JSON-only, same "respond only valid JSON, no
-# preamble" convention agents/hardware_speccer.py's own SYSTEM_PROMPT_*
-# constants use for every LLM call this codebase parses programmatically.
-_ARCHETYPE_SYSTEM_PROMPT = """You are a hardware device classifier. \
-You read a hardware PRD/feasibility note and decide two things about \
-the physical device it describes:
-
-1. "enclosure_mode": "full" if the device needs a sealed housing + lid \
-(the default for anything handheld, wearable, or sitting stationary on \
-a surface/wall), "partial" if it needs a structural chassis/frame but \
-no full enclosing shell (e.g. a wheeled robot base, a drone airframe, \
-a legged walking robot), or "none" if it needs no shared structural \
-part at all (e.g. a bare single-board add-on with no housing of its \
-own).
-
-2. "mobility_type": exactly one of "static", "wheeled", "legged", \
-"flying", "handheld", "wearable" -- whichever best describes how (or \
-whether) the device moves or is carried.
-
-If the PRD text gives you no real signal for either field, default to \
-"full" and "static" -- do not guess a more exotic answer than the text \
-actually supports.
-
-Respond with ONLY a valid JSON object, no markdown fences, no \
-preamble, no explanation: {"enclosure_mode": "...", "mobility_type": "..."}"""
+_ARCHETYPE_QUESTIONS = {
+    "enclosure_mode": {
+        "type": "choice",
+        "instructions": "What structural enclosure does this device need?",
+        "criteria": {
+            "full": "a sealed housing + lid -- the default for anything "
+                    "handheld, wearable, or sitting stationary on a "
+                    "surface/wall",
+            "partial": "a structural chassis/frame but no full enclosing "
+                       "shell (e.g. a wheeled robot base, a drone "
+                       "airframe, a legged walking robot)",
+            "none": "no shared structural part at all (e.g. a bare "
+                    "single-board add-on with no housing of its own)",
+        },
+    },
+    "mobility_type": {
+        "type": "choice",
+        "instructions": "How (or whether) does the device move or get carried?",
+        "criteria": {
+            "static": "sits in place; not carried or self-propelled",
+            "wheeled": "moves on wheels",
+            "legged": "moves on legs, like a walking robot",
+            "flying": "flies, like a drone or airframe",
+            "handheld": "held in the hand during use",
+            "wearable": "worn on the body",
+        },
+    },
+}
 
 
 def resolve_ambiguous_archetype(prd: dict) -> dict:
-    """LLM fallback for a PRD that classify_archetype() (A.1, above)
+    """Laya fallback for a PRD that classify_archetype() (A.1, above)
     couldn't confidently decide -- call this ONLY when that function
     returned `{"status": "ambiguous"}`; a non-ambiguous PRD should never
     reach this function (A.3, NOT this patch, is what wires that call
     order into the pipeline).
 
     Always returns a definite `{"enclosure_mode": ..., "mobility_type":
-    ...}` pair -- never "ambiguous" again and never raises on a
-    malformed/unparseable model response. Same fail-safe posture as
-    agents/hardware_speccer.py's own parts-generation call: an
-    unparseable or out-of-vocabulary response falls back to the same
-    safe "full"/"static" default classify_archetype() itself uses for
-    a no-signal PRD, rather than surfacing a partial/invalid archetype
-    to every later phase that trusts this field.
+    ...}` pair -- never "ambiguous" again and never raises on a Laya
+    failure. Same fail-safe posture as before this migration: an
+    unavailable classifier or an out-of-vocabulary response falls back
+    to the same safe "full"/"static" default classify_archetype() itself
+    uses for a no-signal PRD, rather than surfacing a partial/invalid
+    archetype to every later phase that trusts this field.
+
+    Laya migration audit (2026-09-27): was an LLM call (own
+    FALLBACK_CHAIN, deferred agents.structure_architect._strip_fences +
+    json.loads to parse the response) -- now a single local Laya
+    predict() over _ARCHETYPE_QUESTIONS (see eo/laya_gate.py). Because
+    each question is a `choice` constrained to its own criteria keys,
+    the "out-of-vocabulary" branch below is defense in depth rather than
+    the routine occurrence a free-text LLM response made it before.
     """
     text = prd.get("text", "") if isinstance(prd, dict) else ""
     if not isinstance(text, str):
         text = ""
 
-    # Deferred import -- see this module's own docstring (Patch A.2
-    # section) for why: eo/dynamic_chain.py imports eo.registry at ITS
-    # own module level, so a module-level import here would risk the
-    # same circular-import shape eo/dynamic_chain.py's docstring already
-    # flags for any eagerly-imported agents/*.py caller. device_archetype
-    # isn't imported by eo.registry today, but keeping this deferred
-    # costs nothing and keeps this module safe to import from anywhere,
-    # including a future agents/*.py module, without relitigating this.
-    from agents.structure_architect import _strip_fences  # reuse, don't reimplement
-    from eo.dynamic_chain import build_fallback_chain
-    from utils.llm_client import generate_text
-
-    chain = build_fallback_chain("device_archetype") or FALLBACK_CHAIN
-    raw = generate_text(
-        _ARCHETYPE_SYSTEM_PROMPT, f"PRD:\n{text}", chain,
-        agent_name="Device Archetype Resolver",
-        allow_continuation=False,  # same Root Cause B reasoning as
-        # hardware_speccer.py's own parts call: this prompt demands
-        # ONLY valid JSON, so a "length" truncation splicing a
-        # continuation from a possibly-different provider onto a
-        # half-finished object would corrupt it in a way json.loads()
-        # below can't recover from -- a fresh retry on the next chain
-        # step is safer than a splice here.
-    )
-
-    cleaned = _strip_fences(raw)
+    # A PRD can be far longer than Laya's ~300-token state budget (see
+    # eo/laya_gate.py), and sending it whole would silently drop
+    # everything past the opening paragraph -- but the ambiguity that
+    # got us here (e.g. "wheeled chassis" AND "wrist strap") can sit
+    # anywhere. So each chunk is asked both questions and the answers
+    # are combined by confidence-weighted vote per field.
+    enclosure_votes: dict = {}
+    mobility_votes: dict = {}
     try:
-        result = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # L.2: this is the resolver falling back to the safe default
-        # silently -- log it so an unparseable-response pattern shows up
-        # somewhere instead of only ever being visible as "every PRD
-        # that hits this path ends up full/static" behavior downstream.
+        for piece in laya_gate.chunk(text, _CHUNK_CHARS, _MAX_CHUNKS):
+            result = laya_gate.predict({"prd_text": piece}, _ARCHETYPE_QUESTIONS,
+                                        site="device_archetype.resolve_ambiguous_archetype")
+            if result is None:
+                continue   # this chunk couldn't be scored; others still vote
+            for field, votes in (("enclosure_mode", enclosure_votes),
+                                  ("mobility_type", mobility_votes)):
+                answer = result["answers"][field]
+                votes[answer["choice"]] = votes.get(answer["choice"], 0.0) + float(
+                    answer.get("confidence", 1.0))
+    except Exception as exc:
         _logger.warning(
-            "resolve_ambiguous_archetype: unparseable JSON from model, "
-            "falling back to full/static default. raw=%r", raw,
+            "resolve_ambiguous_archetype: Laya call failed (%s: %s), "
+            "falling back to full/static default.",
+            exc.__class__.__name__, exc,
         )
         return {"enclosure_mode": "full", "mobility_type": "static"}
 
-    if not isinstance(result, dict):
+    if not enclosure_votes or not mobility_votes:
         _logger.warning(
-            "resolve_ambiguous_archetype: model response parsed to non-dict "
-            "%s, falling back to full/static default. raw=%r",
-            type(result).__name__, raw,
+            "resolve_ambiguous_archetype: Laya unavailable, falling "
+            "back to full/static default."
         )
         return {"enclosure_mode": "full", "mobility_type": "static"}
+    enclosure_mode = max(enclosure_votes, key=enclosure_votes.get)
+    mobility_type = max(mobility_votes, key=mobility_votes.get)
 
-    enclosure_mode = result.get("enclosure_mode")
-    mobility_type = result.get("mobility_type")
     if enclosure_mode in _VALID_ENCLOSURE_MODES and mobility_type in _VALID_MOBILITY_TYPES:
         return {"enclosure_mode": enclosure_mode, "mobility_type": mobility_type}
 
-    # Out-of-vocabulary response (model ignored the prompt's own
-    # constraints) -- same safe default as an unparseable one, rather
-    # than propagating a value none of A.4/E/F/H's later branch checks
-    # would recognize.
+    # Out-of-vocabulary response -- same safe default as an unparseable
+    # one, rather than propagating a value none of A.4/E/F/H's later
+    # branch checks would recognize.
     _logger.warning(
         "resolve_ambiguous_archetype: out-of-vocabulary enclosure_mode=%r "
         "mobility_type=%r, falling back to full/static default.",

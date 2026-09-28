@@ -1052,10 +1052,13 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     # conversation_memory or dispatched to any role. Still deliberately
     # gates append_turn() below -- a flagged task never gets a turn
     # recorded and never reaches _run_task_inner()'s hire/dispatch
-    # machinery at all -- but check_content_safety() (a Groq LLM call,
-    # ~8-9s) and conversation_memory's thread-routing embedding call
-    # (~7s) don't depend on each other, so they're run concurrently
-    # here instead of back to back. precompute_route_for_turn() itself
+    # machinery at all -- but check_content_safety() (was a Groq LLM
+    # call, ~8-9s; now a local Laya scan -- Laya migration, 2026-09-27,
+    # so re-measure whether this parallelism still pays for itself) and
+    # conversation_memory's thread-routing embedding call (~7s) don't
+    # depend on each other, so they're run concurrently here instead of
+    # back to back. Laya inference is serialized behind a lock in
+    # eo/laya_gate.py, so concurrent calls here are safe, just queued. precompute_route_for_turn() itself
     # never writes anything (see its own docstring), so running it
     # before we know the safety verdict is safe to discard below on the
     # fail-closed path -- nothing has been persisted either way.

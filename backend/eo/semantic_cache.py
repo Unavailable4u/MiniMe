@@ -64,9 +64,10 @@ import sys
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo import laya_gate
 from memory.bus import vector_index
 from relay.emitter import emit_event  # NEW — CO4 patch 3
-from utils.llm_client import embed_text, generate_text
+from utils.llm_client import embed_text
 
 SIMILARITY_THRESHOLD = 0.93
 INVALIDATION_THRESHOLD = 0.90
@@ -98,32 +99,75 @@ _DETERMINISTIC_SIGNALS = (
     "exchange rate", "square root of", "sum of", "average of",
 )
 
-# llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
-# models Groq's decommission notice suggested in its place.
-#
-# Root-cause audit fix, Fix 4 (2026-08-27): _VERIFY_SYSTEM_PROMPT below
-# asks for exactly one word (YES or NO) and nothing else. Neither step
-# carried its own max_tokens before this, so both fell through to
-# llm_client._max_tokens_for()'s flat model-family default (8192 for
-# openai/gpt-oss-120b, 16384 -- more than DOUBLE its whole tpm budget --
-# for qwen/qwen3.6-27b, since it matches _REASONING_MODEL_HINTS) for a
-# call that only ever needs a couple of tokens. An explicit override
-# (always preferred over any model-based default -- see
-# _max_tokens_for()'s docstring) is what makes this call actually cheap;
-# 16 leaves headroom for "YES"/"NO" plus a stray leading token some
-# models emit before settling on the word.
-_VERIFY_CHAIN = [
-    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_1", "max_tokens": 16},
-    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_1", "max_tokens": 16},
-]
+# Laya migration audit (2026-09-27): was a 2-model Groq chain
+# (openai/gpt-oss-120b -> qwen/qwen3.6-27b) asked for exactly one word,
+# YES or NO -- see git history on this block for the max_tokens story.
+# This is a pure binary decision over (question, cached answer, current
+# context): a textbook Laya `noul` question, one local forward pass, no
+# provider/key rotation. See eo/laya_gate.py for the shared loader.
+_VERIFY_QUESTION = {
+    "still_accurate": {
+        "type": "noul",
+        "instructions": (
+            "Is the cached answer still accurate given the current "
+            "conversation context? Answer NO if the context contradicts "
+            "it, corrects it, makes it outdated, or you are not "
+            "confident it still holds."
+        ),
+        "criteria": {
+            "false": "the cached answer is stale -- the current context "
+                     "contradicts, corrects, or supersedes it, or it's "
+                     "not clearly still accurate",
+            "true": "the cached answer is still accurate and nothing in "
+                    "the current context contradicts or supersedes it",
+        },
+        "labels": {"false": "NO", "true": "YES"},
+    },
+}
 
-_VERIFY_SYSTEM_PROMPT = """You check whether a previously-given answer is still accurate. \
-You will be shown the original question, a previously cached answer, and the CURRENT \
-conversation context (which may include new information, corrections, or be unrelated to \
-the cached answer). Respond with exactly one word: YES if the cached answer is still \
-accurate and nothing in the current context contradicts or supersedes it. NO if the current \
-context contradicts it, corrects it, makes it outdated, or you are not confident it still \
-holds. When in doubt, say NO — a fresh answer is always safer than a stale one."""
+# The old prompt's "when in doubt, say NO" was a plea to an LLM that had
+# no real notion of its own confidence. With Laya it becomes an actual
+# number: require clearly-more-likely-than-not before trusting a cache
+# hit, not just a bare >0.5 coin flip. 0.65 is a STARTING GUESS -- Laya's
+# released checkpoints reportedly run over-confident (see
+# eo/laya_gate.py), so tune it on labeled hit/stale examples from real
+# traffic. A fresh answer is always safer than a stale one, so this
+# leans conservative.
+_STILL_ACCURATE_THRESHOLD = 0.65
+
+# Laya's English checkpoint reads only ~300 tokens (~1,000-1,200 chars)
+# for the WHOLE state (see eo/laya_gate.py) -- passing the three fields
+# raw would let a long cached answer silently crowd out the current
+# context, which is the field that decides whether the answer is stale.
+# So each field gets its own character budget (total ~1,000): the
+# question's opening, both ends of the cached answer, and the TAIL of the
+# context (the most recent turns are what can contradict the answer).
+_Q_CHARS = 200
+_ANSWER_CHARS = 350
+_CONTEXT_CHARS = 450
+
+
+def _verify_still_accurate(task_text: str, cached_answer: str, context_text: str) -> bool:
+    """"When in doubt, say NO" -- a fresh answer is always safer than a
+    stale one, so any failure at all (Laya package missing, checkpoint
+    not loaded, unexpected result shape, or -- belt and suspenders --
+    an exception laya_gate.predict()'s own internal try/except didn't
+    anticipate) returns False, exactly like the old chain's bare
+    `except Exception: return False` did, rather than failing open to
+    "still accurate"."""
+    state = {
+        "original_question": laya_gate.clip(task_text, _Q_CHARS, "head"),
+        "cached_answer": laya_gate.clip(cached_answer, _ANSWER_CHARS, "both"),
+        "current_context": laya_gate.clip(context_text or "(none)", _CONTEXT_CHARS, "tail"),
+    }
+    try:
+        result = laya_gate.predict(state, _VERIFY_QUESTION,
+                                    site="semantic_cache._verify_still_accurate")
+        if result is None:
+            return False
+        return result["answers"]["still_accurate"]["noul"] >= _STILL_ACCURATE_THRESHOLD
+    except Exception:
+        return False
 
 
 def _scope_filter(scope_type: str, scope_id: str) -> str:
@@ -164,25 +208,6 @@ def classify_cache_class(task_text: str) -> str:
 def _fingerprint(context_text: str) -> str:
     normalized = (context_text or "").strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def _verify_still_accurate(task_text: str, cached_answer: str, context_text: str) -> bool:
-    prompt = (
-        f"Original question: {task_text}\n\n"
-        f"Previously cached answer: {cached_answer}\n\n"
-        f"Current conversation context:\n{context_text or '(none)'}\n\n"
-        f"Is the cached answer still accurate? Reply YES or NO only."
-    )
-    try:
-        result = generate_text(
-            system_prompt=_VERIFY_SYSTEM_PROMPT,
-            user_content=prompt,
-            chain=_VERIFY_CHAIN,
-            agent_name="semantic_cache_verify",
-        ).strip().upper()
-    except Exception:
-        return False
-    return result.startswith("YES")
 
 
 def check_cache(task_text: str, app_slug: str = None, workspace_id: str = None,

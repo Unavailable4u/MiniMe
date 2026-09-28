@@ -72,6 +72,18 @@ iniconfig==2.3.0
 jiter==0.16.0
 joblib==1.5.3
 jusText==3.0.2
+# Laya migration audit (2026-09-27) — eo/laya_gate.py, replacing the
+# Groq round trips in eo/output_guard.py, eo/injection_guard.py,
+# eo/semantic_cache.py, eo/device_archetype.py. Pulls in torch>=2.14 and
+# transformers>=5.0 as transitive deps (both new to this file) — no GPU
+# wheel is selected by backend.Dockerfile's plain python:3.12-slim base,
+# so this installs the CPU build of torch, noticeably larger than this
+# file's other dependencies; the checkpoint itself downloads from
+# Hugging Face on first laya.load() call unless baked into the image
+# (see eo/laya_gate.py's own docstring). huggingface_hub==1.13.0 above
+# (pinned for guardrails-ai/typer, not this) already satisfies Laya's
+# own huggingface_hub 1.x floor, so no new pin conflict there.
+laya==0.3.20
 langfuse==4.14.3
 lxml==6.1.1
 lxml_html_clean==0.4.5

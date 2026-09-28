@@ -33,11 +33,12 @@
 // own header for why "allow-scripts" alone, no allow-same-origin, no
 // allow-forms, is enough and deliberately not more).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ExternalLink, Loader2, Monitor, Play, RefreshCw, Smartphone, Tablet } from "lucide-react";
+import { AlertTriangle, Crosshair, ExternalLink, Loader2, Monitor, Play, RefreshCw, Smartphone, Tablet } from "lucide-react";
 import { useEditorStore } from "../../lib/workbench/editorStore";
 import { detectKind } from "../../lib/preview/detectKind";
 import { bundleStatic } from "../../lib/preview/bundleStatic";
 import { injectConsoleBridge } from "../../lib/preview/consoleBridge";
+import { injectInspectorRuntime } from "../../lib/preview/inspectorRuntime";
 import { usePyodideWorker } from "../../hooks/usePyodideWorker";
 
 // W6.2: a fresh nonce per successful build, NOT per component mount —
@@ -92,7 +93,7 @@ function makeResolver({ provider, filesMeta, buffers, cacheRef }) {
   };
 }
 
-function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings }) {
+function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings, inspecting, onToggleInspect }) {
   return (
     <div className="shrink-0 flex items-center justify-between gap-2 px-2 h-8 border-b border-[var(--neutral-800)]">
       <div className="flex items-center gap-0.5">
@@ -111,6 +112,23 @@ function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warning
             <Icon size={13} />
           </button>
         ))}
+        {onToggleInspect && (
+          <>
+            <span className="mx-1 h-4 w-px bg-[var(--neutral-800)]" />
+            <button
+              type="button"
+              onClick={onToggleInspect}
+              title={inspecting ? "Stop inspecting (Esc)" : "Inspect element"}
+              aria-label="Inspect element"
+              aria-pressed={inspecting}
+              className={`touch-target p-1 rounded ${
+                inspecting ? "bg-[var(--accent)] text-[var(--accent-text)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+              }`}
+            >
+              <Crosshair size={13} />
+            </button>
+          </>
+        )}
       </div>
       <div className="flex items-center gap-1">
         {warnings?.length > 0 && (
@@ -156,7 +174,17 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
   // carries no id of its own (see consoleBridge.js's own header on why
   // that's the parent's job, not the sandboxed page's).
   const consoleIdRef = useRef(0);
-
+  // W6.4: `inspecting` is the PARENT's source of truth for the
+  // crosshair toggle (the frame's own copy is just a mirror of the last
+  // minime:inspect it was sent — see inspectorRuntime.js's header for
+  // the Esc case that has to flow back the other way). `lastSelection`
+  // is the most recent minime:select payload, shown as a one-line
+  // readout below the toolbar; W6.5 (click-to-code) is what will
+  // actually DO something with a selection beyond displaying it, so it
+  // stays plain local state here rather than a shared store field
+  // nothing else reads yet.
+  const [inspecting, setInspecting] = useState(false);
+  const [lastSelection, setLastSelection] = useState(null);
   const buffers = state.buffers;
 
   useEffect(() => {
@@ -174,7 +202,7 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
         // see makeNonce()'s own comment above for why.
         const nonce = makeNonce();
         nonceRef.current = nonce;
-        const html = injectConsoleBridge(result.html, nonce);
+        const html = injectInspectorRuntime(injectConsoleBridge(result.html, nonce), nonce);
         setBuilt({ html, warnings: result.warnings });
         setBuildError(null);
       } catch (err) {
@@ -221,6 +249,24 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
       if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data;
       if (!data || data.source !== "minime-preview" || data.nonce !== nonceRef.current) return;
+      // W6.4: the inspector runtime posts through the same channel with
+      // the same source/nonce as the console bridge, so its messages
+      // must be peeled off BEFORE the console handling below — otherwise
+      // a minime:select would land in the Console tab as an empty row.
+      if (data.type === "minime:select") {
+        setLastSelection({
+          mm: typeof data.mm === "string" ? data.mm : "",
+          tag: typeof data.tag === "string" ? data.tag : "",
+          classes: Array.isArray(data.classes) ? data.classes.filter((c) => typeof c === "string") : [],
+          dynamic: data.dynamic === true,
+          instanceCount: typeof data.instanceCount === "number" ? data.instanceCount : 1,
+        });
+        return;
+      }
+      if (data.type === "minime:inspectExited") {
+        setInspecting(false);
+        return;
+      }
       consoleIdRef.current += 1;
       consoleMessage({
         id: consoleIdRef.current,
@@ -236,6 +282,33 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [consoleMessage]);
+
+  // W6.4: parent -> frame. The runtime ignores anything without this
+  // build's own nonce (inspectorRuntime.js's message listener), so a
+  // stale toggle aimed at a previous build's iframe can't flip a newer
+  // one.
+  function postInspectState(on) {
+    iframeRef.current?.contentWindow?.postMessage(
+      { source: "minime-parent", nonce: nonceRef.current, type: "minime:inspect", on },
+      "*"
+    );
+  }
+
+  function handleToggleInspect() {
+    const next = !inspecting;
+    setInspecting(next);
+    postInspectState(next);
+  }
+
+  // A rebuild swaps srcDoc, which reloads the frame into a FRESH
+  // runtime whose own `inspecting` starts false — without this, turning
+  // inspect mode on and then typing a character (debounced rebuild)
+  // would silently drop it. Re-sent on every load, not just when true,
+  // so a runtime that somehow kept state can't disagree with the
+  // toolbar either.
+  function handleIframeLoad() {
+    postInspectState(inspecting);
+  }
 
   function handleReload() {
     cacheRef.current.clear(); // a manual reload means "don't trust anything cached", unlike the live-typing path which is fine reusing unopened files' last-known content
@@ -259,7 +332,29 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
 
   return (
     <div className="h-full min-h-0 flex flex-col">
-      <DeviceToolbar device={device} onDeviceChange={setDevice} onReload={handleReload} onOpenNewTab={handleOpenNewTab} warnings={built?.warnings} />
+      <DeviceToolbar
+        device={device}
+        onDeviceChange={setDevice}
+        onReload={handleReload}
+        onOpenNewTab={handleOpenNewTab}
+        warnings={built?.warnings}
+        inspecting={inspecting}
+        onToggleInspect={handleToggleInspect}
+      />
+      {lastSelection && (
+        <div
+          className="shrink-0 flex items-center gap-2 px-2 py-1 border-b border-[var(--neutral-800)] font-mono text-[10px] text-[var(--neutral-400)]"
+          title={lastSelection.mm}
+        >
+          <span className="truncate">
+            {lastSelection.tag}
+            {lastSelection.classes.length > 0 ? `.${lastSelection.classes.join(".")}` : ""}
+          </span>
+          <span className="shrink-0 text-[var(--neutral-600)]">{lastSelection.mm}</span>
+          {lastSelection.dynamic && <span className="shrink-0 text-amber-400">dynamic — nearest source element</span>}
+          {lastSelection.instanceCount > 1 && <span className="shrink-0 text-[var(--neutral-500)]">×{lastSelection.instanceCount}</span>}
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-auto bg-[var(--neutral-900)] flex justify-center">
         {buildError ? (
           <div className="p-4 text-xs text-red-400 whitespace-pre-wrap">{buildError}</div>
@@ -271,6 +366,7 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
           <iframe
             key={reloadNonce}
             ref={iframeRef}
+            onLoad={handleIframeLoad}
             title="Preview"
             srcDoc={built.html}
             sandbox="allow-scripts"

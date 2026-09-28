@@ -30,8 +30,23 @@
 // operating on strings, testable with plain node exactly like
 // instrument.test.mjs tests instrument.js, using a stub resolveFile
 // instead of a real FileProvider.
-
+//
+// W6.4: the ENTRY html is run through instrumentSource() (W6.3) before
+// this function's own parse5 pass — every element gets a `data-mm`
+// attribute, which is what lets the inspector runtime (W6.4's other
+// half, lib/preview/inspectorRuntime.js) trace a click back to a source
+// range at all. Deliberately NOT applied to a resolved SCRIPT
+// candidate's own content below, even though instrumentSource()
+// dispatches .js the same as .jsx/.tsx: a plain static-preview script
+// file is ordinary DOM-manipulation JS with no JSX in it, so running it
+// through instrumentJsx() would only ever find zero JSXElements while
+// still paying to load @babel/parser for every single static preview —
+// exactly the cost instrument.js's own header says a "pure-HTML
+// preview" is supposed to avoid. The elements a click could ever land
+// on are already covered by instrumenting the HTML alone; a script only
+// ever manipulates nodes that markup already produced.
 import * as parse5 from "parse5";
+import { instrumentSource } from "./instrument";
 
 const EXTERNAL_RE = /^([a-z]+:)?\/\//i; // http:, https:, //cdn... (protocol-relative), or any other-scheme URL
 const DATA_URI_RE = /^data:/i;
@@ -77,6 +92,17 @@ function resolveRelative(entryPath, url) {
  */
 export async function bundleStatic({ entryPath, entryContent, resolveFile }) {
   const warnings = [];
+
+  // W6.4 — see this module's own header for why only the entry HTML,
+  // never a resolved script file, gets instrumented. A genuine parse
+  // failure here (instrumentSource's own try/catch already returns the
+  // ORIGINAL content untouched — see instrument.js's "never break the
+  // preview" contract) surfaces as a warning rather than silently
+  // disabling the inspector for this file with no visible sign why.
+  const instrumentedEntry = await instrumentSource(entryContent, entryPath);
+  if (instrumentedEntry.note) warnings.push(`${entryPath}: ${instrumentedEntry.note}`);
+  entryContent = instrumentedEntry.code;
+
   let document;
   try {
     document = parse5.parse(entryContent, { sourceCodeLocationInfo: false });
@@ -85,7 +111,7 @@ export async function bundleStatic({ entryPath, entryContent, resolveFile }) {
     // this) but the contract here is the same "never break the
     // preview" one instrument.js follows: fall back to the untouched
     // source rather than propagate.
-    return { html: entryContent, warnings: [`Couldn't parse ${entryPath}: ${err.message}`] };
+    return { html: entryContent, warnings: [...warnings, `Couldn't parse ${entryPath}: ${err.message}`] };
   }
 
   // Collected as {node, kind} pairs during the walk, then resolved and

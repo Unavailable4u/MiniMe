@@ -110,7 +110,20 @@ function PauseResumeButton({ paused, onRequestPause, onResume }) {
   );
 }
 
-export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
+// isOpen — NEW, scroll-to-bottom-on-open fix. Defaults to true: on
+// desktop (WorkspaceChatPanel.jsx's non-drawer render sites)
+// WorkingPanel fully unmounts/remounts on every collapse/expand (a
+// collapsed rail button renders in its place instead — see that
+// file's own conditional), so a fresh mount there already IS "just
+// opened" and needs no explicit signal. Mobile is the one caller that
+// actually threads a real value through: WorkingPanelDrawer's
+// MobileDrawer never unmounts its children, it only slides them
+// off-screen with CSS, so WorkingPanel stays mounted continuously
+// there and `isOpen` flipping false -> true (passed from
+// WorkspaceChatPanel.jsx as `!workingPanelCollapsed`, the same value
+// driving the drawer's own `open` prop) is the only way this component
+// finds out the drawer was just reopened.
+export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null, onNavigateSubTab = null, isOpen = true }) {
   const { batches, API_URL } = useSession(); // §4 / Part 2 §2.7: app-wide, no dock equivalent
   const dock = useWorkspaceDock(workspaceId, chatId);
 
@@ -187,6 +200,55 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
     }, 500);
     return () => clearTimeout(t);
   }, [activeMessageIndex, isSyncingRef]);
+
+  // NEW — scroll-to-bottom-on-open fix. Runs once whenever `isOpen`
+  // becomes true (see this component's own prop comment above for why
+  // that's "on mount" for the two desktop callers and "the drawer was
+  // just reopened" for the mobile one). Deliberately jumps straight to
+  // the bottom (not a smooth scroll — there's nothing worth watching
+  // animate here, unlike the activeMessageIndex sync above which is
+  // following a specific section into view) and, just as
+  // deliberately, only runs off `isOpen` — never off `messages`,
+  // `liveSteps`, or anything else that changes CONTENT rather than
+  // open/closed state, so a person who's scrolled up to read something
+  // mid-run doesn't get yanked back down by the next agent_start event.
+  // That's the whole spec: jump to bottom on open, leave it alone
+  // until the next open.
+  //
+  // The two rAFs (not a single one, and not a fixed setTimeout) wait
+  // for the browser to have actually painted this render's content —
+  // including whatever the live-run section below just mounted (a
+  // force graph, a newly-appended step) — before scrollHeight is
+  // measured: a single rAF can still land before layout from a
+  // same-frame DOM change has settled, and a bare synchronous
+  // scrollTop write here would measure the PREVIOUS layout's height.
+  useEffect(() => {
+    if (!isOpen) return;
+    const el = containerRef.current;
+    if (!el) return;
+    isSyncingRef.current = true;
+    let raf2 = null;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+    });
+    // Same "leave the lock up for a bit after" reasoning as the
+    // activeMessageIndex effect above — this isn't a smooth scroll so
+    // there's no animation to outlast, but the lock still needs to
+    // cover the brief window between the write above and this panel's
+    // own onScroll (handleScroll below) settling on the new position,
+    // so that programmatic jump doesn't get misread as the person's
+    // own scroll and bounce activeMessageIndex around.
+    const t = setTimeout(() => {
+      isSyncingRef.current = false;
+    }, 500);
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+      clearTimeout(t);
+    };
+  }, [isOpen, isSyncingRef]);
 
   // This panel's own scroll -> figure out which section is closest to
   // the top and publish it as activeMessageIndex, same "closest

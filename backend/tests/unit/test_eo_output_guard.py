@@ -347,3 +347,93 @@ def test_get_guard_still_raises_not_implemented():
     it means that regression happened silently."""
     with pytest.raises(NotImplementedError):
         output_guard.get_guard()
+
+
+# ---------------------------------------------------------------------
+# check_content_safety() -- Laya migration (2026-09-27)
+#
+# Laya's English checkpoint reads only ~300 tokens of state, so the text
+# is scanned in _CHUNK_CHARS pieces and flagged if ANY piece crosses the
+# threshold. laya_gate.predict is monkeypatched -- no model is loaded.
+# ---------------------------------------------------------------------
+
+def _p_unsafe(p):
+    return {"answers": {"unsafe": {"noul": p}}}
+
+
+def test_check_content_safety_empty_text_is_safe_without_calling_laya(monkeypatch):
+    calls = []
+    monkeypatch.setattr(output_guard.laya_gate, "predict",
+                        lambda *a, **k: calls.append(1) or _p_unsafe(0.99))
+    assert output_guard.check_content_safety("   ") == (True, "")
+    assert calls == []
+
+
+def test_check_content_safety_flags_payload_in_a_late_chunk(monkeypatch):
+    """The regression the chunking exists for: a harmful payload past the
+    first ~1,000 chars must still be caught, not silently truncated."""
+    text = "a" * 5000 + "MARKER" + "b" * 100
+
+    def fake_predict(state, questions, site="unknown"):
+        return _p_unsafe(0.95 if "MARKER" in state["text"] else 0.01)
+    monkeypatch.setattr(output_guard.laya_gate, "predict", fake_predict)
+
+    is_safe, reason = output_guard.check_content_safety(text, label="final answer")
+    assert is_safe is False
+    assert "final answer" in reason and "0.95" in reason
+
+
+def test_check_content_safety_stops_scanning_after_first_flagged_chunk(monkeypatch):
+    calls = []
+
+    def fake_predict(state, questions, site="unknown"):
+        calls.append(1)
+        return _p_unsafe(0.99)
+    monkeypatch.setattr(output_guard.laya_gate, "predict", fake_predict)
+
+    is_safe, _ = output_guard.check_content_safety("x" * 8000)
+    assert is_safe is False
+    assert len(calls) == 1
+
+
+def test_check_content_safety_caps_number_of_chunks(monkeypatch):
+    calls = []
+
+    def fake_predict(state, questions, site="unknown"):
+        calls.append(len(state["text"]))
+        return _p_unsafe(0.0)
+    monkeypatch.setattr(output_guard.laya_gate, "predict", fake_predict)
+
+    assert output_guard.check_content_safety("x" * 50000) == (True, "")
+    assert len(calls) == output_guard._MAX_CHUNKS
+    assert max(calls) <= output_guard._CHUNK_CHARS
+
+
+def test_check_content_safety_below_threshold_is_safe(monkeypatch):
+    monkeypatch.setattr(output_guard.laya_gate, "predict",
+                        lambda *a, **k: _p_unsafe(output_guard.UNSAFE_PROBABILITY_THRESHOLD - 0.2))
+    assert output_guard.check_content_safety("some ordinary answer") == (True, "")
+
+
+def test_check_content_safety_fails_open_when_laya_unavailable(monkeypatch):
+    monkeypatch.setattr(output_guard.laya_gate, "predict", lambda *a, **k: None)
+    assert output_guard.check_content_safety("x" * 3000) == (True, "")
+
+
+def test_check_content_safety_one_failed_chunk_does_not_hide_a_flagged_one(monkeypatch):
+    results = iter([None, _p_unsafe(0.97)])
+    monkeypatch.setattr(output_guard.laya_gate, "predict", lambda *a, **k: next(results))
+    is_safe, _ = output_guard.check_content_safety("x" * 1500)
+    assert is_safe is False
+
+
+def test_check_content_safety_fails_open_on_unexpected_exception(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(output_guard.laya_gate, "predict", boom)
+    assert output_guard.check_content_safety("hello") == (True, "")
+
+
+def test_check_content_safety_fails_open_on_unexpected_result_shape(monkeypatch):
+    monkeypatch.setattr(output_guard.laya_gate, "predict", lambda *a, **k: {"answers": {}})
+    assert output_guard.check_content_safety("hello") == (True, "")

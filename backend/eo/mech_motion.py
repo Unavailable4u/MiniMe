@@ -229,8 +229,7 @@ _VALID_AXES = {"x", "y", "z"}
 # Deliberately terse and JSON-only (or the bare NONE sentinel), same
 # "respond only valid JSON, no preamble" convention every other
 # programmatically-parsed LLM call in this codebase already uses
-# (agents/hardware_speccer.py's own SYSTEM_PROMPT_PARTS constants,
-# eo/device_archetype.py's own _ARCHETYPE_SYSTEM_PROMPT).
+# (agents/hardware_speccer.py's own SYSTEM_PROMPT_PARTS constants).
 _MOTION_SYSTEM_PROMPT = """You are a mechanical-motion classifier for \
 a hardware BOM part. Given a part's name/description, decide whether \
 it has any physical motion of its own during normal operation -- NOT \

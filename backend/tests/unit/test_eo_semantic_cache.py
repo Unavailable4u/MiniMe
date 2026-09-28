@@ -13,17 +13,30 @@ wrongly-scoped answer gets served with no error anywhere. These tests
 pin both.
 
 Isolation: semantic_cache.py does `from memory.bus import vector_index`,
-`from utils.llm_client import embed_text, generate_text`, and `from
-relay.emitter import emit_event` (all bound names in its own
-namespace) -- tests patch `vector_index`, `embed_text`, `generate_text`,
-and `emit_event` on the semantic_cache module object itself, same
-gotcha as every other cache/store module in this batch.
+`from utils.llm_client import embed_text`, `from eo import laya_gate`,
+and `from relay.emitter import emit_event` (all bound names in its own
+namespace, except laya_gate which is the module itself) -- tests patch
+`vector_index`, `embed_text`, `laya_gate.predict`, and `emit_event` on
+the semantic_cache module object, same gotcha as every other cache/store
+module in this batch. Laya migration audit (2026-09-27): verification
+used to be a `generate_text` call returning "YES"/"NO"; it's now
+`laya_gate.predict()` returning `{"answers": {"still_accurate":
+{"noul": <probability>}}}` -- _fake_verify() below builds that shape.
 """
 import time
 
 import pytest
 
 from eo import semantic_cache
+
+
+def _fake_verify(p_still_accurate):
+    """Builds the laya_gate.predict() return shape _verify_still_accurate()
+    reads, for a given P(still accurate). Threshold is
+    semantic_cache._STILL_ACCURATE_THRESHOLD (0.65 as of this migration) --
+    pass something clearly above/below it, not exactly it, so these tests
+    don't silently flip if that threshold is retuned later."""
+    return lambda *a, **k: {"answers": {"still_accurate": {"noul": p_still_accurate}}}
 
 # ---------------------------------------------------------------------
 # Fake Upstash Vector Index harness
@@ -150,12 +163,12 @@ def test_check_cache_returns_none_when_embed_raises(monkeypatch, fake_index):
 
 # ---------------------------------------------------------------------
 # check_cache — trust model: fingerprint match replays blindly,
-# fingerprint mismatch escalates to LLM verification
+# fingerprint mismatch escalates to Laya verification
 # ---------------------------------------------------------------------
 
 def test_check_cache_replays_blindly_when_context_fingerprint_is_unchanged(monkeypatch, fake_index):
     """A hit whose stored context_fingerprint matches the CURRENT
-    context must be served without any verification LLM call -- the
+    context must be served without any verification Laya call -- the
     whole point of storing the fingerprint in the first place."""
     fp = semantic_cache._fingerprint("same context")
     fake_index.query_result = [FakeMatch(score=0.99,
@@ -163,7 +176,11 @@ def test_check_cache_replays_blindly_when_context_fingerprint_is_unchanged(monke
                                                     "context_fingerprint": fp,
                                                     "system_version": semantic_cache.SYSTEM_VERSION})]
     verify_called = []
-    monkeypatch.setattr(semantic_cache, "generate_text", lambda **k: verify_called.append(1) or "YES")
+
+    def fake_predict(*a, **k):
+        verify_called.append(1)
+        return {"answers": {"still_accurate": {"noul": 0.95}}}
+    monkeypatch.setattr(semantic_cache.laya_gate, "predict", fake_predict)
 
     result = semantic_cache.check_cache("some question", context_text="same context")
 
@@ -176,7 +193,7 @@ def test_check_cache_escalates_to_verification_when_fingerprint_differs(monkeypa
                                           metadata={"answer": "cached answer", "_cached_at": time.time(),
                                                     "context_fingerprint": semantic_cache._fingerprint("old context"),
                                                     "system_version": semantic_cache.SYSTEM_VERSION})]
-    monkeypatch.setattr(semantic_cache, "generate_text", lambda **k: "YES")
+    monkeypatch.setattr(semantic_cache.laya_gate, "predict", _fake_verify(0.95))
 
     result = semantic_cache.check_cache("some question", context_text="new context")
     assert result == "cached answer"
@@ -186,7 +203,7 @@ def test_check_cache_returns_none_when_verification_says_no(monkeypatch, fake_in
     fake_index.query_result = [FakeMatch(score=0.99,
                                           metadata={"answer": "cached answer", "_cached_at": time.time(),
                                                     "context_fingerprint": semantic_cache._fingerprint("old context")})]
-    monkeypatch.setattr(semantic_cache, "generate_text", lambda **k: "NO")
+    monkeypatch.setattr(semantic_cache.laya_gate, "predict", _fake_verify(0.05))
 
     assert semantic_cache.check_cache("some question", context_text="new context") is None
 
@@ -199,9 +216,9 @@ def test_check_cache_treats_verification_call_failure_as_not_accurate(monkeypatc
                                           metadata={"answer": "cached answer", "_cached_at": time.time(),
                                                     "context_fingerprint": semantic_cache._fingerprint("old context")})]
 
-    def boom(**k):
-        raise RuntimeError("LLM unavailable")
-    monkeypatch.setattr(semantic_cache, "generate_text", boom)
+    def boom(*a, **k):
+        raise RuntimeError("Laya unavailable")
+    monkeypatch.setattr(semantic_cache.laya_gate, "predict", boom)
 
     assert semantic_cache.check_cache("some question", context_text="new context") is None
 
@@ -214,7 +231,7 @@ def test_check_cache_missing_stored_fingerprint_also_escalates_to_verification(m
     fake_index.query_result = [FakeMatch(score=0.99,
                                           metadata={"answer": "cached answer", "_cached_at": time.time(),
                                                     "system_version": semantic_cache.SYSTEM_VERSION})]
-    monkeypatch.setattr(semantic_cache, "generate_text", lambda **k: "YES")
+    monkeypatch.setattr(semantic_cache.laya_gate, "predict", _fake_verify(0.95))
 
     assert semantic_cache.check_cache("some question", context_text="anything") == "cached answer"
 
@@ -415,3 +432,54 @@ def test_format_reference_block_is_callable_unconditionally():
     task_text = "write a deployment checklist"
     assert task_text + semantic_cache.format_reference_block(None) == task_text
     assert task_text + semantic_cache.format_reference_block("prior checklist text") != task_text
+
+
+# ---------------------------------------------------------------------
+# _verify_still_accurate -- per-field input budget (Laya migration)
+#
+# Laya's English checkpoint reads only ~300 tokens for the WHOLE state, so
+# each field is clipped separately; otherwise a long cached answer would
+# silently crowd out the current context.
+# ---------------------------------------------------------------------
+
+def test_verify_clips_each_field_to_its_own_budget(monkeypatch):
+    seen = {}
+
+    def fake_predict(state, questions, site="unknown"):
+        seen["state"], seen["site"] = state, site
+        return {"answers": {"still_accurate": {"noul": 0.95}}}
+    monkeypatch.setattr(semantic_cache.laya_gate, "predict", fake_predict)
+
+    semantic_cache._verify_still_accurate("Q" * 5000, "A" * 5000, "C" * 5000)
+
+    st = seen["state"]
+    assert len(st["original_question"]) == semantic_cache._Q_CHARS
+    assert len(st["cached_answer"]) == semantic_cache._ANSWER_CHARS
+    assert len(st["current_context"]) == semantic_cache._CONTEXT_CHARS
+    assert seen["site"] == "semantic_cache._verify_still_accurate"
+
+
+def test_verify_keeps_the_tail_of_the_context_and_both_ends_of_the_answer(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(semantic_cache.laya_gate, "predict",
+                        lambda state, q, site="u": seen.update(state=state)
+                        or {"answers": {"still_accurate": {"noul": 0.95}}})
+
+    context = "OLD " * 500 + "LATEST CORRECTION"
+    answer = "ANSWER-START " + "x" * 2000 + " ANSWER-END"
+    semantic_cache._verify_still_accurate("q", answer, context)
+
+    assert seen["state"]["current_context"].endswith("LATEST CORRECTION")
+    assert seen["state"]["cached_answer"].startswith("ANSWER-START")
+    assert seen["state"]["cached_answer"].endswith("ANSWER-END")
+
+
+def test_verify_short_inputs_pass_through_unchanged(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(semantic_cache.laya_gate, "predict",
+                        lambda state, q, site="u": seen.update(state=state)
+                        or {"answers": {"still_accurate": {"noul": 0.95}}})
+    semantic_cache._verify_still_accurate("what is X", "X is Y", "")
+    assert seen["state"] == {"original_question": "what is X",
+                             "cached_answer": "X is Y",
+                             "current_context": "(none)"}

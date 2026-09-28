@@ -18,10 +18,13 @@ feeds into --
     archetype's enclosure/cutout output is byte-for-byte the same as
     before Phase A existed for the same device footprint/parts.
 
-No LLM for A.1/A.5 (pure functions/data reshaping, same as every other
-eo/mech_*.py test in this tree) -- mock_llm is only pulled in for A.2's
-resolve_ambiguous_archetype() cases, which are the only ones that
-actually call generate_text().
+Laya migration audit (2026-09-27): resolve_ambiguous_archetype() no
+longer calls generate_text() -- it's a single eo.laya_gate.predict()
+call over two `choice` questions. A.1/A.5 still need no model call at
+all (pure functions/data reshaping, same as every other eo/mech_*.py
+test in this tree); A.2's resolve_ambiguous_archetype() cases below
+monkeypatch da.laya_gate.predict directly instead of pulling in the
+mock_llm fixture.
 """
 import json
 
@@ -89,43 +92,67 @@ def test_non_string_or_missing_text_defaults_safely():
 # resolve_ambiguous_archetype (Patch A.2)
 # ---------------------------------------------------------------------------
 
-def test_ambiguous_prd_falls_through_to_llm_resolver(mock_llm):
+def test_ambiguous_prd_falls_through_to_laya_resolver(monkeypatch):
     prd = {"text": "A wheeled chassis platform whose remote also has a "
                     "wrist strap for the operator."}
     classified = da.classify_archetype(prd)
     assert classified == {"status": "ambiguous"}
 
-    mock_llm.set_json_response({"enclosure_mode": "partial", "mobility_type": "wheeled"})
+    monkeypatch.setattr(da.laya_gate, "predict", lambda *a, **k: {
+        "answers": {
+            "enclosure_mode": {"choice": "partial"},
+            "mobility_type": {"choice": "wheeled"},
+        },
+    })
     resolved = da.resolve_ambiguous_archetype(prd)
     assert resolved == {"enclosure_mode": "partial", "mobility_type": "wheeled"}
 
 
-def test_non_ambiguous_prd_never_calls_the_llm_resolver(mock_llm):
+def test_non_ambiguous_prd_never_calls_the_laya_resolver(monkeypatch):
     prd = {"text": "A handheld remote controller with a trigger button."}
     classified = da.classify_archetype(prd)
     assert classified.get("status") != "ambiguous"
+
     # Poison the mock: if resolve_ambiguous_archetype() were (incorrectly)
-    # called for this PRD, this response would surface and fail the
-    # assertion below -- but the correct pipeline behavior (A.3, not this
-    # patch) is to never call it at all for a non-ambiguous classify()
-    # result, which this test verifies indirectly by asserting the mock
-    # was never invoked.
-    mock_llm.set_json_response({"enclosure_mode": "none", "mobility_type": "flying"})
-    assert mock_llm.mock.call_count == 0
+    # called for this PRD, call_count below would go non-empty -- but the
+    # correct pipeline behavior (A.3, not this patch) is to never call it
+    # at all for a non-ambiguous classify() result, which this test
+    # verifies indirectly by asserting the mock was never invoked.
+    call_count = []
+
+    def poison(*a, **k):
+        call_count.append(1)
+        return {"answers": {"enclosure_mode": {"choice": "none"},
+                             "mobility_type": {"choice": "flying"}}}
+    monkeypatch.setattr(da.laya_gate, "predict", poison)
+    assert call_count == []
 
 
-def test_llm_resolver_malformed_json_degrades_to_safe_default(mock_llm):
+def test_laya_resolver_unavailable_degrades_to_safe_default(monkeypatch):
+    """laya_gate.predict() returns None when Laya itself is unavailable
+    (package missing, checkpoint failed to load) -- resolve_ambiguous_
+    archetype() must still return a definite, safe archetype rather than
+    raising or propagating None."""
     prd = {"text": "A wheeled chassis platform whose remote also has a "
                     "wrist strap for the operator."}
-    mock_llm.set_response("not valid json at all")
+    monkeypatch.setattr(da.laya_gate, "predict", lambda *a, **k: None)
     resolved = da.resolve_ambiguous_archetype(prd)
     assert resolved == {"enclosure_mode": "full", "mobility_type": "static"}
 
 
-def test_llm_resolver_out_of_vocabulary_response_degrades_to_safe_default(mock_llm):
+def test_laya_resolver_out_of_vocabulary_response_degrades_to_safe_default(monkeypatch):
+    """Laya's `choice` questions are constrained to their own criteria
+    keys, so this is defense in depth rather than a routine occurrence
+    (see resolve_ambiguous_archetype()'s own docstring) -- but an
+    unrecognized pair must still degrade safely, not propagate."""
     prd = {"text": "A wheeled chassis platform whose remote also has a "
                     "wrist strap for the operator."}
-    mock_llm.set_json_response({"enclosure_mode": "sealed", "mobility_type": "submarine"})
+    monkeypatch.setattr(da.laya_gate, "predict", lambda *a, **k: {
+        "answers": {
+            "enclosure_mode": {"choice": "sealed"},
+            "mobility_type": {"choice": "submarine"},
+        },
+    })
     resolved = da.resolve_ambiguous_archetype(prd)
     assert resolved == {"enclosure_mode": "full", "mobility_type": "static"}
 
@@ -226,3 +253,66 @@ def test_wearable_archetype_end_to_end_from_prd_to_full_mode_gate():
     assert set(housing.keys()) == {"outer", "inner", "lid", "ergonomics"}
     assert len(housing["ergonomics"]["strap_mount_points"]) == 2
     assert housing["ergonomics"]["wrist_curvature_radius_mm"] == 32.0
+
+
+# ---------------------------------------------------------------------
+# resolve_ambiguous_archetype -- long-PRD chunking + confidence-weighted
+# vote (Laya migration). Laya's English checkpoint reads only ~300 tokens
+# of state, so a long PRD is asked in chunks and the answers combined.
+# ---------------------------------------------------------------------
+
+def _answers(enclosure, e_conf, mobility, m_conf):
+    return {"answers": {
+        "enclosure_mode": {"choice": enclosure, "confidence": e_conf},
+        "mobility_type": {"choice": mobility, "confidence": m_conf},
+    }}
+
+
+def test_long_prd_is_chunked_and_capped(monkeypatch):
+    sizes = []
+
+    def fake_predict(state, questions, site="unknown"):
+        sizes.append(len(state["prd_text"]))
+        return _answers("full", 0.9, "static", 0.9)
+    monkeypatch.setattr(da.laya_gate, "predict", fake_predict)
+
+    da.resolve_ambiguous_archetype({"text": "x" * 20000})
+    assert len(sizes) == da._MAX_CHUNKS
+    assert max(sizes) <= da._CHUNK_CHARS
+
+
+def test_confident_chunks_outvote_a_weak_one(monkeypatch):
+    replies = iter([
+        _answers("partial", 0.9, "wheeled", 0.9),
+        _answers("full", 0.3, "static", 0.3),
+        _answers("partial", 0.8, "wheeled", 0.8),
+    ])
+    monkeypatch.setattr(da.laya_gate, "predict", lambda *a, **k: next(replies))
+    resolved = da.resolve_ambiguous_archetype({"text": "x" * 2500})   # 3 chunks
+    assert resolved == {"enclosure_mode": "partial", "mobility_type": "wheeled"}
+
+
+def test_signal_in_a_late_chunk_is_not_ignored(monkeypatch):
+    """The reason for chunking: a decisive statement past the first ~1,000
+    chars must still influence the result."""
+    def fake_predict(state, questions, site="unknown"):
+        if "DRONE" in state["prd_text"]:
+            return _answers("partial", 0.95, "flying", 0.95)
+        return _answers("full", 0.4, "static", 0.4)
+    monkeypatch.setattr(da.laya_gate, "predict", fake_predict)
+    resolved = da.resolve_ambiguous_archetype({"text": "a" * 1500 + "DRONE" + "b" * 100})
+    assert resolved == {"enclosure_mode": "partial", "mobility_type": "flying"}
+
+
+def test_failed_chunks_are_skipped_but_others_still_vote(monkeypatch):
+    replies = iter([None, _answers("partial", 0.9, "wheeled", 0.9)])
+    monkeypatch.setattr(da.laya_gate, "predict", lambda *a, **k: next(replies))
+    resolved = da.resolve_ambiguous_archetype({"text": "x" * 1500})   # 2 chunks
+    assert resolved == {"enclosure_mode": "partial", "mobility_type": "wheeled"}
+
+
+def test_missing_confidence_field_is_tolerated(monkeypatch):
+    monkeypatch.setattr(da.laya_gate, "predict", lambda *a, **k: {"answers": {
+        "enclosure_mode": {"choice": "partial"}, "mobility_type": {"choice": "wheeled"}}})
+    assert da.resolve_ambiguous_archetype({"text": "wheeled thing"}) == {
+        "enclosure_mode": "partial", "mobility_type": "wheeled"}

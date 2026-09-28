@@ -72,6 +72,7 @@ from utils.error_sanitizer import user_facing_message
 from utils.llm_client import ChainExhaustedError
 from utils.llm_client import PauseRequestedMidRetry  # NEW — Patch 7
 from utils.llm_client import ShutdownRequested, shutdown_requested  # NEW — Bug fix 2026-08-27 (Ctrl+C audit)
+from utils.llm_client import RunStopped  # NEW — 2026-09-27 deadline-resume fix: was only referenced in a comment before, never imported
 from eo import run_guard  # NEW — audit fix 2026-09-25: cancel flag / failure breaker / token budget
 
 # D1 audit fix -- these print()s were the only signal a Langfuse span
@@ -94,6 +95,17 @@ MAX_AUTO_INSERTS_PER_STEP = 2
 # back for a redo, but not forever. Keyed per-role since a reject_redo
 # always targets the exact role that just paused.
 MAX_STAGE_REVISITS = 2
+
+# 2026-09-27 deadline-resume fix: shown to the person (and put on the
+# "awaiting_approval" event) when a run gets paused because it tripped
+# eo/agent_task_pool.py's AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS instead
+# of because a human asked for a pause or an approval_roles checkpoint
+# was hit. Same copy either way (top-of-loop or mid-role) — see both
+# `except RunStopped` blocks below.
+_DEADLINE_PAUSE_MESSAGE = (
+    "This run took longer than the server allows for a single request and "
+    "was paused instead of abandoned. Resume to pick up right where it left off."
+)
 
 # These agents take `tier` (int) rather than `path` (str), and don't fit
 # any of the other dispatch cases below (they'd otherwise fall into the
@@ -869,7 +881,74 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         # cancelled) or one past its HARD token ceiling must not dispatch
         # another role. Raises RunStopped (a ShutdownRequested) -> tasks.py
         # returns a clean "cancelled" response.
-        run_guard.raise_if_stopped(session_id)
+        #
+        # 2026-09-27 deadline-resume fix: that "cancelled" response was
+        # the whole story for a deadline-triggered stop until now -- the
+        # ONLY caller of run_guard.request_cancel() is
+        # eo/agent_task_pool.py's own wall-clock-deadline branch (the
+        # HARD token ceiling is enforced by the SAME raise_if_stopped()
+        # call, distinguished below by exc.reason), and that path never
+        # wrote a paused_execution:{session_id} snapshot the way every
+        # OTHER pause trigger in this function does. The exception just
+        # propagated out of this orphaned background thread with nobody
+        # left awaiting it (api/eo/agent_task_pool.py's own docstring on
+        # AgentTaskTimeout explains why the thread can't be hard-killed),
+        # so it was silently discarded -- POST /api/resume then 404'd
+        # with "No paused run for session_id=...", and the person's only
+        # option was to re-type the whole task from scratch, losing every
+        # role that had already finished. Caught here and turned into the
+        # same resumable pause shape approval_roles/manual_pause/budget
+        # pauses already use, so "Resume" (WorkingPanel's own
+        # PauseResumeButton, or the composer's Resume icon once a run is
+        # paused) genuinely continues from idx onward instead of restarting.
+        #
+        # Scoped to a single-role slot (role_names[idx] is a str) —
+        # exactly like every other pause checkpoint in this function,
+        # none of which support pausing mid-concurrent-group either (see
+        # this function's own docstring on that backstop). Hitting the
+        # deadline at the exact instant idx points at a group is the one
+        # case this still can't resume; it falls through to the plain
+        # `raise` below and behaves exactly as it did before this fix.
+        try:
+            run_guard.raise_if_stopped(session_id)
+        except RunStopped as exc:
+            # The HARD token ceiling is a deliberate safety kill switch
+            # for a run that already blew past its once-already-approved
+            # SOFT budget (see run_guard.py's own module docstring) — not
+            # a timing accident, so it stays a real, non-resumable stop.
+            if exc.reason == "token_hard_limit" or not isinstance(role_names[idx], str):
+                raise
+            from memory.bus import get_current_app_slug, write
+            paused_at_role = role_names[idx]
+            emit_event(
+                "awaiting_approval", session_id=session_id, path=path,
+                payload={"role": paused_at_role, "reason": "deadline_exceeded",
+                         "message": _DEADLINE_PAUSE_MESSAGE},
+            )
+            snapshot = {
+                "agent_names": agent_names,
+                "role_names": role_names,
+                "idx": idx,
+                "results": results,
+                "key_overrides": key_overrides,
+                "auto_inserted": auto_inserted,
+                "stage_revisits": stage_revisits,
+                "path": path,
+                "task_text": task_text,
+                "project_unique_name": project_unique_name,
+                "mode": mode,
+                "approval_roles": list(approval_roles),
+                "no_conversation_context_roles": list(no_conversation_context_roles),
+                "domain": domain,
+                "scope": scope,
+                "workspace_id": workspace_id,
+                "owner_id": owner_id,
+                "tab": tab,
+                "app_slug": get_current_app_slug(),
+            }
+            write(f"paused_execution:{session_id}", snapshot)
+            return {"status": "paused", "paused_at_role": paused_at_role,
+                    "reason": "deadline_exceeded", "message": _DEADLINE_PAUSE_MESSAGE}
         # Migration Part 2 §2.6: a group (role_names[idx] is a list, not
         # a str) is handled entirely separately from the single-role
         # dispatch below — see _run_concurrent_group()'s own docstring
@@ -1337,6 +1416,60 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 }
                 write(f"paused_execution:{session_id}", snapshot)
                 return {"status": "paused", "paused_at_role": role, "reason": "manual_pause"}
+            except RunStopped as exc:
+                # 2026-09-27 deadline-resume fix: same reasoning as the
+                # top-of-loop checkpoint above, just triggered mid-role
+                # instead of between roles — run_guard.raise_if_stopped()
+                # is also polled deep inside utils/llm_client.py's own
+                # per-step retry loop (see that module's own comment on
+                # the call site), which is by far the MORE likely place
+                # for a genuinely multi-minute deadline to actually land
+                # than the gap between two roles. Same HARD-ceiling
+                # exclusion as above (that one stays a real stop), same
+                # snapshot shape, and idx stays pointed at the CURRENT
+                # role — same "no partial-role state, only whole-role
+                # retry" reasoning as PauseRequestedMidRetry just above,
+                # so resuming re-runs this role from scratch rather than
+                # skipping it.
+                if exc.reason == "token_hard_limit":
+                    raise
+                from memory.bus import delete as bus_delete
+                from memory.bus import get_current_app_slug, write
+                # A manual pause_requested flag could theoretically also
+                # be sitting there if someone hit Pause moments before the
+                # deadline fired — clear it so a later resume doesn't
+                # immediately re-pause on the very next role boundary for
+                # a second, redundant reason.
+                bus_delete(f"pause_requested:{session_id}")
+                emit_event(
+                    "awaiting_approval", session_id=session_id, agent=current_name, path=path,
+                    payload={"role": role, "reason": "deadline_exceeded",
+                             "message": _DEADLINE_PAUSE_MESSAGE},
+                )
+                snapshot = {
+                    "agent_names": agent_names,
+                    "role_names": role_names,
+                    "idx": idx,
+                    "results": results,
+                    "key_overrides": key_overrides,
+                    "auto_inserted": auto_inserted,
+                    "stage_revisits": stage_revisits,
+                    "path": path,
+                    "task_text": task_text,
+                    "project_unique_name": project_unique_name,
+                    "mode": mode,
+                    "approval_roles": list(approval_roles),
+                    "no_conversation_context_roles": list(no_conversation_context_roles),
+                    "domain": domain,
+                    "scope": scope,
+                    "workspace_id": workspace_id,
+                    "owner_id": owner_id,
+                    "tab": tab,
+                    "app_slug": get_current_app_slug(),
+                }
+                write(f"paused_execution:{session_id}", snapshot)
+                return {"status": "paused", "paused_at_role": role,
+                        "reason": "deadline_exceeded", "message": _DEADLINE_PAUSE_MESSAGE}
             except ChainExhaustedError as exc:
                 # Phase 6b (fixes Bug 5): every provider in THIS role's
                 # fallback chain was genuinely tried and failed — degrade
