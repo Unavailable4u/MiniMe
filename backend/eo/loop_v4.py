@@ -62,6 +62,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo import (
     code_loader,
     conversation_memory,  # NEW — Part 23
+    laya_routing,  # NEW — Laya migration Tier 3, see _get_decision()
     routing_memory,
 )
 from eo import panel as eo_panel
@@ -177,11 +178,28 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
     # confidence, any tier) or the one tier where a second opinion can still
     # change the outcome (tier 2, which the panel might confirm OR push to 3).
     should_escalate = draft["confidence"] < CONFIDENCE_THRESHOLD or draft["tier"] == 2
+
+    # Laya migration Tier 3 (2026-09-28): see eo/laya_routing.py for the full
+    # reasoning. Only ever consulted when the panel WOULD run, and only for
+    # tier 0/1 drafts. Default mode is "observe": Laya's verdict is logged
+    # and scored against what the panel then decides, but the panel still
+    # runs. Only LAYA_PANEL_PREGATE=on can skip it. Never raises.
+    panel_gate = None
+    if should_escalate:
+        panel_gate = laya_routing.panel_verdict(task_text, draft)
+        if panel_gate["skip"]:
+            print(f"  [EO] Laya pre-gate: skipping panel (draft tier={draft['tier']}, "
+                  f"confidence={draft['confidence']:.2f}, "
+                  f"P(more complex)={panel_gate['p_higher']:.2f})")
+            laya_routing.note_panel_skipped(panel_gate)
+            should_escalate = False
+
     if should_escalate:
         print(f"  [EO] escalating to panel (confidence={draft['confidence']:.2f}, "
               f"tier={draft['tier']}) ...")
         try:
             decision = eo_panel.run_panel(task_text, draft)
+            laya_routing.record_panel_outcome(panel_gate, draft, decision)
         except Exception as exc:                                    # NEW — Part 15 stopgap
             print(f"  [EO] panel escalation failed ({exc.__class__.__name__}: {exc}), "
                   f"falling back to the Inspector's own draft.")

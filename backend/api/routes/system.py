@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, Query
 
 from api.deps import require_auth
-from eo import agent_task_pool, chat_page_cache, conversation_memory, db, sga, tool_budget  # NEW — sga: perf audit follow-up (#1); tool_budget: perf audit follow-up (#6); conversation_memory: perf audit follow-up (#3b)
+from eo import agent_task_pool, chat_page_cache, conversation_memory, db, laya_routing, sga, tool_budget  # NEW — sga: perf audit follow-up (#1); tool_budget: perf audit follow-up (#6); conversation_memory: perf audit follow-up (#3b); laya_routing: Laya migration Tier 3
 from eo.quota_sentinel import (
     get_quota_snapshot,
     get_rate_window_snapshot,
@@ -170,6 +170,26 @@ def sga_stats():
     # counters, no per-user scoping needed beyond logged-in" posture as
     # chat_page_cache_stats/db_pool_stats/agent_pool_stats above.
     return sga.get_sga_stats()
+
+
+@router.get("/api/system/laya-routing-stats", dependencies=[Depends(require_auth)])
+def laya_routing_stats():
+    # Laya migration Tier 3: both gates default to LAYA_*_PREGATE=observe,
+    # meaning Laya's verdict is logged and scored against what the real
+    # panel/gatekeeper LLM call then decided, but never changes routing on
+    # its own. Check skip_precision/stop_precision here -- they should sit
+    # very close to 1.0 -- before flipping either gate to "on" in
+    # eo/laya_routing.py's env vars. See that module's own docstring for
+    # what each field means and why these two gates are held to a higher
+    # bar than eo/sga.py's Tier 2 pre-gate.
+    return {
+        "panel_gate": {"mode": laya_routing.PANEL_GATE_MODE,
+                       "threshold": laya_routing.PANEL_GATE_THRESHOLD,
+                       **laya_routing.get_panel_gate_stats()},
+        "gatekeeper_gate": {"mode": laya_routing.GATEKEEPER_GATE_MODE,
+                            "threshold": laya_routing.GATEKEEPER_GATE_THRESHOLD,
+                            **laya_routing.get_gatekeeper_gate_stats()},
+    }
 
 
 @router.get("/api/system/tool-budget-stats", dependencies=[Depends(require_auth)])

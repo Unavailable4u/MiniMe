@@ -14,6 +14,7 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from eo import laya_routing  # NEW — Laya migration Tier 3, see _run_gatekeeper()
 from eo.executor import execute_graph
 from eo.router import build_execution_graph_from_hires
 from eo.scratchpad import clear_scratchpad
@@ -110,6 +111,23 @@ def _run_gatekeeper(results: dict, task_text: str, session_id: str, loop_num: in
                    payload={"decision": "STOP", "loop": loop_num, "cause": decision["cause"]})
         return decision
 
+    # Laya migration Tier 3 (2026-09-28): see eo/laya_routing.py. A confident
+    # "genuinely finished" can answer STOP without the LLM gatekeeper call
+    # (only in mode "on"); STOP is already this function's fail-safe
+    # direction. Default mode "observe" just records Laya's verdict and
+    # scores it against the LLM's decision below. Never raises.
+    laya_verdict = laya_routing.gatekeeper_verdict(
+        results, task_text, loop_num, failed_roles,
+        len(_extract_critical_issue(results)))
+    if laya_verdict["skip"]:
+        decision = {"action": "STOP", "cause": "laya_gatekeeper"}
+        print(f"  [loop_controller] Laya pre-gate: pass looks finished "
+              f"(P(stop)={laya_verdict['p_stop']:.2f}) -- skipping the LLM gatekeeper call.")
+        laya_routing.note_gatekeeper_skipped(laya_verdict)
+        emit_event("macro_loop_decision", session_id=session_id,
+                   payload={"decision": "STOP", "loop": loop_num, "cause": decision["cause"]})
+        return decision
+
     summary = "\n\n".join(f"[{k}]: {str(v)[:400]}" for k, v in results.items())
     from agents.generic_worker import run as generic_run
     from utils.llm_client import ShutdownRequested
@@ -143,6 +161,8 @@ def _run_gatekeeper(results: dict, task_text: str, session_id: str, loop_num: in
             redo = failed_roles
         decision = ({"action": "CONTINUE", "redo_roles": redo} if redo
                     else {"action": "STOP", "cause": "continue_without_specific_roles"})
+
+    laya_routing.record_gatekeeper_outcome(laya_verdict, decision["action"])
 
     # This is the single emission point for the LLM-judgment path —
     # _hard_safety_check already emits macro_loop_decision on its own
