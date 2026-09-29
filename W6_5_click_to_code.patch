@@ -1,0 +1,1237 @@
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index 13753d5..022ea28 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -40,6 +40,7 @@ import {
+ // per-hunk review nobody opened, the same shortcut PendingTray.jsx
+ // (EditorWorkbench.jsx) uses for its own Keep all/Reject buttons.
+ import { deletedPathsToKeep, keepAllDecisions, rejectAllDecisions } from "../lib/workbench/reviewMode";
++import { describeElement } from "../lib/workbench/elementRef"; // W6.5 — pure helpers, not a codeContext import
+ import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
+ import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
+ 
+@@ -1279,7 +1280,13 @@ export default function WorkspaceChatPanel({
+               // header below would be actively misleading for this kind.
+               ref.kind === "error"
+             ? "```\n" + (ref.snippet || "") + "\n```"
+-            : "```" + (ref.fromLine != null ? `${ref.path}#L${ref.fromLine}-L${ref.toLine}` : ref.path) + "\n" + (ref.snippet || "") + "\n```"
++            : // W6.5: an element ref is a real code range (fenced exactly like
++              // a range chip) PLUS what that source rendered as — tag,
++              // classes, text, computed styles (elementRef.js) — as a plain
++              // line ahead of it. The code alone can't say what a
++              // `className` resolved to on screen.
++              (ref.kind === "element" && ref.element ? describeElement(ref.element) + "\n" : "") +
++              "```" + (ref.fromLine != null ? `${ref.path}#L${ref.fromLine}-L${ref.toLine}` : ref.path) + "\n" + (ref.snippet || "") + "\n```"
+         )
+         .join("\n\n");
+       const augmented = fenced ? `${fenced}\n\n${text}` : text;
+diff --git a/frontend/app/components/workbench/CodeEditor.jsx b/frontend/app/components/workbench/CodeEditor.jsx
+index 55af0ed..6360cbb 100644
+--- a/frontend/app/components/workbench/CodeEditor.jsx
++++ b/frontend/app/components/workbench/CodeEditor.jsx
+@@ -109,6 +109,7 @@ import {
+   normalizeLineBreaks,
+ } from "../../lib/workbench/editorUtils";
+ import { chunkLineStats } from "../../lib/workbench/reviewMode";
++import { pulseExtension } from "../../lib/workbench/pulse"; // W6.5
+ 
+ // Tags a transaction as coming from THIS component's own `value`-prop
+ // effect (an external update), not from the person typing — read back
+@@ -505,6 +506,7 @@ function useCodeMirror({
+       extensions: [
+         baseExtensions(onSaveRef, onAddToChatRef, gutterAnchorRef),
+         buildEditorTheme(),
++        pulseExtension, // W6.5: the click-to-code flash (see lib/workbench/pulse.js)
+         isReview ? buildReviewTheme() : [],
+         indentCompartment.of(indentUnit.of(detectIndentUnit(value ?? ""))),
+         languageCompartment.of([]),
+diff --git a/frontend/app/components/workbench/ContextChips.jsx b/frontend/app/components/workbench/ContextChips.jsx
+index 74ebf5d..e6f0c65 100644
+--- a/frontend/app/components/workbench/ContextChips.jsx
++++ b/frontend/app/components/workbench/ContextChips.jsx
+@@ -18,6 +18,7 @@
+ import { memo } from "react";
+ import { File, Folder, MessageSquareCode, X } from "lucide-react";
+ import { contextBudget, useCodeContext } from "../../lib/workbench/codeContext";
++import { elementLabel } from "../../lib/workbench/elementRef";
+ import { basename } from "../../lib/workbench/fileTree";
+ 
+ const KIND_ICONS = {
+@@ -42,6 +43,10 @@ function chipLabel(ref) {
+     const firstLine = (ref.snippet || "").split("\n")[0].trim();
+     return firstLine || "Console error";
+   }
++  // W6.5: an element chip reads as the element it is (`button.btn-primary`),
++  // not as the file it lives in — the code range is still on the ref for
++  // the jump and the prompt.
++  if (ref.kind === "element" && ref.element) return elementLabel(ref.element);
+   const name = basename(ref.path) || ref.path;
+   if (ref.kind === "range") {
+     return ref.fromLine === ref.toLine ? `${name} L${ref.fromLine}` : `${name} L${ref.fromLine}-${ref.toLine}`;
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index 4a2553a..65e5c78 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -105,6 +105,7 @@ import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../li
+ import { deleteSummary } from "../../lib/workbench/explorerOps";
+ import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
+ import { jumpToPosition } from "../../lib/workbench/gotoPosition";
++import { parseMm, rangeFromMm } from "../../lib/preview/mmRange"; // W6.5
+ import {
+   buildDecisions,
+   deletedPathsToKeep,
+@@ -1107,6 +1108,64 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
+     [addRef, provider]
+   );
+ 
++  // W6.5 — click-to-code. PreviewPane.jsx's inspect mode hands over a
++  // selection ({mm, element}, already sanitized); this turns it into the
++  // three things the plan asks for:
++  //   1. open the file the element's data-mm points at,
++  //   2. select that exact range and pulse it (gotoPosition.js's
++  //      `pulse` option — mm columns are 0-based, jumpToPosition's are
++  //      1-based, hence the +1s; the end column is exclusive on both
++  //      sides so it converts the same way),
++  //   3. add an `element` chip: the range's own text as its snippet
++  //      (so Ask mode, which just fences snippets into the message,
++  //      works with no further plumbing) plus what the DOM node looked
++  //      like, kept on `ref.element` for W7.1's agent.
++  // `onFixWithAIChat` is reused here purely for what it DOES — make the
++  // chat dock visible if it's collapsed (BuildTab.jsx) — because a chip
++  // added to a composer nobody can see isn't the "chip is in the
++  // composer" the plan's Done-when describes. It requests no chat mode.
++  const handleSelectElement = useCallback(
++    async ({ mm, element }) => {
++      const parsed = parseMm(mm);
++      if (!parsed) return;
++      const { path } = parsed;
++      await openFile(path);
++      jumpToPositionInPane(path, {
++        line: parsed.startLine,
++        column: parsed.startCol + 1,
++        endLine: parsed.endLine,
++        endColumn: parsed.endCol + 1,
++        pulse: true,
++      });
++      // The live buffer when the file is open (unsaved edits included —
++      // the range was computed from that same text), else a fresh read;
++      // same preference handleAddToChat above makes for a file chip.
++      const openBuffer = stateRef.current.buffers[path];
++      let text = openBuffer ? openBuffer.edited : null;
++      if (text == null) {
++        try {
++          text = (await provider.read(path)).content ?? "";
++        } catch {
++          text = "";
++        }
++      }
++      const { from, to, snippet } = rangeFromMm(text, parsed);
++      addRef({
++        kind: "element",
++        path,
++        provider: provider.id,
++        fromLine: parsed.startLine,
++        toLine: parsed.endLine,
++        from,
++        to,
++        snippet,
++        element,
++      });
++      onFixWithAIChat?.();
++    },
++    [openFile, jumpToPositionInPane, provider, addRef, onFixWithAIChat]
++  );
++
+   // A chip's click-to-jump (ContextChips.jsx's requestJump →
+   // codeContext.js's SET_PENDING_JUMP). Opens the file if it isn't
+   // already, same as jumpToSearchResult above, then jumps to the
+@@ -2018,7 +2077,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
+             />
+             <div className="shrink min-w-0" style={{ width: previewSplitter.size }}>
+               <PreviewColumn onClose={closePreview}>
+-                <PreviewPane provider={provider} filesMeta={filesMeta} />
++                <PreviewPane provider={provider} filesMeta={filesMeta} cursor={cursor} onSelectElement={handleSelectElement} />
+               </PreviewColumn>
+             </div>
+           </>
+diff --git a/frontend/app/components/workbench/PreviewPane.jsx b/frontend/app/components/workbench/PreviewPane.jsx
+index 2463d79..92d9300 100644
+--- a/frontend/app/components/workbench/PreviewPane.jsx
++++ b/frontend/app/components/workbench/PreviewPane.jsx
+@@ -39,6 +39,8 @@ import { detectKind } from "../../lib/preview/detectKind";
+ import { bundleStatic } from "../../lib/preview/bundleStatic";
+ import { injectConsoleBridge } from "../../lib/preview/consoleBridge";
+ import { injectInspectorRuntime } from "../../lib/preview/inspectorRuntime";
++import { extractMmRanges, innermostMmAt } from "../../lib/preview/mmRange";
++import { elementFromMessage } from "../../lib/workbench/elementRef";
+ import { usePyodideWorker } from "../../hooks/usePyodideWorker";
+ 
+ // W6.2: a fresh nonce per successful build, NOT per component mount —
+@@ -93,6 +95,16 @@ function makeResolver({ provider, filesMeta, buffers, cacheRef }) {
+   };
+ }
+ 
++// W6.4/W6.5: parent -> frame. The runtime ignores anything without this
++// build's own nonce (inspectorRuntime.js's message listener), so a stale
++// message aimed at a previous build's iframe can't act on a newer one.
++// Module-level (reads only the two refs it's handed) so the message
++// listener effect below can call it without listing a per-render
++// function in its dependency array.
++function postToFrame(iframeRef, nonceRef, message) {
++  iframeRef.current?.contentWindow?.postMessage({ source: "minime-parent", nonce: nonceRef.current, ...message }, "*");
++}
++
+ function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings, inspecting, onToggleInspect }) {
+   return (
+     <div className="shrink-0 flex items-center justify-between gap-2 px-2 h-8 border-b border-[var(--neutral-800)]">
+@@ -154,7 +166,7 @@ function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warning
+   );
+ }
+ 
+-function StaticPreview({ provider, filesMeta, entryPath }) {
++function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement }) {
+   const { state, consoleMessage } = useEditorStore();
+   const [device, setDevice] = useState("desktop");
+   const [built, setBuilt] = useState(null); // {html, warnings} | null while building the first time
+@@ -179,12 +191,19 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+   // minime:inspect it was sent — see inspectorRuntime.js's header for
+   // the Esc case that has to flow back the other way). `lastSelection`
+   // is the most recent minime:select payload, shown as a one-line
+-  // readout below the toolbar; W6.5 (click-to-code) is what will
+-  // actually DO something with a selection beyond displaying it, so it
+-  // stays plain local state here rather than a shared store field
+-  // nothing else reads yet.
++  // readout below the toolbar. W6.5: acting on a selection (open the
++  // file, select the range, add the chip) is EditorWorkbench.jsx's job,
++  // reached through `onSelectElement` — this component only knows how
++  // to turn the frame's message into that call.
+   const [inspecting, setInspecting] = useState(false);
+   const [lastSelection, setLastSelection] = useState(null);
++  // The latest callback, read through a ref so the message listener
++  // (subscribed once, not per render) never calls a stale closure.
++  const onSelectElementRef = useRef(onSelectElement);
++  onSelectElementRef.current = onSelectElement;
++  // W6.5: what the frame is currently told to outline, so a reloaded
++  // frame (fresh runtime, nothing highlighted) can be re-sent it.
++  const highlightMmRef = useRef(null);
+   const buffers = state.buffers;
+ 
+   useEffect(() => {
+@@ -202,8 +221,13 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+         // see makeNonce()'s own comment above for why.
+         const nonce = makeNonce();
+         nonceRef.current = nonce;
++        // W6.5: read the data-mm ranges off bundleStatic's output BEFORE
++        // the two runtimes are injected — they're pure scripts, but this
++        // way the reverse-highlight lookup below sees exactly the
++        // instrumented document and nothing else.
++        const ranges = extractMmRanges(result.html);
+         const html = injectInspectorRuntime(injectConsoleBridge(result.html, nonce), nonce);
+-        setBuilt({ html, warnings: result.warnings });
++        setBuilt({ html, warnings: result.warnings, ranges });
+         setBuildError(null);
+       } catch (err) {
+         setBuildError(err?.message || String(err));
+@@ -254,13 +278,20 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+       // must be peeled off BEFORE the console handling below — otherwise
+       // a minime:select would land in the Console tab as an empty row.
+       if (data.type === "minime:select") {
+-        setLastSelection({
+-          mm: typeof data.mm === "string" ? data.mm : "",
+-          tag: typeof data.tag === "string" ? data.tag : "",
+-          classes: Array.isArray(data.classes) ? data.classes.filter((c) => typeof c === "string") : [],
+-          dynamic: data.dynamic === true,
+-          instanceCount: typeof data.instanceCount === "number" ? data.instanceCount : 1,
+-        });
++        // Untrusted data from inside the sandbox: elementFromMessage()
++        // type-checks and length-caps every field, and returns null when
++        // there's no usable mm to resolve to a source range.
++        const selection = elementFromMessage(data);
++        if (!selection) return;
++        setLastSelection({ mm: selection.mm, ...selection.element });
++        onSelectElementRef.current?.(selection);
++        // A pick ends inspect mode (same as a browser's own element
++        // picker): keyboard focus has just moved to the editor, where
++        // Esc can no longer reach the frame's own handler to turn it
++        // off, so leaving it on would strand the person in a mode with
++        // no keyboard exit.
++        setInspecting(false);
++        postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: false });
+         return;
+       }
+       if (data.type === "minime:inspectExited") {
+@@ -283,33 +314,38 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
+     return () => window.removeEventListener("message", onMessage);
+   }, [consoleMessage]);
+ 
+-  // W6.4: parent -> frame. The runtime ignores anything without this
+-  // build's own nonce (inspectorRuntime.js's message listener), so a
+-  // stale toggle aimed at a previous build's iframe can't flip a newer
+-  // one.
+-  function postInspectState(on) {
+-    iframeRef.current?.contentWindow?.postMessage(
+-      { source: "minime-parent", nonce: nonceRef.current, type: "minime:inspect", on },
+-      "*"
+-    );
+-  }
+-
+   function handleToggleInspect() {
+     const next = !inspecting;
+     setInspecting(next);
+-    postInspectState(next);
++    postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: next });
+   }
+ 
+   // A rebuild swaps srcDoc, which reloads the frame into a FRESH
+-  // runtime whose own `inspecting` starts false — without this, turning
+-  // inspect mode on and then typing a character (debounced rebuild)
+-  // would silently drop it. Re-sent on every load, not just when true,
+-  // so a runtime that somehow kept state can't disagree with the
+-  // toolbar either.
++  // runtime whose own `inspecting` starts false and which has nothing
++  // highlighted — without this, turning inspect mode on and then typing
++  // a character (debounced rebuild) would silently drop it, and the
++  // reverse highlight would vanish on every keystroke. Re-sent on every
++  // load, not just when set, so a runtime that somehow kept state can't
++  // disagree with the toolbar / editor either.
+   function handleIframeLoad() {
+-    postInspectState(inspecting);
++    postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: inspecting });
++    postToFrame(iframeRef, nonceRef, { type: "minime:highlight", mm: highlightMmRef.current });
+   }
+ 
++  // W6.5, reverse direction: the innermost element containing the
++  // editor's cursor is outlined in the preview — "the element you're
++  // editing". CodeEditor reports a 1-based column; data-mm columns are
++  // 0-based. Only the file the cursor is actually in can match (ranges
++  // carry their own path), so moving to a different file clears it.
++  const highlightMm = useMemo(
++    () => (built?.ranges && cursor ? innermostMmAt(built.ranges, state.activePath, cursor.line, cursor.col - 1) : null),
++    [built, cursor, state.activePath]
++  );
++  useEffect(() => {
++    highlightMmRef.current = highlightMm;
++    postToFrame(iframeRef, nonceRef, { type: "minime:highlight", mm: highlightMm });
++  }, [highlightMm]);
++
+   function handleReload() {
+     cacheRef.current.clear(); // a manual reload means "don't trust anything cached", unlike the live-typing path which is fine reusing unopened files' last-known content
+     setReloadNonce((n) => n + 1);
+@@ -466,8 +502,10 @@ function EmptyState({ title, detail }) {
+  * @param {object} props
+  * @param {object} props.provider - the active FileProvider (WorkbenchBody's own, same one CodeEditor/Explorer use)
+  * @param {{[path: string]: object}|null} props.filesMeta - FileProvider.list()'s result; null until the first load lands
++ * @param {{line: number, col: number}|null} [props.cursor] - W6.5: the ACTIVE editor file's caret (CodeEditor's own 1-based report); drives the reverse highlight
++ * @param {(selection: {mm: string, element: object}) => void} [props.onSelectElement] - W6.5: a click in the preview's inspect mode, already sanitized by elementRef.js's elementFromMessage()
+  */
+-function PreviewPane({ provider, filesMeta }) {
++function PreviewPane({ provider, filesMeta, cursor, onSelectElement }) {
+   const detected = useMemo(() => detectKind(filesMeta || {}), [filesMeta]);
+ 
+   if (!filesMeta) {
+@@ -479,7 +517,15 @@ function PreviewPane({ provider, filesMeta }) {
+   }
+ 
+   if (detected.kind === "static") {
+-    return <StaticPreview provider={provider} filesMeta={filesMeta} entryPath={detected.entryPath} />;
++    return (
++      <StaticPreview
++        provider={provider}
++        filesMeta={filesMeta}
++        entryPath={detected.entryPath}
++        cursor={cursor}
++        onSelectElement={onSelectElement}
++      />
++    );
+   }
+   if (detected.kind === "python") {
+     return <PythonPreview filesMeta={filesMeta} />;
+diff --git a/frontend/app/lib/preview/__tests__/inspectorRuntime.test.mjs b/frontend/app/lib/preview/__tests__/inspectorRuntime.test.mjs
+index 6d373da..9589bbc 100644
+--- a/frontend/app/lib/preview/__tests__/inspectorRuntime.test.mjs
++++ b/frontend/app/lib/preview/__tests__/inspectorRuntime.test.mjs
+@@ -69,6 +69,7 @@ assert(script.includes("addEventListener('click', mmOnClick, true)"), "the click
+ assert(script.includes("event.preventDefault()") && script.includes("event.stopPropagation()"), "a click while inspecting is prevented/stopped so the page's own handler never fires");
+ assert(script.includes("'Escape'"), "Esc is wired to exit inspect mode");
+ assert(script.includes("__mmInspectorInstalled__"), "guards against double-installation if injected twice");
++assert(script.includes("addEventListener('scroll', mmRepositionHighlight, true)"), "scroll is listened for in the capture phase (it doesn't bubble) so the reverse highlight follows its element");
+ assert(script.includes("closest('[data-mm]')"), "resolution walks up to the nearest element carrying data-mm — the 'nearest static ancestor' rule from the plan");
+ 
+ const hostileNonce = `x"; window.__pwned__=1; //`;
+@@ -146,6 +147,7 @@ class FakeElement {
+ function makeSandbox(root, nonce) {
+   const posted = [];
+   const handlers = {};
++  const created = []; // every box/label element the script makes, in creation order: hover outline, highlight outline, label
+   const sandbox = {
+     window: {
+       parent: { postMessage: (msg) => posted.push(msg) },
+@@ -164,7 +166,12 @@ function makeSandbox(root, nonce) {
+     document: {
+       body: {}, // truthy -- just needs to exist for mmEnsureOverlay()'s guard
+       documentElement: { appendChild: () => {} },
+-      createElement: () => ({ style: {} }), // the overlay/label boxes -- never asserted on directly, only that creating them doesn't throw
++      createElement: () => {
++        const el = { style: {} };
++        created.push(el);
++        return el;
++      },
++      contains: (el) => [...root.walk()].includes(el), // backs the scroll handler's "is the highlighted element still in the document" check
+       querySelector: (selector) => {
+         const m = /^\[data-mm="(.*)"\]$/.exec(selector);
+         if (!m) throw new Error("fake querySelector only supports the exact-match data-mm form, got: " + selector);
+@@ -181,7 +188,7 @@ function makeSandbox(root, nonce) {
+   };
+   const context = vm.createContext(sandbox);
+   new vm.Script(buildInspectorScript(nonce)).runInContext(context);
+-  return { handlers, posted, window: sandbox.window, document: sandbox.document };
++  return { handlers, posted, created, window: sandbox.window, document: sandbox.document };
+ }
+ 
+ function fakeEvent(target, extra = {}) {
+@@ -324,6 +331,47 @@ const root = new FakeElement("div", {}, [divMm, buttonMm]);
+   assert(!threw, "minime:highlight for an mm with no matching element never throws");
+ }
+ 
++{
++  // minime:highlight (W6.5's sender): a known mm draws the SECOND box
++  // (the highlight outline, created after the hover outline) over that
++  // element's rect; null clears it.
++  const s = makeSandbox(root, "n8b");
++  postFromParent(s, "n8b", { type: "minime:highlight", mm: "app.html:2:0:5:6" });
++  const box = s.created[1].style; // the highlight outline is the second element the script makes
++  assertEqual([box.left, box.top, box.width, box.height, box.display], ["10px", "10px", "200px", "100px", "block"], "a known mm outlines that element's own rect");
++
++  // Scroll moves the element: the box is re-placed from a FRESH rect
++  // rather than staying where it was first drawn.
++  divMm._rect = { x: 10, y: -40, top: -40, left: 10, right: 210, bottom: 60, width: 200, height: 100 };
++  s.handlers.scroll({});
++  assertEqual([box.left, box.top], ["10px", "-40px"], "a scroll re-places the highlight box from the element's current rect");
++  divMm._rect = { x: 10, y: 10, top: 10, left: 10, right: 210, bottom: 110, width: 200, height: 100 }; // restore for later tests
++
++  s.handlers.resize({});
++  assertEqual(box.top, "10px", "a resize re-places it too");
++
++  postFromParent(s, "n8b", { type: "minime:highlight", mm: null });
++  assertEqual(box.display, "none", "mm: null clears the highlight");
++  divMm._rect = { x: 99, y: 99, top: 99, left: 99, right: 199, bottom: 199, width: 100, height: 100 };
++  s.handlers.scroll({});
++  assertEqual(box.display, "none", "once cleared, a scroll does NOT bring the old highlight back");
++  divMm._rect = { x: 10, y: 10, top: 10, left: 10, right: 210, bottom: 110, width: 200, height: 100 };
++}
++
++{
++  // A highlighted element that has since been removed from the document
++  // hides the box instead of leaving it floating over nothing.
++  const gone = new FakeElement("p", { "data-mm": "g.html:1:0:1:9" }, [], { x: 0, y: 0, top: 0, left: 0, right: 5, bottom: 5, width: 5, height: 5 });
++  const goneRoot = new FakeElement("div", {}, [gone]);
++  const s = makeSandbox(goneRoot, "n8c");
++  postFromParent(s, "n8c", { type: "minime:highlight", mm: "g.html:1:0:1:9" });
++  const box = s.created[1].style; // the highlight outline is the second element the script makes
++  assertEqual(box.display, "block", "highlighted while present");
++  goneRoot.children = []; // removed from the tree
++  s.handlers.scroll({});
++  assertEqual(box.display, "none", "a scroll after the element left the document hides the box");
++}
++
+ // ===========================================================================
+ // Tier 3 — injectInspectorRuntime, and the same golden fixture W6.3's own
+ // instrument.test.mjs already established (data-mm survives the full
+diff --git pb/frontend/app/lib/preview/__tests__/mmRange.test.mjs pb/frontend/app/lib/preview/__tests__/mmRange.test.mjs
+new file mode 100644
+index 0000000..45835f0
+--- /dev/null
++++ b/frontend/app/lib/preview/__tests__/mmRange.test.mjs
+@@ -0,0 +1,113 @@
++// W6.5 (Build Workbench plan) — tests for lib/preview/mmRange.js.
++// Same dependency-free loadSource() approach as the rest of this
++// directory; the fixture is the SAME HTML instrument.test.mjs (W6.3)
++// pins its golden data-mm values against, run through the real
++// instrumentHtml(), so "the cursor maps to the right mm" is checked
++// against ground truth the instrumenter itself produced, not against
++// hand-written mm strings that could drift from it.
++//
++// Run: node frontend/app/lib/preview/__tests__/mmRange.test.mjs
++import { loadSource } from "../../workbench/__tests__/loadSource.mjs";
++import { instrumentHtml } from "../../preview/instrument.js";
++
++const { parseMm, extractMmRanges, innermostMmAt, offsetOf, rangeFromMm } = loadSource("../../preview/mmRange.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// --- parseMm ---------------------------------------------------------------
++
++assertEqual(
++  parseMm("index.html:4:2:7:8"),
++  { mm: "index.html:4:2:7:8", path: "index.html", startLine: 4, startCol: 2, endLine: 7, endCol: 8 },
++  "parses path + four numbers"
++);
++assertEqual(parseMm("C:/proj/a.html:1:0:2:5")?.path, "C:/proj/a.html", "a path containing ':' still splits correctly (numbers are parsed from the right)");
++assertEqual(parseMm("nope"), null, "garbage is null, not a throw");
++assertEqual(parseMm(":1:2:3:4"), null, "an empty path is rejected");
++assertEqual(parseMm(42), null, "a non-string is null");
++
++// --- fixture from W6.3's own golden test ------------------------------------
++
++const fixture =
++  "<!DOCTYPE html>\n" +
++  '<html><head><title>x</title><meta charset="utf-8"><style>.a{color:red}</style></head>\n' +
++  "<body>\n" +
++  '  <div class="a">\n' +
++  "    <p>hi</p>\n" +
++  '    <img src="x.png">\n' +
++  "  </div>\n" +
++  "  <script>console.log(1)</script>\n" +
++  "</body></html>";
++
++const instrumented = instrumentHtml(fixture, "index.html").code;
++const ranges = extractMmRanges(instrumented);
++const mms = ranges.map((r) => r.mm);
++
++assertEqual(mms.includes("index.html:4:2:7:8"), true, "extractMmRanges finds the div's W6.3 golden value");
++assertEqual(ranges.every((r) => r.path === "index.html"), true, "every extracted range carries the entry path");
++assertEqual(extractMmRanges(undefined), [], "non-string html -> no ranges");
++assertEqual(extractMmRanges('<p data-mm="a&amp;b.html:1:0:1:9">x</p>')[0]?.path, "a&b.html", "an escaped & in the path is decoded back");
++
++const pRange = ranges.find((r) => r.startLine === 5);
++assertEqual(!!pRange, true, "the <p> on line 5 was instrumented");
++
++// --- innermostMmAt ----------------------------------------------------------
++// Cursor columns here are 0-based, matching the contract; EditorWorkbench
++// converts CodeEditor's 1-based cursor col before calling.
++
++assertEqual(innermostMmAt(ranges, "index.html", 5, 6), pRange.mm, "a cursor inside <p>hi</p> picks the <p> (innermost), not the enclosing div");
++assertEqual(innermostMmAt(ranges, "index.html", 5, 1), "index.html:4:2:7:8", "a cursor in the indentation before <p> is still inside the div only");
++assertEqual(innermostMmAt(ranges, "index.html", 4, 5), "index.html:4:2:7:8", "a cursor inside the div's own opening tag picks the div");
++assertEqual(innermostMmAt(ranges, "index.html", 7, 4), "index.html:4:2:7:8", "a cursor inside the closing </div> is still the div");
++// <body> (3:0 -> 9:7) encloses the whole fixture, so "outside the div"
++// resolves to the body — the next range out — rather than to nothing.
++assertEqual(innermostMmAt(ranges, "index.html", 7, 8), "index.html:3:0:9:7", "the END is exclusive: right after </div> is outside it (falls back to <body>)");
++assertEqual(innermostMmAt(ranges, "index.html", 4, 1), "index.html:3:0:9:7", "left of the div's start is outside it (falls back to <body>)");
++assertEqual(innermostMmAt(ranges, "index.html", 1, 3), null, "before <body> even starts (the doctype line) matches nothing");
++assertEqual(innermostMmAt(ranges, "other.html", 5, 6), null, "a cursor in a DIFFERENT file never matches this file's ranges");
++assertEqual(innermostMmAt(ranges, null, 5, 6), null, "no active path -> null");
++assertEqual(innermostMmAt(ranges, "index.html", NaN, 0), null, "a non-finite position -> null, not a throw");
++
++// Nesting where a later-starting range must beat an earlier one that
++// also contains the cursor, whatever order they appear in the list.
++const nested = [
++  { mm: "n.html:1:0:9:0", path: "n.html", startLine: 1, startCol: 0, endLine: 9, endCol: 0 },
++  { mm: "n.html:3:2:5:2", path: "n.html", startLine: 3, startCol: 2, endLine: 5, endCol: 2 },
++  { mm: "n.html:4:4:4:10", path: "n.html", startLine: 4, startCol: 4, endLine: 4, endCol: 10 },
++];
++assertEqual(innermostMmAt(nested, "n.html", 4, 6), "n.html:4:4:4:10", "three levels deep -> the deepest");
++assertEqual(innermostMmAt([...nested].reverse(), "n.html", 4, 6), "n.html:4:4:4:10", "list order doesn't matter");
++assertEqual(innermostMmAt(nested, "n.html", 3, 3), "n.html:3:2:5:2", "middle level when the cursor is outside the inner one");
++
++// --- offsetOf / rangeFromMm ---------------------------------------------------
++
++assertEqual(offsetOf("ab\ncd\nef", 1, 0), 0, "line 1 col 0 is offset 0");
++assertEqual(offsetOf("ab\ncd\nef", 2, 1), 4, "line 2 col 1");
++assertEqual(offsetOf("ab\ncd\nef", 2, 99), 5, "a column past the line's end clamps to the line end (before the \\n)");
++assertEqual(offsetOf("ab\ncd\nef", 99, 0), 8, "a line past the document clamps to the doc end");
++
++const divParsed = parseMm("index.html:4:2:7:8");
++const div = rangeFromMm(fixture, divParsed);
++assertEqual(div.snippet.startsWith('<div class="a">'), true, "the snippet for the div range starts at its opening tag");
++assertEqual(div.snippet.endsWith("</div>"), true, "...and ends exactly after its closing tag");
++assertEqual(fixture.slice(div.from, div.to), div.snippet, "from/to offsets index the same text the snippet holds");
++
++const pParsed = parseMm(pRange.mm);
++assertEqual(rangeFromMm(fixture, pParsed).snippet, "<p>hi</p>", "the <p> range is exactly <p>hi</p>");
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll mmRange.js tests passed.");
++}
+diff --git a/frontend/app/lib/preview/inspectorRuntime.js b/frontend/app/lib/preview/inspectorRuntime.js
+index 7ca0b5b..a0b6f4f 100644
+--- a/frontend/app/lib/preview/inspectorRuntime.js
++++ b/frontend/app/lib/preview/inspectorRuntime.js
+@@ -36,11 +36,10 @@
+ //   parent -> frame    {source:"minime-parent", nonce, type:"minime:highlight", mm}
+ //
+ // `minime:highlight` is received and drawn by this module (a highlight
+-// outline distinct from the hover outline) but nothing in THIS step
+-// sends one — the trigger ("cursor movement in the editor... so the
+-// preview outlines the element you're editing") is W6.5's own job. This
+-// just makes sure the wire format and the frame-side handler for it
+-// already exist so W6.5 only has to add a sender.
++// outline distinct from the hover outline). W6.5 is what sends it:
++// PreviewPane.jsx posts the mm of the innermost element containing the
++// editor's cursor, so the preview outlines the element being edited
++// (`mm: null` clears it). The box follows its element on scroll/resize.
+ //
+ // Caps (same "cap sizes" discipline consoleBridge.js's own header
+ // documents, same numbers where the shape overlaps — an arg/message is
+@@ -73,6 +72,7 @@ export function buildInspectorScript(nonce) {
+     "var overlayEl = null;\n" + // hover outline, follows the cursor
+     "var labelEl = null;\n" + // small tag/size readout next to the hover outline
+     "var highlightEl = null;\n" + // minime:highlight's own outline -- independent of hover, can be showing at the same time
++    "var highlightTarget = null;\n" + // the element highlightEl currently outlines, so scroll/resize can re-place the box
+     "function mmTruncate(str, max) {\n" +
+     "  if (typeof str !== 'string') return str;\n" +
+     "  return str.length > max ? (str.slice(0, max) + '…') : str;\n" +
+@@ -137,8 +137,22 @@ export function buildInspectorScript(nonce) {
+     "  if (labelEl) labelEl.style.display = 'none';\n" +
+     "}\n" +
+     "function mmHideHighlight() {\n" +
++    "  highlightTarget = null;\n" +
+     "  if (highlightEl) highlightEl.style.display = 'none';\n" +
+     "}\n" +
++    // The box is position:fixed in VIEWPORT coordinates, computed once
++    // when minime:highlight arrives — so if the preview then scrolls (or
++    // the device preset resizes the frame) it would stay put while its
++    // element moves. Re-placed from the element's own fresh rect
++    // instead. Scroll is listened for in the CAPTURE phase because
++    // scroll doesn't bubble: a page whose content scrolls inside an
++    // overflow container (not the document) would otherwise never
++    // reach a window-level listener at all.
++    "function mmRepositionHighlight() {\n" +
++    "  if (!highlightTarget || !highlightEl) return;\n" +
++    "  if (!document.contains || !document.contains(highlightTarget)) { mmHideHighlight(); return; }\n" +
++    "  mmPositionBox(highlightEl, highlightTarget.getBoundingClientRect());\n" +
++    "}\n" +
+     // The heart of "elements created at runtime (no data-mm) resolve to
+     // the nearest static ancestor" -- Element.closest('[data-mm]')
+     // already walks up through exactly the ancestors this needs, so
+@@ -242,6 +256,8 @@ export function buildInspectorScript(nonce) {
+     "window.addEventListener('mousemove', mmOnMouseMove, true);\n" +
+     "window.addEventListener('click', mmOnClick, true);\n" + // capture: true -- must see the click before the page's own handlers do
+     "window.addEventListener('keydown', mmOnKeyDown, true);\n" +
++    "window.addEventListener('scroll', mmRepositionHighlight, true);\n" +
++    "window.addEventListener('resize', mmRepositionHighlight);\n" +
+     "window.addEventListener('message', function (event) {\n" +
+     "  if (event.source !== window.parent) return;\n" +
+     "  var data = event.data;\n" +
+@@ -254,6 +270,7 @@ export function buildInspectorScript(nonce) {
+     "    var target = null;\n" +
+     "    try { target = document.querySelector('[data-mm=\"' + String(data.mm).replace(/\"/g, '\\\\\"') + '\"]'); } catch (e) {}\n" +
+     "    if (!target) { mmHideHighlight(); return; }\n" +
++    "    highlightTarget = target;\n" +
+     "    mmPositionBox(highlightEl, target.getBoundingClientRect());\n" +
+     "  }\n" +
+     "});\n" +
+diff --git pb/frontend/app/lib/preview/mmRange.js pb/frontend/app/lib/preview/mmRange.js
+new file mode 100644
+index 0000000..9d2469b
+--- /dev/null
++++ b/frontend/app/lib/preview/mmRange.js
+@@ -0,0 +1,139 @@
++// frontend/app/lib/preview/mmRange.js — W6.5 (Build Workbench plan).
++// Pure helpers around the `data-mm` contract instrument.js (W6.3)
++// stamps and inspectorRuntime.js (W6.4) reports back:
++//
++//   data-mm="<path>:<startLine>:<startCol>:<endLine>:<endCol>"
++//   lines 1-based, columns 0-based, end EXCLUSIVE (instrument.js's own
++//   header is the source of truth for that — nothing here re-derives it).
++//
++// No imports on purpose (same "dependency-free family" as fileTree.js /
++// tabUtils.js): everything W6.5 needs to DECIDE — which range contains
++// a cursor, where a range starts and ends in a document — is string and
++// integer math, so it stays testable with plain `node`. The parts that
++// need a live CodeMirror view (selecting the range, pulsing it) live in
++// gotoPosition.js / pulse.js instead.
++
++const MM_RE = /^(.*):(\d+):(\d+):(\d+):(\d+)$/;
++
++/**
++ * Parses from the RIGHT, so a path that itself contains ":" (a Windows
++ * drive letter from a local folder, say) still splits correctly — the
++ * last four colon-separated fields are always the numbers.
++ *
++ * @param {string} mm
++ * @returns {{mm: string, path: string, startLine: number, startCol: number, endLine: number, endCol: number} | null}
++ */
++export function parseMm(mm) {
++  if (typeof mm !== "string") return null;
++  const m = MM_RE.exec(mm);
++  if (!m || !m[1]) return null;
++  return {
++    mm,
++    path: m[1],
++    startLine: Number(m[2]),
++    startCol: Number(m[3]),
++    endLine: Number(m[4]),
++    endCol: Number(m[5]),
++  };
++}
++
++/**
++ * Every data-mm value in an instrumented document, parsed. parse5's
++ * serializer escapes `&` and `"` inside an attribute value, so those
++ * two are decoded back before parsing (a path containing either is
++ * unusual, but decoding is cheap and a wrong path here would make the
++ * reverse highlight silently never match).
++ *
++ * A regex over the serialized HTML rather than a second parse5 pass:
++ * bundleStatic() already produced this string, the attribute is
++ * machine-written in one fixed shape (` data-mm="..."`), and this runs
++ * once per build, not per keystroke.
++ *
++ * @param {string} html
++ * @returns {ReturnType<typeof parseMm>[]}
++ */
++export function extractMmRanges(html) {
++  if (typeof html !== "string") return [];
++  const out = [];
++  const re = /\sdata-mm="([^"]*)"/g;
++  let m;
++  while ((m = re.exec(html))) {
++    const parsed = parseMm(m[1].replace(/&quot;/g, '"').replace(/&amp;/g, "&"));
++    if (parsed) out.push(parsed);
++  }
++  return out;
++}
++
++function cmp(lineA, colA, lineB, colB) {
++  return lineA !== lineB ? lineA - lineB : colA - colB;
++}
++
++/**
++ * The INNERMOST range in `ranges` (same file only) containing the
++ * cursor — "the element you're editing", per the plan. Containment is
++ * start <= cursor < end (end exclusive, matching the contract).
++ * Innermost = the latest start; a tie (same start, e.g. a wrapper
++ * whose first child begins at the very same position can't happen for
++ * real elements, but the tiebreak keeps this total) goes to the
++ * smaller end.
++ *
++ * @param {ReturnType<typeof parseMm>[]} ranges
++ * @param {string|null|undefined} path - the file the cursor is in; ranges from other files never match
++ * @param {number} line - 1-based
++ * @param {number} col - 0-based (CodeEditor's cursor report is 1-based; the caller subtracts 1)
++ * @returns {string|null} the winning range's mm string
++ */
++export function innermostMmAt(ranges, path, line, col) {
++  if (!ranges || !path || !Number.isFinite(line) || !Number.isFinite(col)) return null;
++  let best = null;
++  for (const r of ranges) {
++    if (r.path !== path) continue;
++    if (cmp(line, col, r.startLine, r.startCol) < 0) continue;
++    if (cmp(line, col, r.endLine, r.endCol) >= 0) continue;
++    if (
++      !best ||
++      cmp(r.startLine, r.startCol, best.startLine, best.startCol) > 0 ||
++      (cmp(r.startLine, r.startCol, best.startLine, best.startCol) === 0 &&
++        cmp(r.endLine, r.endCol, best.endLine, best.endCol) < 0)
++    ) {
++      best = r;
++    }
++  }
++  return best ? best.mm : null;
++}
++
++/**
++ * Document offset of a (1-based line, 0-based col) position, clamped to
++ * the line's own length and to the document — a position from a build
++ * a keystroke or two stale must degrade to "close enough", never throw
++ * or return an offset outside the text.
++ *
++ * @param {string} text
++ * @param {number} line
++ * @param {number} col
++ * @returns {number}
++ */
++export function offsetOf(text, line, col) {
++  let start = 0;
++  for (let l = 1; l < line; l++) {
++    const nl = text.indexOf("\n", start);
++    if (nl === -1) return text.length;
++    start = nl + 1;
++  }
++  const nl = text.indexOf("\n", start);
++  const lineEnd = nl === -1 ? text.length : nl;
++  return Math.min(start + Math.max(0, col), lineEnd);
++}
++
++/**
++ * The exact text (and offsets) an mm range covers in `text`.
++ *
++ * @param {string} text
++ * @param {NonNullable<ReturnType<typeof parseMm>>} parsed
++ * @returns {{from: number, to: number, snippet: string}}
++ */
++export function rangeFromMm(text, parsed) {
++  const from = offsetOf(text, parsed.startLine, parsed.startCol);
++  const to = Math.max(from, offsetOf(text, parsed.endLine, parsed.endCol));
++  return { from, to, snippet: text.slice(from, to) };
++}
+diff --git a/frontend/app/lib/workbench/__tests__/codeContext.test.mjs b/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
+index 3b6957b..1bafb50 100644
+--- a/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
+@@ -191,6 +191,26 @@ const setAgain = codeContextReducer(withReview, { type: "SET_PENDING_REVIEW", pr
+ assertEqual(setAgain.pendingReview, "prop_1", "SET_PENDING_REVIEW with the same id still produces a fresh state object");
+ assert(setAgain !== withReview, "...i.e. it is NOT short-circuited to the same object");
+ 
++// --- element refs (W6.5) ---------------------------------------------------
++
++const elementInfo = { tag: "button", classes: ["btn-primary"], textPreview: "Save", styles: { color: "red" }, dynamic: false, instanceCount: 1 };
++let elState = codeContextReducer(initialState, {
++  type: "ADD_REF",
++  ref: { kind: "element", path: "index.html", provider: "cloud", fromLine: 4, toLine: 7, from: 30, to: 90, snippet: '<div class="a">\n</div>', element: elementInfo },
++});
++assertEqual(elState.refs[0].element, elementInfo, "ADD_REF carries an element ref's `element` info through onto the stored ref");
++assertEqual(elState.refs[0].kind, "element", "...as kind 'element'");
++assertEqual("element" in codeContextReducer(initialState, { type: "ADD_REF", ref: { kind: "range", path: "a.js", fromLine: 1, toLine: 1, from: 0, to: 1, snippet: "x" } }).refs[0], false, "a non-element ref does NOT gain an `element` key (every other kind keeps exactly its old shape)");
++
++const elShifted = codeContextReducer(elState, {
++  type: "REMAP_REFS",
++  path: "index.html",
++  mapRange: (from, to) => ({ from: from + 5, to: to + 5, fromLine: 5, toLine: 8 }),
++});
++assertEqual([elShifted.refs[0].from, elShifted.refs[0].to, elShifted.refs[0].fromLine, elShifted.refs[0].toLine], [35, 95, 5, 8], "REMAP_REFS shifts an element chip with the edit, same as a range chip");
++assertEqual(elShifted.refs[0].element, elementInfo, "...and keeps its element info while doing so");
++assertEqual(codeContextReducer(elState, { type: "REMAP_REFS", path: "index.html", mapRange: () => null }).refs.length, 0, "an element chip whose whole range was deleted is dropped, not left pointing at nothing");
++
+ // --- pending chat mode (W6.2) --------------------------------------------
+ 
+ const withChatMode = codeContextReducer(initialState, { type: "SET_PENDING_CHAT_MODE", mode: "ask" });
+diff --git pb/frontend/app/lib/workbench/__tests__/elementRef.test.mjs pb/frontend/app/lib/workbench/__tests__/elementRef.test.mjs
+new file mode 100644
+index 0000000..000e152
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/elementRef.test.mjs
+@@ -0,0 +1,86 @@
++// W6.5 (Build Workbench plan) — tests for lib/workbench/elementRef.js.
++// Run: node frontend/app/lib/workbench/__tests__/elementRef.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const { elementFromMessage, elementLabel, describeElement } = loadSource("../elementRef.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// --- elementFromMessage -------------------------------------------------------
++
++const good = elementFromMessage({
++  type: "minime:select",
++  mm: "index.html:4:2:7:8",
++  tag: "button",
++  classes: ["btn-primary", "large"],
++  textPreview: "Save",
++  styles: { color: "rgb(0, 0, 0)", background: "red", fontSize: "14px", padding: "8px", margin: "0px", display: "block", extra: "ignored" },
++  dynamic: true,
++  instanceCount: 3,
++  rect: { width: 1 },
++});
++assertEqual(good.mm, "index.html:4:2:7:8", "keeps the mm");
++assertEqual(good.element.tag, "button", "keeps the tag");
++assertEqual(good.element.classes, ["btn-primary", "large"], "keeps the classes");
++assertEqual(Object.keys(good.element.styles).sort(), ["background", "color", "display", "fontSize", "margin", "padding"], "keeps ONLY the six known style keys — an unknown key from the page is dropped");
++assertEqual(good.element.dynamic, true, "keeps dynamic");
++assertEqual(good.element.instanceCount, 3, "keeps instanceCount");
++assertEqual("rect" in good.element, false, "fields the chip doesn't need (rect) are not carried onto the ref");
++
++assertEqual(elementFromMessage(null), null, "null message -> null");
++assertEqual(elementFromMessage({ tag: "div" }), null, "no mm -> null (nothing to resolve to a source range)");
++assertEqual(elementFromMessage({ mm: "" }), null, "an empty mm -> null");
++assertEqual(elementFromMessage({ mm: 5 }), null, "a non-string mm -> null");
++
++const hostile = elementFromMessage({
++  mm: "a.html:1:0:1:5",
++  tag: "x".repeat(500),
++  classes: ["ok", 7, null, "y".repeat(500), ...Array.from({ length: 50 }, (_, i) => `c${i}`)],
++  textPreview: "t".repeat(5000),
++  styles: { color: "c".repeat(5000) },
++  instanceCount: "lots",
++});
++assertEqual(hostile.element.tag.length, 40, "an oversized tag is capped");
++assertEqual(hostile.element.classes.length, 20, "the class list is capped");
++assertEqual(hostile.element.classes.every((c) => typeof c === "string" && c.length <= 80), true, "non-string classes are dropped, long ones capped");
++assertEqual(hostile.element.textPreview.length, 200, "textPreview is capped");
++assertEqual(hostile.element.styles.color.length, 120, "a style value is capped");
++assertEqual(hostile.element.instanceCount, 1, "a non-numeric instanceCount falls back to 1");
++
++assertEqual(elementFromMessage({ mm: "a.html:1:0:1:5", instanceCount: 0 }).element.instanceCount, 1, "instanceCount below 1 is clamped to 1");
++
++// --- elementLabel ---------------------------------------------------------------
++
++assertEqual(elementLabel({ tag: "button", classes: ["btn-primary"] }), "button.btn-primary", "tag + class");
++assertEqual(elementLabel({ tag: "div", classes: ["a", "b", "c", "d"] }), "div.a.b", "at most two classes on a chip");
++assertEqual(elementLabel({ tag: "p", classes: [] }), "p", "no classes -> just the tag");
++assertEqual(elementLabel({}), "element", "an empty element still yields a label");
++assertEqual(elementLabel(null), "element", "null doesn't throw");
++
++// --- describeElement --------------------------------------------------------------
++
++const text = describeElement(good.element);
++assertEqual(text.startsWith('Selected element in the live preview: <button class="btn-primary large">'), true, "starts with the tag and its classes");
++assertEqual(text.includes('with text "Save"'), true, "includes the text preview");
++assertEqual(text.includes("renders 3 times"), true, "notes a multiply-rendered element");
++assertEqual(text.includes("created at runtime"), true, "notes a dynamic resolution");
++assertEqual(text.includes("Computed style: color: rgb(0, 0, 0);"), true, "includes computed styles");
++
++assertEqual(describeElement({ tag: "p", classes: [], instanceCount: 1, styles: {} }), "Selected element in the live preview: <p>", "a bare element is just the tag — no empty parens or style line");
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll elementRef.js tests passed.");
++}
+diff --git pb/frontend/app/lib/workbench/__tests__/pulse.test.mjs pb/frontend/app/lib/workbench/__tests__/pulse.test.mjs
+new file mode 100644
+index 0000000..d0f3bd3
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/pulse.test.mjs
+@@ -0,0 +1,79 @@
++// W6.5 (Build Workbench plan) — tests for lib/workbench/pulse.js.
++//
++// Exercises the StateField against a bare EditorState (no EditorView,
++// so no DOM): a transaction carrying the setPulse effect must put
++// exactly one mark decoration in the field, a null effect must clear
++// it, and edits must shift it. pulseRange()'s timer/dispatch wrapper
++// needs a live view and is covered by the build + lint, not here —
++// same "state logic is testable, the view glue isn't" line
++// gotoPosition.js's own header draws.
++//
++// Run: node frontend/app/lib/workbench/__tests__/pulse.test.mjs
++import * as cmState from "@codemirror/state";
++import * as cmView from "@codemirror/view";
++import { loadSource } from "./loadSource.mjs";
++
++const { pulseField, setPulse, pulseExtension, pulseRange } = loadSource("../pulse.js", {
++  imports: { "@codemirror/state": cmState, "@codemirror/view": cmView },
++});
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++function ranges(state) {
++  const out = [];
++  const iter = state.field(pulseField).iter();
++  while (iter.value) {
++    out.push([iter.from, iter.to]);
++    iter.next();
++  }
++  return out;
++}
++
++const base = cmState.EditorState.create({ doc: "0123456789", extensions: [pulseField] });
++assertEqual(ranges(base), [], "no pulse to start with");
++
++const pulsed = base.update({ effects: setPulse.of({ from: 2, to: 6 }) }).state;
++assertEqual(ranges(pulsed), [[2, 6]], "the setPulse effect adds exactly one mark over the range");
++
++const cleared = pulsed.update({ effects: setPulse.of(null) }).state;
++assertEqual(ranges(cleared), [], "a null setPulse clears it");
++
++const shifted = pulsed.update({ changes: { from: 0, insert: "ab" } }).state;
++assertEqual(ranges(shifted), [[4, 8]], "typing before the pulse shifts it with the text");
++
++assertEqual(ranges(base.update({ effects: setPulse.of({ from: 3, to: 3 }) }).state), [], "an empty range is skipped (a mark decoration may not be zero-length)");
++assertEqual(ranges(base.update({ effects: setPulse.of({ from: 8, to: 99 }) }).state), [[8, 10]], "a range running past the end is clamped to the document");
++assertEqual(ranges(base.update({ effects: setPulse.of({ from: 50, to: 60 }) }).state), [], "a range entirely past the end collapses to nothing rather than throwing");
++
++// Dispatching the effect at a state WITHOUT the field installed is a
++// harmless no-op — callers never have to check which editors have it.
++const bare = cmState.EditorState.create({ doc: "abc" });
++let threw = false;
++try {
++  bare.update({ effects: setPulse.of({ from: 0, to: 2 }) });
++} catch {
++  threw = true;
++}
++assertEqual(threw, false, "a setPulse effect against an editor with no pulseField installed doesn't throw");
++
++assertEqual(Array.isArray(pulseExtension) && pulseExtension.includes(pulseField), true, "pulseExtension includes the field");
++assertEqual(typeof pulseRange, "function", "pulseRange is exported");
++pulseRange(null, 0, 5); // a missing view is a no-op, not a throw
++assertEqual(true, true, "pulseRange(null, ...) is a no-op");
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll pulse.js tests passed.");
++}
+diff --git a/frontend/app/lib/workbench/codeContext.js b/frontend/app/lib/workbench/codeContext.js
+index 0e0e81b..bb04bd2 100644
+--- a/frontend/app/lib/workbench/codeContext.js
++++ b/frontend/app/lib/workbench/codeContext.js
+@@ -132,6 +132,13 @@ export function codeContextReducer(state, action) {
+         snippet,
+         truncated,
+         hash: hashString(snippet),
++        // W6.5: an `element` ref (a click in the live preview) carries
++        // what the DOM node looked like — tag/classes/text/computed
++        // styles, already sanitized by elementRef.js's
++        // elementFromMessage() — alongside its code range. Only added
++        // when present, so every other kind's ref keeps exactly the
++        // shape it always had.
++        ...(incoming.element ? { element: incoming.element } : {}),
+       };
+       return { ...state, nextId: state.nextId + 1, refs: [...state.refs, ref] };
+     }
+@@ -163,7 +170,9 @@ export function codeContextReducer(state, action) {
+       let changed = false;
+       const refs = [];
+       for (const ref of state.refs) {
+-        if (ref.kind !== "range" || ref.path !== path || ref.from == null || ref.to == null) {
++        // W6.5: an element chip is a code range too (the element's exact
++        // source span), so it tracks edits the same way a range chip does.
++        if ((ref.kind !== "range" && ref.kind !== "element") || ref.path !== path || ref.from == null || ref.to == null) {
+           refs.push(ref);
+           continue;
+         }
+diff --git pb/frontend/app/lib/workbench/elementRef.js pb/frontend/app/lib/workbench/elementRef.js
+new file mode 100644
+index 0000000..d442c0f
+--- /dev/null
++++ b/frontend/app/lib/workbench/elementRef.js
+@@ -0,0 +1,97 @@
++// frontend/app/lib/workbench/elementRef.js — W6.5 (Build Workbench
++// plan). The `element` half of a `kind: "element"` code-context ref:
++// what a click in the live preview (inspectorRuntime.js's
++// minime:select) knew about the DOM node, kept next to the code range
++// it resolves to so W7.1 can hand the agent both ("tag/classes/computed
++// styles + the element's exact code range").
++//
++// Pure functions, no imports (same family as fileTree.js / tabUtils.js
++// / mmRange.js), so plain `node` can test them.
++//
++// Trust boundary: a minime:select payload is data from inside a
++// sandboxed iframe running whatever the person's own page does — it
++// carries this build's nonce, but a page can still post nonsense with
++// it (PreviewPane.jsx's listener only proves the message came from OUR
++// frame, not that its contents are well-formed). elementFromMessage()
++// is where that nonsense stops: every field is type-checked and
++// length-capped before anything downstream (a chip label, a prompt)
++// sees it.
++
++const MAX_CLASSES = 20;
++const MAX_CLASS_LENGTH = 80;
++const MAX_TEXT = 200;
++const MAX_STYLE_VALUE = 120;
++const STYLE_KEYS = ["color", "background", "fontSize", "padding", "margin", "display"];
++
++function str(value, max) {
++  return typeof value === "string" ? value.slice(0, max) : "";
++}
++
++/**
++ * @param {any} data - a minime:select message body
++ * @returns {{mm: string, element: {tag: string, classes: string[], textPreview: string, styles: Record<string,string>, dynamic: boolean, instanceCount: number}} | null}
++ *   null when there is no usable `mm` — a select with nothing to
++ *   resolve to a source range is not something W6.5 can act on
++ */
++export function elementFromMessage(data) {
++  if (!data || typeof data.mm !== "string" || !data.mm) return null;
++  const styles = {};
++  for (const key of STYLE_KEYS) {
++    const value = data.styles && str(data.styles[key], MAX_STYLE_VALUE);
++    if (value) styles[key] = value;
++  }
++  return {
++    mm: data.mm,
++    element: {
++      tag: str(data.tag, 40),
++      classes: Array.isArray(data.classes)
++        ? data.classes.filter((c) => typeof c === "string" && c).slice(0, MAX_CLASSES).map((c) => c.slice(0, MAX_CLASS_LENGTH))
++        : [],
++      textPreview: str(data.textPreview, MAX_TEXT),
++      styles,
++      dynamic: data.dynamic === true,
++      instanceCount:
++        typeof data.instanceCount === "number" && Number.isFinite(data.instanceCount) && data.instanceCount >= 1
++          ? Math.floor(data.instanceCount)
++          : 1,
++    },
++  };
++}
++
++/**
++ * The chip's label: `button.btn-primary`. At most two classes — a
++ * utility-class-heavy element (Tailwind) would otherwise turn a chip
++ * into a paragraph; the full list is still on the ref for the model.
++ *
++ * @param {{tag?: string, classes?: string[]}} element
++ * @returns {string}
++ */
++export function elementLabel(element) {
++  const tag = (element && element.tag) || "element";
++  const classes = (element && element.classes) || [];
++  return tag + classes.slice(0, 2).map((c) => `.${c}`).join("");
++}
++
++/**
++ * Plain-text description of the element for the chat message, placed
++ * ahead of the fenced code block: the code says WHAT the source is,
++ * this says what it RENDERED as (computed styles are something no
++ * amount of reading the JSX/HTML tells you, and are exactly what a
++ * "make this button red" request needs).
++ *
++ * @param {{tag?: string, classes?: string[], textPreview?: string, styles?: Record<string,string>, dynamic?: boolean, instanceCount?: number}} element
++ * @returns {string}
++ */
++export function describeElement(element) {
++  const el = element || {};
++  const classAttr = el.classes && el.classes.length ? ` class="${el.classes.join(" ")}"` : "";
++  let line = `Selected element in the live preview: <${el.tag || "element"}${classAttr}>`;
++  if (el.textPreview) line += ` with text "${el.textPreview}"`;
++  const notes = [];
++  if (el.instanceCount > 1) notes.push(`this source element renders ${el.instanceCount} times`);
++  if (el.dynamic) notes.push("the clicked node was created at runtime, so this is its nearest source element");
++  if (notes.length) line += ` (${notes.join("; ")})`;
++  const styleParts = Object.entries(el.styles || {}).map(([k, v]) => `${k}: ${v}`);
++  if (styleParts.length) line += `\nComputed style: ${styleParts.join("; ")}`;
++  return line;
++}
+diff --git a/frontend/app/lib/workbench/gotoPosition.js b/frontend/app/lib/workbench/gotoPosition.js
+index 834d0af..164ba62 100644
+--- a/frontend/app/lib/workbench/gotoPosition.js
++++ b/frontend/app/lib/workbench/gotoPosition.js
+@@ -13,6 +13,7 @@
+ // asked this view to jump somewhere"), same relationship
+ // fileProviders.js has to the routes it wraps.
+ import { EditorSelection } from "@codemirror/state";
++import { pulseRange } from "./pulse";
+ 
+ /**
+  * @param {import("@codemirror/view").EditorView|null|undefined} view -
+@@ -35,8 +36,13 @@ import { EditorSelection } from "@codemirror/state";
+  *   within it) instead of `endColumn` being read against `line`
+  *   itself. Omit it and this behaves exactly as it always did (a
+  *   same-line selection, or just a caret).
++ * @param {boolean} [pos.pulse] - W6.5: also flash the selected range
++ *   briefly (pulse.js) — click-to-code from the live preview lands the
++ *   editor on an element's range, and a selection alone is easy to lose
++ *   in a long file. Opt-in, so every existing caller (search results,
++ *   chip jumps) behaves exactly as before.
+  */
+-export function jumpToPosition(view, { line, column = 1, endLine, endColumn } = {}) {
++export function jumpToPosition(view, { line, column = 1, endLine, endColumn, pulse = false } = {}) {
+   if (!view) return;
+   const doc = view.state.doc;
+   const clampedLine = Math.min(Math.max(1, Math.floor(line) || 1), doc.lines);
+@@ -57,4 +63,5 @@ export function jumpToPosition(view, { line, column = 1, endLine, endColumn } =
+     scrollIntoView: true,
+   });
+   view.focus();
++  if (pulse) pulseRange(view, from, to);
+ }
+diff --git pb/frontend/app/lib/workbench/pulse.js pb/frontend/app/lib/workbench/pulse.js
+new file mode 100644
+index 0000000..0e07e8e
+--- /dev/null
++++ b/frontend/app/lib/workbench/pulse.js
+@@ -0,0 +1,87 @@
++// frontend/app/lib/workbench/pulse.js — W6.5 (Build Workbench plan).
++// "...scroll to and select the element's exact range, brief pulse
++// decoration" — the pulse half. A range gets a highlighted background
++// for a moment after a click in the preview lands the editor on it, so
++// the eye finds the selection even in a long file (a selection alone is
++// easy to miss when the editor didn't previously have focus).
++//
++// Same split gotoPosition.js's header describes: this needs
++// @codemirror/state + view, so it isn't part of the import-free
++// family — but the StateField itself only needs EditorState to
++// exercise (no DOM), which is what __tests__/pulse.test.mjs relies on.
++//
++// `pulseExtension` must be part of a CodeEditor's extensions for the
++// decoration to render; dispatching pulseRange() at a view WITHOUT it
++// is harmless (an effect nothing listens for is simply ignored), so a
++// caller never has to check whether a given editor installed it.
++import { StateEffect, StateField } from "@codemirror/state";
++import { Decoration, EditorView } from "@codemirror/view";
++
++// value: {from, to} to show a pulse, null to clear it
++export const setPulse = StateEffect.define();
++
++const PULSE_MARK = Decoration.mark({ class: "cm-mm-pulse" });
++
++export const pulseField = StateField.define({
++  create: () => Decoration.none,
++  update(decorations, tr) {
++    // The pulse follows the text if someone types during its ~1s life.
++    decorations = decorations.map(tr.changes);
++    for (const effect of tr.effects) {
++      if (!effect.is(setPulse)) continue;
++      if (!effect.value) {
++        decorations = Decoration.none;
++        continue;
++      }
++      // Clamped to the CURRENT doc, and skipped when empty: a mark
++      // decoration may not be zero-length, and a range from a build a
++      // keystroke stale can point past the end of the text.
++      const len = tr.newDoc.length;
++      const from = Math.max(0, Math.min(effect.value.from, len));
++      const to = Math.max(0, Math.min(effect.value.to, len));
++      decorations = to > from ? Decoration.set([PULSE_MARK.range(from, to)]) : Decoration.none;
++    }
++    return decorations;
++  },
++  provide: (field) => EditorView.decorations.from(field),
++});
++
++// baseTheme rather than cmTheme.js's own theme: the pulse is a
++// self-contained, theme-independent amber wash, so it lives with the
++// module that owns the class name instead of splitting the two across
++// files.
++export const pulseExtension = [
++  pulseField,
++  EditorView.baseTheme({
++    ".cm-mm-pulse": { backgroundColor: "rgba(245, 158, 11, 0.35)", borderRadius: "2px" },
++  }),
++];
++
++export const PULSE_DURATION_MS = 900;
++
++// One pending clear-timer per view: a second pulse before the first
++// has faded must not be cut short by the FIRST pulse's timer firing.
++const timers = new WeakMap();
++
++/**
++ * @param {import("@codemirror/view").EditorView|null|undefined} view
++ * @param {number} from
++ * @param {number} to
++ * @param {number} [durationMs]
++ */
++export function pulseRange(view, from, to, durationMs = PULSE_DURATION_MS) {
++  if (!view || !(to > from)) return;
++  clearTimeout(timers.get(view));
++  view.dispatch({ effects: setPulse.of({ from, to }) });
++  timers.set(
++    view,
++    setTimeout(() => {
++      timers.delete(view);
++      try {
++        view.dispatch({ effects: setPulse.of(null) });
++      } catch {
++        // the view was destroyed (tab closed) before the pulse faded
++      }
++    }, durationMs)
++  );
++}

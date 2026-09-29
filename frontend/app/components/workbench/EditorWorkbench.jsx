@@ -105,6 +105,7 @@ import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../li
 import { deleteSummary } from "../../lib/workbench/explorerOps";
 import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
 import { jumpToPosition } from "../../lib/workbench/gotoPosition";
+import { parseMm, rangeFromMm } from "../../lib/preview/mmRange"; // W6.5
 import {
   buildDecisions,
   deletedPathsToKeep,
@@ -1107,6 +1108,64 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
     [addRef, provider]
   );
 
+  // W6.5 — click-to-code. PreviewPane.jsx's inspect mode hands over a
+  // selection ({mm, element}, already sanitized); this turns it into the
+  // three things the plan asks for:
+  //   1. open the file the element's data-mm points at,
+  //   2. select that exact range and pulse it (gotoPosition.js's
+  //      `pulse` option — mm columns are 0-based, jumpToPosition's are
+  //      1-based, hence the +1s; the end column is exclusive on both
+  //      sides so it converts the same way),
+  //   3. add an `element` chip: the range's own text as its snippet
+  //      (so Ask mode, which just fences snippets into the message,
+  //      works with no further plumbing) plus what the DOM node looked
+  //      like, kept on `ref.element` for W7.1's agent.
+  // `onFixWithAIChat` is reused here purely for what it DOES — make the
+  // chat dock visible if it's collapsed (BuildTab.jsx) — because a chip
+  // added to a composer nobody can see isn't the "chip is in the
+  // composer" the plan's Done-when describes. It requests no chat mode.
+  const handleSelectElement = useCallback(
+    async ({ mm, element }) => {
+      const parsed = parseMm(mm);
+      if (!parsed) return;
+      const { path } = parsed;
+      await openFile(path);
+      jumpToPositionInPane(path, {
+        line: parsed.startLine,
+        column: parsed.startCol + 1,
+        endLine: parsed.endLine,
+        endColumn: parsed.endCol + 1,
+        pulse: true,
+      });
+      // The live buffer when the file is open (unsaved edits included —
+      // the range was computed from that same text), else a fresh read;
+      // same preference handleAddToChat above makes for a file chip.
+      const openBuffer = stateRef.current.buffers[path];
+      let text = openBuffer ? openBuffer.edited : null;
+      if (text == null) {
+        try {
+          text = (await provider.read(path)).content ?? "";
+        } catch {
+          text = "";
+        }
+      }
+      const { from, to, snippet } = rangeFromMm(text, parsed);
+      addRef({
+        kind: "element",
+        path,
+        provider: provider.id,
+        fromLine: parsed.startLine,
+        toLine: parsed.endLine,
+        from,
+        to,
+        snippet,
+        element,
+      });
+      onFixWithAIChat?.();
+    },
+    [openFile, jumpToPositionInPane, provider, addRef, onFixWithAIChat]
+  );
+
   // A chip's click-to-jump (ContextChips.jsx's requestJump →
   // codeContext.js's SET_PENDING_JUMP). Opens the file if it isn't
   // already, same as jumpToSearchResult above, then jumps to the
@@ -2018,7 +2077,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
             />
             <div className="shrink min-w-0" style={{ width: previewSplitter.size }}>
               <PreviewColumn onClose={closePreview}>
-                <PreviewPane provider={provider} filesMeta={filesMeta} />
+                <PreviewPane provider={provider} filesMeta={filesMeta} cursor={cursor} onSelectElement={handleSelectElement} />
               </PreviewColumn>
             </div>
           </>

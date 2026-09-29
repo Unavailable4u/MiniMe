@@ -132,6 +132,13 @@ export function codeContextReducer(state, action) {
         snippet,
         truncated,
         hash: hashString(snippet),
+        // W6.5: an `element` ref (a click in the live preview) carries
+        // what the DOM node looked like — tag/classes/text/computed
+        // styles, already sanitized by elementRef.js's
+        // elementFromMessage() — alongside its code range. Only added
+        // when present, so every other kind's ref keeps exactly the
+        // shape it always had.
+        ...(incoming.element ? { element: incoming.element } : {}),
       };
       return { ...state, nextId: state.nextId + 1, refs: [...state.refs, ref] };
     }
@@ -163,7 +170,9 @@ export function codeContextReducer(state, action) {
       let changed = false;
       const refs = [];
       for (const ref of state.refs) {
-        if (ref.kind !== "range" || ref.path !== path || ref.from == null || ref.to == null) {
+        // W6.5: an element chip is a code range too (the element's exact
+        // source span), so it tracks edits the same way a range chip does.
+        if ((ref.kind !== "range" && ref.kind !== "element") || ref.path !== path || ref.from == null || ref.to == null) {
           refs.push(ref);
           continue;
         }

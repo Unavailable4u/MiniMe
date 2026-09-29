@@ -230,6 +230,83 @@
           "explanation": ""
         }
       ]
+    },
+    {
+      "attempt_id": "attempt_369b79ee04",
+      "workspace_id": "ws_bcc70c4e37",
+      "quiz_node_id": "panel:ws_bcc70c4e37:study_quiz",
+      "created_by": "user",
+      "created_at": "2026-09-28T20:32:57.513279+00:00",
+      "score": 4,
+      "total": 5,
+      "percent": 80.0,
+      "results": [
+        {
+          "question": "",
+          "options": [
+            "Electromagnetic induction with a rotating armature and stationary field system",
+            "Electromagnetic induction with a stationary armature and rotating field system",
+            "Electromagnetic induction with the same principles as d.c. generators but with the armature and field system arrangement reversed",
+            "Electromagnetic induction with a completely different arrangement than d.c. generators"
+          ],
+          "correct_index": 2,
+          "given_index": 2,
+          "is_correct": true,
+          "explanation": "A.C. generators or alternators operate on the same fundamental principles of electromagnetic induction as d.c. generators, but with the armature and field system arrangement reversed."
+        },
+        {
+          "question": "Q2: What type of winding is used in A.C. armature windings to generate a voltage wave that is nearly a sine curve?",
+          "options": [
+            "Concentrated winding",
+            "Distributed winding",
+            "Full-pitch coil winding",
+            "Fractional-pitch coil winding"
+          ],
+          "correct_index": 1,
+          "given_index": 1,
+          "is_correct": true,
+          "explanation": "A.C. armature windings are generally distributed windings, which generate a voltage wave that is nearly a sine curve."
+        },
+        {
+          "question": "Q3: What is the purpose of damper windings in an alternator?",
+          "options": [
+            "To increase the voltage output",
+            "To decrease the current output",
+            "To prevent hunting, provide starting torque in synchronous motors, and maintain voltage balance during unbalanced loads",
+            "To reduce the frequency of the output"
+          ],
+          "correct_index": 2,
+          "given_index": 2,
+          "is_correct": true,
+          "explanation": "The purpose of damper windings is to prevent hunting, provide starting torque in synchronous motors, and maintain voltage balance during unbalanced loads."
+        },
+        {
+          "question": "Q4: What type of rotor is used in high-speed turbo-generators?",
+          "options": [
+            "Salient Pole Type",
+            "Smooth Cylindrical Type",
+            "Distributed Winding Type",
+            "Concentrated Winding Type"
+          ],
+          "correct_index": 1,
+          "given_index": 0,
+          "is_correct": false,
+          "explanation": "Smooth Cylindrical Type rotors are used in high-speed turbo-generators, offering better balance, low windage loss, and smooth operation."
+        },
+        {
+          "question": "Q5: What determines the direction of the induced current in an alternator?",
+          "options": [
+            "The number of poles",
+            "The rotor speed",
+            "Fleming\u2019s Right-hand Rule",
+            "The type of winding used"
+          ],
+          "correct_index": 2,
+          "given_index": 2,
+          "is_correct": true,
+          "explanation": "The direction of the induced current in an alternator is determined by Fleming\u2019s Right-hand Rule."
+        }
+      ]
     }
   ]
 }

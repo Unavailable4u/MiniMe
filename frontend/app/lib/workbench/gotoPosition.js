@@ -13,6 +13,7 @@
 // asked this view to jump somewhere"), same relationship
 // fileProviders.js has to the routes it wraps.
 import { EditorSelection } from "@codemirror/state";
+import { pulseRange } from "./pulse";
 
 /**
  * @param {import("@codemirror/view").EditorView|null|undefined} view -
@@ -35,8 +36,13 @@ import { EditorSelection } from "@codemirror/state";
  *   within it) instead of `endColumn` being read against `line`
  *   itself. Omit it and this behaves exactly as it always did (a
  *   same-line selection, or just a caret).
+ * @param {boolean} [pos.pulse] - W6.5: also flash the selected range
+ *   briefly (pulse.js) — click-to-code from the live preview lands the
+ *   editor on an element's range, and a selection alone is easy to lose
+ *   in a long file. Opt-in, so every existing caller (search results,
+ *   chip jumps) behaves exactly as before.
  */
-export function jumpToPosition(view, { line, column = 1, endLine, endColumn } = {}) {
+export function jumpToPosition(view, { line, column = 1, endLine, endColumn, pulse = false } = {}) {
   if (!view) return;
   const doc = view.state.doc;
   const clampedLine = Math.min(Math.max(1, Math.floor(line) || 1), doc.lines);
@@ -57,4 +63,5 @@ export function jumpToPosition(view, { line, column = 1, endLine, endColumn } = 
     scrollIntoView: true,
   });
   view.focus();
+  if (pulse) pulseRange(view, from, to);
 }

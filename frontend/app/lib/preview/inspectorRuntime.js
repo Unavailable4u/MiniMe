@@ -36,11 +36,10 @@
 //   parent -> frame    {source:"minime-parent", nonce, type:"minime:highlight", mm}
 //
 // `minime:highlight` is received and drawn by this module (a highlight
-// outline distinct from the hover outline) but nothing in THIS step
-// sends one — the trigger ("cursor movement in the editor... so the
-// preview outlines the element you're editing") is W6.5's own job. This
-// just makes sure the wire format and the frame-side handler for it
-// already exist so W6.5 only has to add a sender.
+// outline distinct from the hover outline). W6.5 is what sends it:
+// PreviewPane.jsx posts the mm of the innermost element containing the
+// editor's cursor, so the preview outlines the element being edited
+// (`mm: null` clears it). The box follows its element on scroll/resize.
 //
 // Caps (same "cap sizes" discipline consoleBridge.js's own header
 // documents, same numbers where the shape overlaps — an arg/message is
@@ -73,6 +72,7 @@ export function buildInspectorScript(nonce) {
     "var overlayEl = null;\n" + // hover outline, follows the cursor
     "var labelEl = null;\n" + // small tag/size readout next to the hover outline
     "var highlightEl = null;\n" + // minime:highlight's own outline -- independent of hover, can be showing at the same time
+    "var highlightTarget = null;\n" + // the element highlightEl currently outlines, so scroll/resize can re-place the box
     "function mmTruncate(str, max) {\n" +
     "  if (typeof str !== 'string') return str;\n" +
     "  return str.length > max ? (str.slice(0, max) + '…') : str;\n" +
@@ -137,7 +137,21 @@ export function buildInspectorScript(nonce) {
     "  if (labelEl) labelEl.style.display = 'none';\n" +
     "}\n" +
     "function mmHideHighlight() {\n" +
+    "  highlightTarget = null;\n" +
     "  if (highlightEl) highlightEl.style.display = 'none';\n" +
+    "}\n" +
+    // The box is position:fixed in VIEWPORT coordinates, computed once
+    // when minime:highlight arrives — so if the preview then scrolls (or
+    // the device preset resizes the frame) it would stay put while its
+    // element moves. Re-placed from the element's own fresh rect
+    // instead. Scroll is listened for in the CAPTURE phase because
+    // scroll doesn't bubble: a page whose content scrolls inside an
+    // overflow container (not the document) would otherwise never
+    // reach a window-level listener at all.
+    "function mmRepositionHighlight() {\n" +
+    "  if (!highlightTarget || !highlightEl) return;\n" +
+    "  if (!document.contains || !document.contains(highlightTarget)) { mmHideHighlight(); return; }\n" +
+    "  mmPositionBox(highlightEl, highlightTarget.getBoundingClientRect());\n" +
     "}\n" +
     // The heart of "elements created at runtime (no data-mm) resolve to
     // the nearest static ancestor" -- Element.closest('[data-mm]')
@@ -242,6 +256,8 @@ export function buildInspectorScript(nonce) {
     "window.addEventListener('mousemove', mmOnMouseMove, true);\n" +
     "window.addEventListener('click', mmOnClick, true);\n" + // capture: true -- must see the click before the page's own handlers do
     "window.addEventListener('keydown', mmOnKeyDown, true);\n" +
+    "window.addEventListener('scroll', mmRepositionHighlight, true);\n" +
+    "window.addEventListener('resize', mmRepositionHighlight);\n" +
     "window.addEventListener('message', function (event) {\n" +
     "  if (event.source !== window.parent) return;\n" +
     "  var data = event.data;\n" +
@@ -254,6 +270,7 @@ export function buildInspectorScript(nonce) {
     "    var target = null;\n" +
     "    try { target = document.querySelector('[data-mm=\"' + String(data.mm).replace(/\"/g, '\\\\\"') + '\"]'); } catch (e) {}\n" +
     "    if (!target) { mmHideHighlight(); return; }\n" +
+    "    highlightTarget = target;\n" +
     "    mmPositionBox(highlightEl, target.getBoundingClientRect());\n" +
     "  }\n" +
     "});\n" +
