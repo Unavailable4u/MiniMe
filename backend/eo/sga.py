@@ -267,24 +267,20 @@ _PREGATE_MODE = _parse_pregate_mode(os.environ.get("LAYA_SGA_PREGATE", "on"))
 _PREGATE_THRESHOLD = float(os.environ.get("LAYA_SGA_PREGATE_THRESHOLD", "0.85"))
 _PREGATE_CHARS = 1000
 
+# Kept SHORT on purpose: Laya's English checkpoint reserves only ~190
+# tokens for the question text (instructions + criteria + labels); an
+# over-long question risks truncating the criteria the model needs. The
+# first version of this question ran ~170 tokens and was trimmed in the
+# Tier 3 patch.
 _PREGATE_QUESTION = {
     "sga_would_escalate": {
         "type": "noul",
-        "instructions": (
-            "Can a fast, general-purpose assistant answer this request "
-            "well in ONE quick reply? Answer TRUE (escalate) only if it "
-            "clearly needs real research, multi-step planning, writing or "
-            "editing code across several files, running or testing "
-            "something, or another agent's review, approval or iteration."
-        ),
+        "instructions": "Can a fast assistant answer this well in one quick reply?",
         "criteria": {
-            "false": "a single quick reply is enough: a simple question, "
-                     "a short explanation, a small self-contained snippet, "
-                     "casual conversation, or a lookup from general knowledge",
-            "true": "cannot be done well in one quick reply: needs real "
-                    "research, multi-step planning, multi-file code work, "
-                    "running or testing, or another agent's review, "
-                    "approval or iteration",
+            "false": "yes: a simple question, short explanation, small snippet, "
+                     "or casual chat",
+            "true": "no: needs research, multi-step planning, multi-file code "
+                    "work, running or testing, or another agent's review",
         },
         "labels": {"false": "QUICK_ANSWER", "true": "ESCALATE"},
     },

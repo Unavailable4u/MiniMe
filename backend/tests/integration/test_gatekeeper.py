@@ -168,3 +168,114 @@ def test_gatekeeper_role_resolves_through_generic_worker(mock_llm):
     assert mock_llm.mock.called
     call_kwargs = mock_llm.mock.call_args.kwargs
     assert call_kwargs.get("agent_name") == "generic:gatekeeper"
+
+
+# ---------------------------------------------------------------------
+# Laya pre-gate (Tier 3 of the Laya migration, 2026-09-28)
+#
+# The suite-wide conftest.py autouse fixture forces
+# eo.laya_routing.GATEKEEPER_GATE_MODE = "off"; each test below opts
+# back in by monkeypatching it directly (loop_controller.py imports the
+# laya_routing MODULE, so patch it there -- the conftest gotcha this
+# file's own docstring already documents for generate_text applies the
+# same way here). laya_gate.predict is monkeypatched too -- no model is
+# loaded.
+# ---------------------------------------------------------------------
+from eo import laya_routing  # noqa: E402
+
+
+def _noul(p):
+    return {"answers": {"finished": {"type": "noul", "noul": p}}}
+
+
+def test_laya_gate_off_by_default_in_this_suite(mock_llm, monkeypatch):
+    """Sanity check on the conftest fixture itself: with the suite
+    default, no Laya call happens and the LLM path is unaffected."""
+    calls = []
+    monkeypatch.setattr(laya_routing.laya_gate, "predict", lambda *a, **k: calls.append(1))
+    mock_llm.set_response("STOP")
+    decision = loop_controller._run_gatekeeper(CLEAN_RESULTS, "task", "sess_test", 1)
+    assert decision == {"action": "STOP"}
+    assert calls == []
+
+
+def test_laya_gate_observe_mode_still_calls_the_llm(mock_llm, monkeypatch):
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "observe")
+    monkeypatch.setattr(laya_routing.laya_gate, "predict", lambda *a, **k: _noul(0.99))
+    mock_llm.set_response("STOP")
+
+    decision = loop_controller._run_gatekeeper(CLEAN_RESULTS, "task", "sess_test", 1)
+
+    assert decision == {"action": "STOP"}
+    assert mock_llm.mock.call_count == 1   # observe never skips the real call
+    stats = laya_routing.get_gatekeeper_gate_stats()
+    assert stats["would_stop"] == 1
+    assert stats["would_stop_llm_continued"] == 0   # LLM agreed (also STOP)
+
+
+def test_laya_gate_on_mode_skips_the_llm_when_confident(mock_llm, monkeypatch):
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "on")
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_THRESHOLD", 0.9)
+    monkeypatch.setattr(laya_routing.laya_gate, "predict", lambda *a, **k: _noul(0.95))
+
+    decision = loop_controller._run_gatekeeper(CLEAN_RESULTS, "task", "sess_test", 1)
+
+    assert decision == {"action": "STOP", "cause": "laya_gatekeeper"}
+    assert mock_llm.mock.call_count == 0   # the LLM gatekeeper was never called
+
+
+def test_laya_gate_on_mode_falls_through_to_llm_below_threshold(mock_llm, monkeypatch):
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "on")
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_THRESHOLD", 0.9)
+    monkeypatch.setattr(laya_routing.laya_gate, "predict", lambda *a, **k: _noul(0.4))
+    mock_llm.set_response("CONTINUE: verifier")
+
+    decision = loop_controller._run_gatekeeper(CLEAN_RESULTS, "task", "sess_test", 1)
+
+    assert decision["action"] == "CONTINUE"
+    assert mock_llm.mock.call_count == 1
+
+
+def test_laya_gate_never_overrides_a_hard_safety_stop(mock_llm, monkeypatch):
+    """The deterministic hard-cap/checkpoint/repeat-failure rules run
+    BEFORE the Laya gate and must still short-circuit it -- confirmed by
+    a Laya mock that would (wrongly) vote CONTINUE if it were ever asked."""
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "on")
+    monkeypatch.setattr(laya_routing.laya_gate, "predict", lambda *a, **k: _noul(0.0))
+
+    decision = loop_controller._run_gatekeeper(CLEAN_RESULTS, "task", "sess_test", MAX_MACRO_LOOPS)
+
+    assert decision == {"action": "STOP", "cause": "hard_cap"}
+    assert mock_llm.mock.call_count == 0
+
+
+def test_laya_gate_fails_open_to_the_llm_path_on_error(mock_llm, monkeypatch):
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "on")
+
+    def boom(*a, **k):
+        raise RuntimeError("laya unavailable")
+    monkeypatch.setattr(laya_routing.laya_gate, "predict", boom)
+    mock_llm.set_response("STOP")
+
+    decision = loop_controller._run_gatekeeper(CLEAN_RESULTS, "task", "sess_test", 1)
+
+    assert decision == {"action": "STOP"}
+    assert mock_llm.mock.call_count == 1
+
+
+def test_laya_gate_sees_role_names_and_failure_counts_not_full_output(mock_llm, monkeypatch):
+    seen = {}
+
+    def fake_predict(state, questions, site="unknown"):
+        seen["state"] = state
+        return _noul(0.5)
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "observe")
+    monkeypatch.setattr(laya_routing.laya_gate, "predict", fake_predict)
+    mock_llm.set_response("STOP")
+
+    loop_controller._run_gatekeeper(CRITICAL_ISSUE_RESULTS, "build a todo app", "sess_test", 1)
+
+    assert seen["state"]["critical_issues_flagged"] == 1
+    assert seen["state"]["roles_failed"] == 0
+    assert "verifier" in seen["state"]["roles_run"]
+    assert "undefined global" not in str(seen["state"])   # issue detail text is never sent

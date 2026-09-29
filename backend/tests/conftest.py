@@ -590,3 +590,19 @@ def patch_generate_text(return_value=None, side_effect=None):
 def _laya_sga_pregate_off(monkeypatch):
     from eo import sga
     monkeypatch.setattr(sga, "_PREGATE_MODE", "off")
+
+
+# ---------------------------------------------------------------------------
+# Laya migration (Tier 3): eo/laya_routing.py's two gates default to
+# "observe", which still makes one real Laya call per eligible panel
+# escalation / gatekeeper pass -- slow for the same reason as the Tier 2
+# fixture above, and it would also increment the eo/laya_routing.py stats
+# counters on every such test run. Off for the whole suite; tests for
+# these gates opt back in by monkeypatching the MODE constants themselves
+# (see tests/unit/test_eo_laya_routing.py).
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _laya_routing_gates_off(monkeypatch):
+    from eo import laya_routing
+    monkeypatch.setattr(laya_routing, "PANEL_GATE_MODE", "off")
+    monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "off")

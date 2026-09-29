@@ -1035,5 +1035,255 @@
         "relation": "prerequisite-of"
       }
     ]
+  },
+  "ws_7014ff2ce1": {
+    "topics": {
+      "e101bce8-3e29-41ee-b3a2-705b5ee7f95d": {
+        "name": "Basic principle of alternators",
+        "summary": "Describes how alternators generate alternating current by rotating a magnetic field (rotor) that cuts stationary stator conductors, following electromagnetic induction and Fleming\u2019s Right-hand Rule.",
+        "parent": null,
+        "source_section_ids": [
+          "a018bc41d348"
+        ],
+        "content_hint": "conceptual"
+      },
+      "9c32b7f6-6cc6-46f9-b21e-35a5c81cf239": {
+        "name": "Alternator stator construction",
+        "summary": "Details the stator (stationary armature) of an alternator, including its cast\u2011iron or steel frame, laminated core, slot arrangement, and advantages such as high\u2011voltage output without brushes.",
+        "parent": null,
+        "source_section_ids": [
+          "a018bc41d348"
+        ],
+        "content_hint": "conceptual"
+      },
+      "2cb61977-b54b-4e6f-9777-58b130a32bd3": {
+        "name": "Alternator rotor types",
+        "summary": "Compares salient\u2011pole rotors (low/medium speed, large diameter) with smooth cylindrical rotors (high speed, balanced, low windage), outlining their construction and performance implications.",
+        "parent": null,
+        "source_section_ids": [
+          "a018bc41d348"
+        ],
+        "content_hint": "conceptual"
+      },
+      "e5d45a50-04e1-4854-ad1e-561e9ba09a2f": {
+        "name": "Damper windings",
+        "summary": "Explains the structure of damper windings (copper bars in pole\u2011shoe slots) and their functions: suppressing hunting, providing starting torque for synchronous motors, and aiding voltage balance during unbalanced loads.",
+        "parent": null,
+        "source_section_ids": [
+          "a018bc41d348"
+        ],
+        "content_hint": "conceptual"
+      },
+      "20763bfa-4e2f-42a1-a706-cf7076f5fb73": {
+        "name": "Concentrated vs distributed windings",
+        "summary": "Contrasts concentrated windings (compact, lower copper loss, trapezoidal back\u2011EMF, higher torque ripple) with distributed windings (sinusoidal back\u2011EMF, smoother torque, better heat distribution) and their typical applications.",
+        "parent": null,
+        "source_section_ids": [
+          "a018bc41d348"
+        ],
+        "content_hint": "conceptual"
+      },
+      "8b1ba9c2-52dc-4927-9968-cde601ca28ee": {
+        "name": "Full\u2011pitch and fractional\u2011pitch AC armature coils",
+        "summary": "Describes full\u2011pitch coils (180\u00b0 electrical span, maximum e.m.f.) versus fractional\u2011pitch coils (less than 180\u00b0, reduced e.m.f.) used in AC armature windings, along with the general features of distributed AC armature windings.",
+        "parent": null,
+        "source_section_ids": [
+          "a018bc41d348"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": [
+      {
+        "from_topic": "e101bce8-3e29-41ee-b3a2-705b5ee7f95d",
+        "to_topic": "9c32b7f6-6cc6-46f9-b21e-35a5c81cf239",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "e101bce8-3e29-41ee-b3a2-705b5ee7f95d",
+        "to_topic": "2cb61977-b54b-4e6f-9777-58b130a32bd3",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "9c32b7f6-6cc6-46f9-b21e-35a5c81cf239",
+        "to_topic": "20763bfa-4e2f-42a1-a706-cf7076f5fb73",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "2cb61977-b54b-4e6f-9777-58b130a32bd3",
+        "to_topic": "e5d45a50-04e1-4854-ad1e-561e9ba09a2f",
+        "relation": "prerequisite-of"
+      },
+      {
+        "from_topic": "e5d45a50-04e1-4854-ad1e-561e9ba09a2f",
+        "to_topic": "20763bfa-4e2f-42a1-a706-cf7076f5fb73",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "20763bfa-4e2f-42a1-a706-cf7076f5fb73",
+        "to_topic": "8b1ba9c2-52dc-4927-9968-cde601ca28ee",
+        "relation": "elaborates-on"
+      }
+    ]
+  },
+  "ws_5ec5381eda": {
+    "topics": {
+      "a3d03cf4-b356-45ed-bcc7-f39565f3ffbb": {
+        "name": "Alternator basic principle",
+        "summary": "Describes how AC generators (alternators) operate on electromagnetic induction, with a stationary armature (stator) and rotating field (rotor), and how frequency depends on pole count and speed.",
+        "parent": null,
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "5080fff5-dc6e-423b-b6af-becab0c6e419": {
+        "name": "Alternator construction",
+        "summary": "Overview of the physical makeup of an alternator, detailing the stator and rotor assemblies and their respective functions.",
+        "parent": null,
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "3c6cde69-fa86-4b29-956a-71fbb9f67139": {
+        "name": "Stator (stationary armature) construction",
+        "summary": "Details the stator structure: cast\u2011iron or steel frame, laminated steel core with slots, and armature windings, emphasizing high\u2011voltage advantages and mechanical support.",
+        "parent": "5080fff5-dc6e-423b-b6af-becab0c6e419",
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "50a43578-8f38-4afe-8443-508c5b471a22": {
+        "name": "Rotor (rotating magnetic field) construction",
+        "summary": "Describes the rotor that creates the rotating magnetic field, including its role, mounting of field windings, and the two main design types.",
+        "parent": "5080fff5-dc6e-423b-b6af-becab0c6e419",
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "7b63bc5e-c2d0-4515-84a7-218c8ecfe849": {
+        "name": "Salient pole rotor type",
+        "summary": "Low\u2011to\u2011medium speed rotor with projecting laminated poles, short axial length, suitable for \u22641200\u202fRPM, but prone to higher windage losses at high speed.",
+        "parent": "50a43578-8f38-4afe-8443-508c5b471a22",
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "57c07db1-b9b3-44c9-9654-d1afaa673de9": {
+        "name": "Smooth cylindrical rotor type",
+        "summary": "High\u2011speed rotor with a solid forged cylinder, milled slots for field coils, uniform air gap, low windage loss, and quieter operation, used at \u22651800\u202fRPM.",
+        "parent": "50a43578-8f38-4afe-8443-508c5b471a22",
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "15386beb-e40f-448e-9d6e-a7bf5c1b8e02": {
+        "name": "Damper windings",
+        "summary": "Copper bars short\u2011circuited at both ends placed on pole shoes; they damp rotor hunting, provide starting torque for synchronous motors, and help balance voltage under unbalanced loads.",
+        "parent": null,
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "1a173226-4e34-4a7c-adad-74dfb5b66cf5": {
+        "name": "Winding configurations",
+        "summary": "Comparison of different stator winding layouts, focusing on concentrated versus distributed arrangements and their impact on back\u2011EMF shape, torque ripple, and cooling.",
+        "parent": null,
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "82c9a954-f930-41b4-bb7f-f945a7959524": {
+        "name": "Concentrated winding",
+        "summary": "Coils wrapped around a single stator tooth, yielding compact, low\u2011cost designs with reduced copper loss but producing trapezoidal back\u2011EMF and higher torque ripple.",
+        "parent": "1a173226-4e34-4a7c-adad-74dfb5b66cf5",
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "358764ea-5426-4633-ae47-25c86f31e705": {
+        "name": "Distributed winding",
+        "summary": "Coils spread across multiple slots, creating a sinusoidal back\u2011EMF, smoother torque, quieter operation, and better heat distribution, at the expense of complexity and more copper.",
+        "parent": "1a173226-4e34-4a7c-adad-74dfb5b66cf5",
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      },
+      "68e8599f-810c-4281-b1f8-a777467fc597": {
+        "name": "AC armature winding characteristics",
+        "summary": "Describes features of AC armature windings: symmetric distribution, preference for distributed windings, full\u2011pitch vs. fractional\u2011pitch coils, and their effects on voltage waveform and cooling.",
+        "parent": null,
+        "source_section_ids": [
+          "68e28607e74f"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": [
+      {
+        "from_topic": "a3d03cf4-b356-45ed-bcc7-f39565f3ffbb",
+        "to_topic": "5080fff5-dc6e-423b-b6af-becab0c6e419",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "5080fff5-dc6e-423b-b6af-becab0c6e419",
+        "to_topic": "3c6cde69-fa86-4b29-956a-71fbb9f67139",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "5080fff5-dc6e-423b-b6af-becab0c6e419",
+        "to_topic": "50a43578-8f38-4afe-8443-508c5b471a22",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "50a43578-8f38-4afe-8443-508c5b471a22",
+        "to_topic": "7b63bc5e-c2d0-4515-84a7-218c8ecfe849",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "50a43578-8f38-4afe-8443-508c5b471a22",
+        "to_topic": "57c07db1-b9b3-44c9-9654-d1afaa673de9",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "3c6cde69-fa86-4b29-956a-71fbb9f67139",
+        "to_topic": "1a173226-4e34-4a7c-adad-74dfb5b66cf5",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "1a173226-4e34-4a7c-adad-74dfb5b66cf5",
+        "to_topic": "82c9a954-f930-41b4-bb7f-f945a7959524",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "1a173226-4e34-4a7c-adad-74dfb5b66cf5",
+        "to_topic": "358764ea-5426-4633-ae47-25c86f31e705",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "82c9a954-f930-41b4-bb7f-f945a7959524",
+        "to_topic": "358764ea-5426-4633-ae47-25c86f31e705",
+        "relation": "contradicts"
+      },
+      {
+        "from_topic": "3c6cde69-fa86-4b29-956a-71fbb9f67139",
+        "to_topic": "68e8599f-810c-4281-b1f8-a777467fc597",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "50a43578-8f38-4afe-8443-508c5b471a22",
+        "to_topic": "15386beb-e40f-448e-9d6e-a7bf5c1b8e02",
+        "relation": "elaborates-on"
+      }
+    ]
   }
 }
