@@ -39,6 +39,8 @@ import { detectKind } from "../../lib/preview/detectKind";
 import { bundleStatic } from "../../lib/preview/bundleStatic";
 import { injectConsoleBridge } from "../../lib/preview/consoleBridge";
 import { injectInspectorRuntime } from "../../lib/preview/inspectorRuntime";
+import { extractMmRanges, innermostMmAt } from "../../lib/preview/mmRange";
+import { elementFromMessage } from "../../lib/workbench/elementRef";
 import { usePyodideWorker } from "../../hooks/usePyodideWorker";
 
 // W6.2: a fresh nonce per successful build, NOT per component mount —
@@ -91,6 +93,16 @@ function makeResolver({ provider, filesMeta, buffers, cacheRef }) {
     cacheRef.current.set(path, { version, content: file.content || "" });
     return file.content || "";
   };
+}
+
+// W6.4/W6.5: parent -> frame. The runtime ignores anything without this
+// build's own nonce (inspectorRuntime.js's message listener), so a stale
+// message aimed at a previous build's iframe can't act on a newer one.
+// Module-level (reads only the two refs it's handed) so the message
+// listener effect below can call it without listing a per-render
+// function in its dependency array.
+function postToFrame(iframeRef, nonceRef, message) {
+  iframeRef.current?.contentWindow?.postMessage({ source: "minime-parent", nonce: nonceRef.current, ...message }, "*");
 }
 
 function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings, inspecting, onToggleInspect }) {
@@ -154,7 +166,7 @@ function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warning
   );
 }
 
-function StaticPreview({ provider, filesMeta, entryPath }) {
+function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement }) {
   const { state, consoleMessage } = useEditorStore();
   const [device, setDevice] = useState("desktop");
   const [built, setBuilt] = useState(null); // {html, warnings} | null while building the first time
@@ -179,12 +191,19 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
   // minime:inspect it was sent — see inspectorRuntime.js's header for
   // the Esc case that has to flow back the other way). `lastSelection`
   // is the most recent minime:select payload, shown as a one-line
-  // readout below the toolbar; W6.5 (click-to-code) is what will
-  // actually DO something with a selection beyond displaying it, so it
-  // stays plain local state here rather than a shared store field
-  // nothing else reads yet.
+  // readout below the toolbar. W6.5: acting on a selection (open the
+  // file, select the range, add the chip) is EditorWorkbench.jsx's job,
+  // reached through `onSelectElement` — this component only knows how
+  // to turn the frame's message into that call.
   const [inspecting, setInspecting] = useState(false);
   const [lastSelection, setLastSelection] = useState(null);
+  // The latest callback, read through a ref so the message listener
+  // (subscribed once, not per render) never calls a stale closure.
+  const onSelectElementRef = useRef(onSelectElement);
+  onSelectElementRef.current = onSelectElement;
+  // W6.5: what the frame is currently told to outline, so a reloaded
+  // frame (fresh runtime, nothing highlighted) can be re-sent it.
+  const highlightMmRef = useRef(null);
   const buffers = state.buffers;
 
   useEffect(() => {
@@ -202,8 +221,13 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
         // see makeNonce()'s own comment above for why.
         const nonce = makeNonce();
         nonceRef.current = nonce;
+        // W6.5: read the data-mm ranges off bundleStatic's output BEFORE
+        // the two runtimes are injected — they're pure scripts, but this
+        // way the reverse-highlight lookup below sees exactly the
+        // instrumented document and nothing else.
+        const ranges = extractMmRanges(result.html);
         const html = injectInspectorRuntime(injectConsoleBridge(result.html, nonce), nonce);
-        setBuilt({ html, warnings: result.warnings });
+        setBuilt({ html, warnings: result.warnings, ranges });
         setBuildError(null);
       } catch (err) {
         setBuildError(err?.message || String(err));
@@ -254,13 +278,20 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
       // must be peeled off BEFORE the console handling below — otherwise
       // a minime:select would land in the Console tab as an empty row.
       if (data.type === "minime:select") {
-        setLastSelection({
-          mm: typeof data.mm === "string" ? data.mm : "",
-          tag: typeof data.tag === "string" ? data.tag : "",
-          classes: Array.isArray(data.classes) ? data.classes.filter((c) => typeof c === "string") : [],
-          dynamic: data.dynamic === true,
-          instanceCount: typeof data.instanceCount === "number" ? data.instanceCount : 1,
-        });
+        // Untrusted data from inside the sandbox: elementFromMessage()
+        // type-checks and length-caps every field, and returns null when
+        // there's no usable mm to resolve to a source range.
+        const selection = elementFromMessage(data);
+        if (!selection) return;
+        setLastSelection({ mm: selection.mm, ...selection.element });
+        onSelectElementRef.current?.(selection);
+        // A pick ends inspect mode (same as a browser's own element
+        // picker): keyboard focus has just moved to the editor, where
+        // Esc can no longer reach the frame's own handler to turn it
+        // off, so leaving it on would strand the person in a mode with
+        // no keyboard exit.
+        setInspecting(false);
+        postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: false });
         return;
       }
       if (data.type === "minime:inspectExited") {
@@ -283,32 +314,37 @@ function StaticPreview({ provider, filesMeta, entryPath }) {
     return () => window.removeEventListener("message", onMessage);
   }, [consoleMessage]);
 
-  // W6.4: parent -> frame. The runtime ignores anything without this
-  // build's own nonce (inspectorRuntime.js's message listener), so a
-  // stale toggle aimed at a previous build's iframe can't flip a newer
-  // one.
-  function postInspectState(on) {
-    iframeRef.current?.contentWindow?.postMessage(
-      { source: "minime-parent", nonce: nonceRef.current, type: "minime:inspect", on },
-      "*"
-    );
-  }
-
   function handleToggleInspect() {
     const next = !inspecting;
     setInspecting(next);
-    postInspectState(next);
+    postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: next });
   }
 
   // A rebuild swaps srcDoc, which reloads the frame into a FRESH
-  // runtime whose own `inspecting` starts false — without this, turning
-  // inspect mode on and then typing a character (debounced rebuild)
-  // would silently drop it. Re-sent on every load, not just when true,
-  // so a runtime that somehow kept state can't disagree with the
-  // toolbar either.
+  // runtime whose own `inspecting` starts false and which has nothing
+  // highlighted — without this, turning inspect mode on and then typing
+  // a character (debounced rebuild) would silently drop it, and the
+  // reverse highlight would vanish on every keystroke. Re-sent on every
+  // load, not just when set, so a runtime that somehow kept state can't
+  // disagree with the toolbar / editor either.
   function handleIframeLoad() {
-    postInspectState(inspecting);
+    postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: inspecting });
+    postToFrame(iframeRef, nonceRef, { type: "minime:highlight", mm: highlightMmRef.current });
   }
+
+  // W6.5, reverse direction: the innermost element containing the
+  // editor's cursor is outlined in the preview — "the element you're
+  // editing". CodeEditor reports a 1-based column; data-mm columns are
+  // 0-based. Only the file the cursor is actually in can match (ranges
+  // carry their own path), so moving to a different file clears it.
+  const highlightMm = useMemo(
+    () => (built?.ranges && cursor ? innermostMmAt(built.ranges, state.activePath, cursor.line, cursor.col - 1) : null),
+    [built, cursor, state.activePath]
+  );
+  useEffect(() => {
+    highlightMmRef.current = highlightMm;
+    postToFrame(iframeRef, nonceRef, { type: "minime:highlight", mm: highlightMm });
+  }, [highlightMm]);
 
   function handleReload() {
     cacheRef.current.clear(); // a manual reload means "don't trust anything cached", unlike the live-typing path which is fine reusing unopened files' last-known content
@@ -466,8 +502,10 @@ function EmptyState({ title, detail }) {
  * @param {object} props
  * @param {object} props.provider - the active FileProvider (WorkbenchBody's own, same one CodeEditor/Explorer use)
  * @param {{[path: string]: object}|null} props.filesMeta - FileProvider.list()'s result; null until the first load lands
+ * @param {{line: number, col: number}|null} [props.cursor] - W6.5: the ACTIVE editor file's caret (CodeEditor's own 1-based report); drives the reverse highlight
+ * @param {(selection: {mm: string, element: object}) => void} [props.onSelectElement] - W6.5: a click in the preview's inspect mode, already sanitized by elementRef.js's elementFromMessage()
  */
-function PreviewPane({ provider, filesMeta }) {
+function PreviewPane({ provider, filesMeta, cursor, onSelectElement }) {
   const detected = useMemo(() => detectKind(filesMeta || {}), [filesMeta]);
 
   if (!filesMeta) {
@@ -479,7 +517,15 @@ function PreviewPane({ provider, filesMeta }) {
   }
 
   if (detected.kind === "static") {
-    return <StaticPreview provider={provider} filesMeta={filesMeta} entryPath={detected.entryPath} />;
+    return (
+      <StaticPreview
+        provider={provider}
+        filesMeta={filesMeta}
+        entryPath={detected.entryPath}
+        cursor={cursor}
+        onSelectElement={onSelectElement}
+      />
+    );
   }
   if (detected.kind === "python") {
     return <PythonPreview filesMeta={filesMeta} />;

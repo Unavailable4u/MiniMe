@@ -69,6 +69,7 @@ assert(script.includes("addEventListener('click', mmOnClick, true)"), "the click
 assert(script.includes("event.preventDefault()") && script.includes("event.stopPropagation()"), "a click while inspecting is prevented/stopped so the page's own handler never fires");
 assert(script.includes("'Escape'"), "Esc is wired to exit inspect mode");
 assert(script.includes("__mmInspectorInstalled__"), "guards against double-installation if injected twice");
+assert(script.includes("addEventListener('scroll', mmRepositionHighlight, true)"), "scroll is listened for in the capture phase (it doesn't bubble) so the reverse highlight follows its element");
 assert(script.includes("closest('[data-mm]')"), "resolution walks up to the nearest element carrying data-mm — the 'nearest static ancestor' rule from the plan");
 
 const hostileNonce = `x"; window.__pwned__=1; //`;
@@ -146,6 +147,7 @@ class FakeElement {
 function makeSandbox(root, nonce) {
   const posted = [];
   const handlers = {};
+  const created = []; // every box/label element the script makes, in creation order: hover outline, highlight outline, label
   const sandbox = {
     window: {
       parent: { postMessage: (msg) => posted.push(msg) },
@@ -164,7 +166,12 @@ function makeSandbox(root, nonce) {
     document: {
       body: {}, // truthy -- just needs to exist for mmEnsureOverlay()'s guard
       documentElement: { appendChild: () => {} },
-      createElement: () => ({ style: {} }), // the overlay/label boxes -- never asserted on directly, only that creating them doesn't throw
+      createElement: () => {
+        const el = { style: {} };
+        created.push(el);
+        return el;
+      },
+      contains: (el) => [...root.walk()].includes(el), // backs the scroll handler's "is the highlighted element still in the document" check
       querySelector: (selector) => {
         const m = /^\[data-mm="(.*)"\]$/.exec(selector);
         if (!m) throw new Error("fake querySelector only supports the exact-match data-mm form, got: " + selector);
@@ -181,7 +188,7 @@ function makeSandbox(root, nonce) {
   };
   const context = vm.createContext(sandbox);
   new vm.Script(buildInspectorScript(nonce)).runInContext(context);
-  return { handlers, posted, window: sandbox.window, document: sandbox.document };
+  return { handlers, posted, created, window: sandbox.window, document: sandbox.document };
 }
 
 function fakeEvent(target, extra = {}) {
@@ -322,6 +329,47 @@ const root = new FakeElement("div", {}, [divMm, buttonMm]);
     threw = true;
   }
   assert(!threw, "minime:highlight for an mm with no matching element never throws");
+}
+
+{
+  // minime:highlight (W6.5's sender): a known mm draws the SECOND box
+  // (the highlight outline, created after the hover outline) over that
+  // element's rect; null clears it.
+  const s = makeSandbox(root, "n8b");
+  postFromParent(s, "n8b", { type: "minime:highlight", mm: "app.html:2:0:5:6" });
+  const box = s.created[1].style; // the highlight outline is the second element the script makes
+  assertEqual([box.left, box.top, box.width, box.height, box.display], ["10px", "10px", "200px", "100px", "block"], "a known mm outlines that element's own rect");
+
+  // Scroll moves the element: the box is re-placed from a FRESH rect
+  // rather than staying where it was first drawn.
+  divMm._rect = { x: 10, y: -40, top: -40, left: 10, right: 210, bottom: 60, width: 200, height: 100 };
+  s.handlers.scroll({});
+  assertEqual([box.left, box.top], ["10px", "-40px"], "a scroll re-places the highlight box from the element's current rect");
+  divMm._rect = { x: 10, y: 10, top: 10, left: 10, right: 210, bottom: 110, width: 200, height: 100 }; // restore for later tests
+
+  s.handlers.resize({});
+  assertEqual(box.top, "10px", "a resize re-places it too");
+
+  postFromParent(s, "n8b", { type: "minime:highlight", mm: null });
+  assertEqual(box.display, "none", "mm: null clears the highlight");
+  divMm._rect = { x: 99, y: 99, top: 99, left: 99, right: 199, bottom: 199, width: 100, height: 100 };
+  s.handlers.scroll({});
+  assertEqual(box.display, "none", "once cleared, a scroll does NOT bring the old highlight back");
+  divMm._rect = { x: 10, y: 10, top: 10, left: 10, right: 210, bottom: 110, width: 200, height: 100 };
+}
+
+{
+  // A highlighted element that has since been removed from the document
+  // hides the box instead of leaving it floating over nothing.
+  const gone = new FakeElement("p", { "data-mm": "g.html:1:0:1:9" }, [], { x: 0, y: 0, top: 0, left: 0, right: 5, bottom: 5, width: 5, height: 5 });
+  const goneRoot = new FakeElement("div", {}, [gone]);
+  const s = makeSandbox(goneRoot, "n8c");
+  postFromParent(s, "n8c", { type: "minime:highlight", mm: "g.html:1:0:1:9" });
+  const box = s.created[1].style; // the highlight outline is the second element the script makes
+  assertEqual(box.display, "block", "highlighted while present");
+  goneRoot.children = []; // removed from the tree
+  s.handlers.scroll({});
+  assertEqual(box.display, "none", "a scroll after the element left the document hides the box");
 }
 
 // ===========================================================================

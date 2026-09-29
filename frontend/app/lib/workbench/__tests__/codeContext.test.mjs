@@ -191,6 +191,26 @@ const setAgain = codeContextReducer(withReview, { type: "SET_PENDING_REVIEW", pr
 assertEqual(setAgain.pendingReview, "prop_1", "SET_PENDING_REVIEW with the same id still produces a fresh state object");
 assert(setAgain !== withReview, "...i.e. it is NOT short-circuited to the same object");
 
+// --- element refs (W6.5) ---------------------------------------------------
+
+const elementInfo = { tag: "button", classes: ["btn-primary"], textPreview: "Save", styles: { color: "red" }, dynamic: false, instanceCount: 1 };
+let elState = codeContextReducer(initialState, {
+  type: "ADD_REF",
+  ref: { kind: "element", path: "index.html", provider: "cloud", fromLine: 4, toLine: 7, from: 30, to: 90, snippet: '<div class="a">\n</div>', element: elementInfo },
+});
+assertEqual(elState.refs[0].element, elementInfo, "ADD_REF carries an element ref's `element` info through onto the stored ref");
+assertEqual(elState.refs[0].kind, "element", "...as kind 'element'");
+assertEqual("element" in codeContextReducer(initialState, { type: "ADD_REF", ref: { kind: "range", path: "a.js", fromLine: 1, toLine: 1, from: 0, to: 1, snippet: "x" } }).refs[0], false, "a non-element ref does NOT gain an `element` key (every other kind keeps exactly its old shape)");
+
+const elShifted = codeContextReducer(elState, {
+  type: "REMAP_REFS",
+  path: "index.html",
+  mapRange: (from, to) => ({ from: from + 5, to: to + 5, fromLine: 5, toLine: 8 }),
+});
+assertEqual([elShifted.refs[0].from, elShifted.refs[0].to, elShifted.refs[0].fromLine, elShifted.refs[0].toLine], [35, 95, 5, 8], "REMAP_REFS shifts an element chip with the edit, same as a range chip");
+assertEqual(elShifted.refs[0].element, elementInfo, "...and keeps its element info while doing so");
+assertEqual(codeContextReducer(elState, { type: "REMAP_REFS", path: "index.html", mapRange: () => null }).refs.length, 0, "an element chip whose whole range was deleted is dropped, not left pointing at nothing");
+
 // --- pending chat mode (W6.2) --------------------------------------------
 
 const withChatMode = codeContextReducer(initialState, { type: "SET_PENDING_CHAT_MODE", mode: "ask" });

@@ -40,6 +40,7 @@ import {
 // per-hunk review nobody opened, the same shortcut PendingTray.jsx
 // (EditorWorkbench.jsx) uses for its own Keep all/Reject buttons.
 import { deletedPathsToKeep, keepAllDecisions, rejectAllDecisions } from "../lib/workbench/reviewMode";
+import { describeElement } from "../lib/workbench/elementRef"; // W6.5 — pure helpers, not a codeContext import
 import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
 
@@ -1364,7 +1365,13 @@ export default function WorkspaceChatPanel({
               // header below would be actively misleading for this kind.
               ref.kind === "error"
             ? "```\n" + (ref.snippet || "") + "\n```"
-            : "```" + (ref.fromLine != null ? `${ref.path}#L${ref.fromLine}-L${ref.toLine}` : ref.path) + "\n" + (ref.snippet || "") + "\n```"
+            : // W6.5: an element ref is a real code range (fenced exactly like
+              // a range chip) PLUS what that source rendered as — tag,
+              // classes, text, computed styles (elementRef.js) — as a plain
+              // line ahead of it. The code alone can't say what a
+              // `className` resolved to on screen.
+              (ref.kind === "element" && ref.element ? describeElement(ref.element) + "\n" : "") +
+              "```" + (ref.fromLine != null ? `${ref.path}#L${ref.fromLine}-L${ref.toLine}` : ref.path) + "\n" + (ref.snippet || "") + "\n```"
         )
         .join("\n\n");
       const augmented = fenced ? `${fenced}\n\n${text}` : text;

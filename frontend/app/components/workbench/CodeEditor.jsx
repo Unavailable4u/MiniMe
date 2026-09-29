@@ -109,6 +109,7 @@ import {
   normalizeLineBreaks,
 } from "../../lib/workbench/editorUtils";
 import { chunkLineStats } from "../../lib/workbench/reviewMode";
+import { pulseExtension } from "../../lib/workbench/pulse"; // W6.5
 
 // Tags a transaction as coming from THIS component's own `value`-prop
 // effect (an external update), not from the person typing — read back
@@ -505,6 +506,7 @@ function useCodeMirror({
       extensions: [
         baseExtensions(onSaveRef, onAddToChatRef, gutterAnchorRef),
         buildEditorTheme(),
+        pulseExtension, // W6.5: the click-to-code flash (see lib/workbench/pulse.js)
         isReview ? buildReviewTheme() : [],
         indentCompartment.of(indentUnit.of(detectIndentUnit(value ?? ""))),
         languageCompartment.of([]),

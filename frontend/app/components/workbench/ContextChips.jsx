@@ -18,6 +18,7 @@
 import { memo } from "react";
 import { File, Folder, MessageSquareCode, X } from "lucide-react";
 import { contextBudget, useCodeContext } from "../../lib/workbench/codeContext";
+import { elementLabel } from "../../lib/workbench/elementRef";
 import { basename } from "../../lib/workbench/fileTree";
 
 const KIND_ICONS = {
@@ -42,6 +43,10 @@ function chipLabel(ref) {
     const firstLine = (ref.snippet || "").split("\n")[0].trim();
     return firstLine || "Console error";
   }
+  // W6.5: an element chip reads as the element it is (`button.btn-primary`),
+  // not as the file it lives in — the code range is still on the ref for
+  // the jump and the prompt.
+  if (ref.kind === "element" && ref.element) return elementLabel(ref.element);
   const name = basename(ref.path) || ref.path;
   if (ref.kind === "range") {
     return ref.fromLine === ref.toLine ? `${name} L${ref.fromLine}` : `${name} L${ref.fromLine}-${ref.toLine}`;
