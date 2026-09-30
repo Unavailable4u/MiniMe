@@ -28,6 +28,7 @@
 "use client";
 import { authHeaders } from "../../context/SessionContext";
 import { getPusherClient } from "../pusherClient";
+import { toProposalRef } from "./proposalRefs";
 
 /**
  * Thrown by resolveProposal() on a 409 — same role FileConflictError
@@ -52,30 +53,9 @@ async function parseErrorDetail(res) {
   return body?.detail || `${res.status} ${res.statusText}`;
 }
 
-// The plan's own ref shape (migrations/0010_code_proposals.sql's own
-// comment on the `refs` column: `{id, kind, path, fromLine, toLine,
-// snippet, hash, provider, ...}`) — trimmed down from
-// codeContext.js's full in-memory ref (which also carries `from`/`to`
-// character offsets and a client-only `truncated` flag CM6 needs for
-// live position-tracking) to exactly the fields a proposal on the
-// server ever reads or displays. Mirrors sendCodeChatMessage's own
-// `trimmedRefs` in WorkspaceChatPanel.jsx, which does the same
-// trim for the Ask-mode persisted-message path, just keeping
-// `snippet`/`hash` here too since eo/code_proposals.py's
-// _paths_from_refs() only READS kind/path but the row still stores
-// the whole ref for W5.4's proposal card to show what was selected.
-function toProposalRef(ref) {
-  return {
-    id: ref.id,
-    kind: ref.kind,
-    path: ref.path,
-    fromLine: ref.fromLine ?? null,
-    toLine: ref.toLine ?? null,
-    snippet: ref.snippet ?? null,
-    hash: ref.hash ?? null,
-    provider: ref.provider ?? null,
-  };
-}
+// The wire shape of a ref — see proposalRefs.js (W7.1b moved it there so
+// it can be tested under plain `node`; it now also carries an element
+// chip's `element` object, which W7.1a's backend reads).
 
 /**
  * POST .../code/proposals — see api/routes/code_edit.py's
@@ -85,7 +65,7 @@ function toProposalRef(ref) {
  * no polling needed for this step's own round trip.
  *
  * `refs`: codeContext.js's full ref objects — trimmed to
- * toProposalRef()'s shape before the request body is built, so this
+ * proposalRefs.js's toProposalRef() shape before the request body is built, so this
  * function's caller never has to remember to do that trim itself.
  * Throws (via parseErrorDetail) on a 400 (empty instruction, no refs,
  * a folder ref, an unsupported ref kind) — see create_proposal()'s

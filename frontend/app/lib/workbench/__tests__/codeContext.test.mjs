@@ -43,7 +43,7 @@ function assert(cond, msg) {
   }
 }
 
-const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null };
+const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingUsage: null, usage: null };
 
 // --- ADD_REF -----------------------------------------------------------
 
@@ -246,6 +246,72 @@ assert(budget.overBudget, "...and flags overBudget once the sum passes MAX_TOTAL
 assertEqual(hashString("abc"), hashString("abc"), "hashString is deterministic");
 assert(hashString("abc") !== hashString("abd"), "hashString differs for different input");
 assert(!hashString("abc").startsWith("-"), "hashString never emits a leading '-' (unsigned)");
+
+// --- W7.1b: usage-site lookup state --------------------------------------------
+
+{
+  const el = { kind: "element", path: "src/Button.jsx", fromLine: 3, toLine: 5, snippet: "<button/>", element: { tag: "button", classes: ["btn"] } };
+  let s = codeContextReducer(initialState, { type: "ADD_REF", ref: el });
+  const ref = s.refs[0];
+  assertEqual(ref.element, el.element, "an element ref keeps its `element` through ADD_REF (what toProposalRef() later sends)");
+
+  s = codeContextReducer(s, { type: "REQUEST_USAGE_SITES", ref });
+  assertEqual(s.pendingUsage.id, ref.id, "REQUEST_USAGE_SITES parks the request for the workbench");
+  assertEqual([s.usage.refId, s.usage.status, s.usage.sites], [ref.id, "loading", []], "…and shows a loading list meanwhile");
+
+  const before = s;
+  assert(codeContextReducer(s, { type: "REQUEST_USAGE_SITES", ref: null }) === before, "a request with no ref is ignored");
+  assert(codeContextReducer(s, { type: "REQUEST_USAGE_SITES", ref: { path: "x" } }) === before, "a request with no ref id is ignored");
+
+  s = codeContextReducer(s, { type: "CLEAR_PENDING_USAGE" });
+  assertEqual(s.pendingUsage, null, "CLEAR_PENDING_USAGE consumes the request");
+  assert(codeContextReducer(s, { type: "CLEAR_PENDING_USAGE" }) === s, "clearing an empty slot is a no-op (same state object)");
+  assertEqual(s.usage.status, "loading", "…and leaves the loading list alone");
+
+  const site = { path: "src/App.jsx", name: "Button", fromLine: 5, toLine: 5, from: 10, to: 20, snippet: "<Button>", preview: "<Button>" };
+  s = codeContextReducer(s, { type: "SET_USAGE_RESULT", refId: ref.id, status: "done", names: ["Button"], sites: [site], truncated: true, message: "note" });
+  assertEqual([s.usage.status, s.usage.names, s.usage.sites.length, s.usage.truncated, s.usage.message], ["done", ["Button"], 1, true, "note"], "SET_USAGE_RESULT fills the list in");
+  assertEqual(s.usage.refId, ref.id, "…for the same chip");
+
+  assert(codeContextReducer(s, { type: "SET_USAGE_RESULT", refId: "ref-999", status: "done", sites: [] }) === s, "a result for a different chip is ignored");
+  assert(codeContextReducer(initialState, { type: "SET_USAGE_RESULT", refId: "ref-1", status: "done", sites: [site] }) === initialState, "a result with no lookup showing is ignored");
+
+  const err = codeContextReducer(s, { type: "SET_USAGE_RESULT", refId: ref.id, status: "error", message: "boom" });
+  assertEqual([err.usage.status, err.usage.sites, err.usage.message], ["error", [], "boom"], "an error result clears stale sites and carries the message");
+  assertEqual(codeContextReducer(s, { type: "SET_USAGE_RESULT", refId: ref.id, status: "anything" }).usage.status, "done", "any non-error status is stored as done");
+
+  assertEqual(codeContextReducer(s, { type: "CLEAR_USAGE" }).usage, null, "CLEAR_USAGE dismisses the list");
+  assert(codeContextReducer(initialState, { type: "CLEAR_USAGE" }) === initialState, "CLEAR_USAGE with nothing showing is a no-op");
+
+  // Removing the chip the lookup was for drops its list — and a result that
+  // arrives afterwards does not bring it back.
+  const removed = codeContextReducer(s, { type: "REMOVE_REF", id: ref.id });
+  assertEqual(removed.usage, null, "removing the source chip drops its usage list");
+  assert(codeContextReducer(removed, { type: "SET_USAGE_RESULT", refId: ref.id, status: "done", sites: [site] }) === removed, "a late result for a removed chip is ignored");
+
+  // Removing a chip the lookup ISN'T for leaves it alone.
+  let two = codeContextReducer(s, { type: "ADD_REF", ref: { kind: "file", path: "a.css", snippet: "" } });
+  const other = two.refs.find((r) => r.kind === "file");
+  two = codeContextReducer(two, { type: "REMOVE_REF", id: other.id });
+  assertEqual(two.usage.refId, ref.id, "removing an unrelated chip keeps the usage list");
+
+  // A pending request for a chip that is removed before the workbench picks it up.
+  let pend = codeContextReducer(codeContextReducer(initialState, { type: "ADD_REF", ref: el }), { type: "REQUEST_USAGE_SITES", ref });
+  pend = codeContextReducer(pend, { type: "REMOVE_REF", id: ref.id });
+  assertEqual([pend.pendingUsage, pend.usage], [null, null], "removing the chip also cancels a not-yet-consumed request");
+
+  // CLEAR_REFS (sent after a chat send) clears it all.
+  let cleared = codeContextReducer(s, { type: "REQUEST_USAGE_SITES", ref });
+  cleared = codeContextReducer(cleared, { type: "CLEAR_REFS" });
+  assertEqual([cleared.refs.length, cleared.usage, cleared.pendingUsage], [0, null, null], "CLEAR_REFS clears the usage list and any pending request");
+  assert(codeContextReducer(initialState, { type: "CLEAR_REFS" }) === initialState, "CLEAR_REFS on an empty store is still a no-op");
+
+  // Adding a usage site through ADD_REF is an ordinary range chip (tracked on edits).
+  let added = codeContextReducer(s, { type: "ADD_REF", ref: { kind: "range", path: site.path, from: site.from, to: site.to, fromLine: site.fromLine, toLine: site.toLine, snippet: site.snippet } });
+  assertEqual(added.refs.filter((r) => r.kind === "range").length, 1, "a usage site is added as a range chip");
+  assert(codeContextReducer(added, { type: "ADD_REF", ref: { kind: "range", path: site.path, from: site.from, to: site.to, fromLine: site.fromLine, toLine: site.toLine, snippet: site.snippet } }) === added, "adding the same usage site twice is deduped");
+  assertEqual(added.usage.status, "done", "…and adding a chip doesn't disturb the list");
+}
 
 // -------------------------------------------------------------------------------
 

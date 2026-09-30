@@ -101,7 +101,7 @@ function refKey(ref) {
   return `${ref.kind}:${ref.path}:${ref.fromLine ?? ""}:${ref.toLine ?? ""}`;
 }
 
-const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null };
+const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingUsage: null, usage: null };
 
 /**
  * Pure reducer — see editorStore.js's own header for why this shape
@@ -146,7 +146,17 @@ export function codeContextReducer(state, action) {
     // The chip's own × button.
     case "REMOVE_REF": {
       const refs = state.refs.filter((r) => r.id !== action.id);
-      return refs.length === state.refs.length ? state : { ...state, refs };
+      if (refs.length === state.refs.length) return state;
+      // W7.1b: a usage-site lookup belongs to the chip it was asked for;
+      // removing that chip drops its result list too (and a late result
+      // for it is ignored — see SET_USAGE_RESULT).
+      const usageGone = state.usage && state.usage.refId === action.id;
+      return {
+        ...state,
+        refs,
+        ...(usageGone ? { usage: null } : {}),
+        ...(state.pendingUsage && state.pendingUsage.id === action.id ? { pendingUsage: null } : {}),
+      };
     }
 
     // W4.2 will likely call this on send (Ask mode keeps only
@@ -155,7 +165,9 @@ export function codeContextReducer(state, action) {
     // starts empty again for the next message); not called by
     // anything yet in this patch.
     case "CLEAR_REFS":
-      return state.refs.length === 0 ? state : { ...state, refs: [] };
+      return state.refs.length === 0 && !state.usage && !state.pendingUsage
+        ? state
+        : { ...state, refs: [], usage: null, pendingUsage: null };
 
     // "Range chips track edits via CM6 ChangeSet.mapPos so they don't
     // drift while you type" (plan §5 W4.1). `mapRange(from, to)` is
@@ -227,6 +239,47 @@ export function codeContextReducer(state, action) {
     case "CLEAR_PENDING_CHAT_MODE":
       return state.pendingChatMode == null ? state : { ...state, pendingChatMode: null };
 
+    // W7.1b: "Find usages" on an element chip whose source is a
+    // component definition (ContextChips.jsx). Same one-slot request /
+    // consumer-clears shape as pendingJump above — EditorWorkbench.jsx
+    // owns the provider and the open buffers, so it does the lookup and
+    // reports back with SET_USAGE_RESULT. `usage` is the list the chip
+    // tray shows meanwhile: one lookup at a time, a second request
+    // replaces the first.
+    case "REQUEST_USAGE_SITES": {
+      const ref = action.ref;
+      if (!ref || !ref.id) return state;
+      return {
+        ...state,
+        pendingUsage: ref,
+        usage: { refId: ref.id, path: ref.path, status: "loading", names: [], sites: [], truncated: false, message: null },
+      };
+    }
+
+    case "CLEAR_PENDING_USAGE":
+      return state.pendingUsage == null ? state : { ...state, pendingUsage: null };
+
+    // The lookup's outcome. Ignored unless it is for the lookup the tray
+    // is currently showing — a chip removed, or a newer request made,
+    // while this one was reading files must not bring a stale list back.
+    case "SET_USAGE_RESULT": {
+      if (!state.usage || state.usage.refId !== action.refId) return state;
+      return {
+        ...state,
+        usage: {
+          ...state.usage,
+          status: action.status === "error" ? "error" : "done",
+          names: action.names || [],
+          sites: action.sites || [],
+          truncated: action.truncated === true,
+          message: action.message || null,
+        },
+      };
+    }
+
+    case "CLEAR_USAGE":
+      return state.usage == null ? state : { ...state, usage: null };
+
     default:
       return state;
   }
@@ -262,6 +315,11 @@ export function CodeContextProvider({ children }) {
       // W6.2
       requestChatMode: (mode) => dispatch({ type: "SET_PENDING_CHAT_MODE", mode }),
       clearChatMode: () => dispatch({ type: "CLEAR_PENDING_CHAT_MODE" }),
+      // W7.1b
+      requestUsageSites: (ref) => dispatch({ type: "REQUEST_USAGE_SITES", ref }),
+      clearPendingUsage: () => dispatch({ type: "CLEAR_PENDING_USAGE" }),
+      setUsageResult: (result) => dispatch({ type: "SET_USAGE_RESULT", ...result }),
+      clearUsage: () => dispatch({ type: "CLEAR_USAGE" }),
     }),
     [dispatch]
   );
@@ -272,9 +330,11 @@ export function CodeContextProvider({ children }) {
       pendingJump: state.pendingJump,
       pendingReview: state.pendingReview,
       pendingChatMode: state.pendingChatMode,
+      pendingUsage: state.pendingUsage,
+      usage: state.usage,
       ...actions,
     }),
-    [state.refs, state.pendingJump, state.pendingReview, state.pendingChatMode, actions]
+    [state.refs, state.pendingJump, state.pendingReview, state.pendingChatMode, state.pendingUsage, state.usage, actions]
   );
 
   return createElement(CodeContextContext.Provider, { value }, children);
