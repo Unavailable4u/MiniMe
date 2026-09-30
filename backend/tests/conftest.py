@@ -606,3 +606,22 @@ def _laya_routing_gates_off(monkeypatch):
     from eo import laya_routing
     monkeypatch.setattr(laya_routing, "PANEL_GATE_MODE", "off")
     monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "off")
+
+
+# ---------------------------------------------------------------------------
+# Laya migration (Tier 4): agents/overlapping_checker.py and
+# agents/contradiction_prefilter.py each read their gate's mode into a
+# MODULE-LEVEL constant at import time (LAYA_OVERLAP_MODE /
+# LAYA_CONTRADICTION_MODE), the same shape as eo/sga.py's _PREGATE_MODE
+# and eo/laya_routing.py's two gates above -- so, same as those, tests
+# monkeypatch the constant directly rather than the env var, and this
+# fixture does the same for the whole suite by default. Off for both:
+# "observe" mode still makes a real Laya call per ambiguous-band item /
+# candidate pair, which existing tests for these two modules don't
+# expect and don't mock.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _laya_tier4_gates_off(monkeypatch):
+    from agents import contradiction_prefilter, overlapping_checker
+    monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "off")
+    monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "off")

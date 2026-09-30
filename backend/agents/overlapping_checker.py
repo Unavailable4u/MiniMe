@@ -25,9 +25,13 @@ Pipeline per newly-extracted topic:
      with this module's own DEFAULT_STOPWORDS rather than either of
      theirs, since those two hand-tuned sets differ from each other and
      neither is "the" shared one; see utils/similarity.py).
-  4. Only LLM-arbitrate the ambiguous band — thin, tag-only output,
-     never prose. Below LOW_THRESHOLD: definitely new. Above
-     HIGH_THRESHOLD: definitely the same, skip the LLM call entirely.
+  4. Only arbitrate the ambiguous band — thin, tag-only output, never
+     prose. Below LOW_THRESHOLD: definitely new. Above HIGH_THRESHOLD:
+     definitely the same, skip arbitration entirely. Within the band, a
+     local Laya call (Tier 4 of the Laya migration, 2026-09-29) gates
+     the LLM arbitration below — default mode "observe" always still
+     calls the LLM and only logs/scores Laya's verdict against it; see
+     _arbitrate()/get_overlap_gate_stats() below.
   5. Upsert this topic's own embedding for future uploads to compare
      against.
 
@@ -50,6 +54,7 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo import laya_gate  # NEW — Laya migration Tier 4, see _arbitrate() below
 from eo.registry import add_role_prompt, get_role_prompt
 from memory.bus import vector_index
 from utils.embedding import embed_text
@@ -92,6 +97,133 @@ def _ensure_role_registered() -> None:
     if not get_role_prompt("overlapping_checker"):
         add_role_prompt("overlapping_checker", OVERLAPPING_CHECKER_BRIEF,
                          source="overlapping_checker_seed")
+
+
+# ---------------------------------------------------------------------
+# Laya migration Tier 4 (2026-09-29): a pre-gate in front of the ambiguous-
+# band LLM arbitration below. Same on/observe/off convention as every
+# other gate in this migration (eo/laya_gate.py's parse_mode()); default
+# "observe" never changes what's returned -- it only computes Laya's
+# verdict, compares it against what the real LLM arbitration then
+# decides, and counts the result (get_overlap_gate_stats()). Check
+# skip_precision there before setting LAYA_OVERLAP_ARBITRATION=on.
+#
+# Laya answers only the TAG (new/duplicate/merge) as a 3-way `choice` --
+# target_topic_id, when the tag isn't "new", is always candidates[0]'s id
+# (already sorted by score, same assumption the deterministic
+# HIGH_THRESHOLD shortcut in check_topic() makes just above this
+# function). Laya's `choice` type can only select from a fixed label
+# set, so it cannot itself pick which of several arbitrary candidate ids
+# is the match the way the real LLM call can.
+#
+# UNVERIFIED: like every gate in this migration, the 0.85 confidence
+# threshold is a starting guess, not tuned on real duplicate/merge/new
+# examples -- and Tier 1 testing showed this checkpoint can be very
+# unconfident even on fairly clear cases (a 3-way near-tie on a
+# structurally similar question), so expect "observe" mode to show a low
+# would_skip rate at first, not a broken gate.
+# ---------------------------------------------------------------------
+LAYA_OVERLAP_MODE = laya_gate.parse_mode(
+    os.environ.get("LAYA_OVERLAP_ARBITRATION"), "observe", label="overlapping_checker")
+LAYA_OVERLAP_THRESHOLD = float(os.environ.get("LAYA_OVERLAP_THRESHOLD", "0.85"))
+_OVERLAP_COUNTER_PREFIX = "laya_overlap_gate:"
+_OVERLAP_COUNTERS = ("agreed", "disagreed", "would_skip", "would_skip_wrong", "skipped")
+
+_TAG_QUESTION = {
+    "tag": {
+        "type": "choice",
+        "instructions": (
+            "A NEW topic was extracted from an upload. Compare it against "
+            "the CANDIDATE existing topics (already similarity-matched, "
+            "highest score first). Is the new topic the same underlying "
+            "fact as the top candidate (duplicate), clearly related but "
+            "not identical (merge), or genuinely new?"
+        ),
+        "criteria": {
+            "duplicate": "near-identical to the top candidate -- the same "
+                         "underlying fact, safe to fold together",
+            "merge": "clearly related or overlapping with the top "
+                     "candidate but not identical -- worth keeping both "
+                     "and linking them",
+            "new": "none of the candidates are actually the same or "
+                   "closely related fact",
+        },
+    },
+}
+
+
+def _laya_tag(new_topic: dict, candidates: list[dict]):
+    """Returns (tag, probability_of_that_tag) from one local Laya call,
+    or None on any failure -- caller treats None exactly like the gate
+    being off (call the real LLM, no comparison to log). Only the top 2
+    candidates are shown (already sorted by score): Laya's ~300-token
+    budget can't fit TOP_K=5 the way the real LLM prompt does, and
+    target_topic_id only ever needs candidates[0] regardless (see the
+    block comment above this function). Uses the `probabilities` dict
+    rather than the `choice` answer's own `confidence` field -- Tier 1/3
+    testing found `confidence` can read misleadingly low even for a
+    clear top choice on this checkpoint.
+    """
+    try:
+        block = "\n".join(
+            f"- score={c['score']:.2f} :: {c['name']} — {c['summary'][:150]}"
+            for c in candidates[:2]
+        )
+        state = {
+            "new_topic": laya_gate.clip(f"{new_topic['name']}: {new_topic['summary']}", 300, "head"),
+            "candidates": laya_gate.clip(block, 400, "head"),
+        }
+        result = laya_gate.predict(state, _TAG_QUESTION, site="overlapping_checker.check_topic")
+        if result is None:
+            return None
+        answer = result["answers"]["tag"]
+        tag = answer["choice"]
+        return tag, float(answer["probabilities"][tag])
+    except Exception:
+        return None
+
+
+def _arbitrate(new_topic: dict, candidates: list[dict], session_id: str = None) -> dict:
+    """Gate in front of _llm_arbitrate() -- see the block comment above
+    this section for the full reasoning. Never raises: a Laya failure of
+    any kind just means no comparison this call, and the real LLM
+    arbitration always still runs unless mode is "on" AND Laya cleared
+    the confidence threshold.
+    """
+    laya_result = _laya_tag(new_topic, candidates) if LAYA_OVERLAP_MODE != "off" else None
+
+    if laya_result and LAYA_OVERLAP_MODE == "on" and laya_result[1] >= LAYA_OVERLAP_THRESHOLD:
+        tag, probability = laya_result
+        laya_gate.bump_counter(_OVERLAP_COUNTER_PREFIX + "skipped")
+        return {"tag": tag, "target_topic_id": candidates[0]["topic_id"] if tag != "new" else None}
+
+    llm_result = _llm_arbitrate(new_topic, candidates, session_id=session_id)
+
+    if laya_result:
+        tag, probability = laya_result
+        agreed = tag == llm_result.get("tag")
+        laya_gate.bump_counter(_OVERLAP_COUNTER_PREFIX + ("agreed" if agreed else "disagreed"))
+        if probability >= LAYA_OVERLAP_THRESHOLD:
+            laya_gate.bump_counter(_OVERLAP_COUNTER_PREFIX + "would_skip")
+            if not agreed:
+                laya_gate.bump_counter(_OVERLAP_COUNTER_PREFIX + "would_skip_wrong")
+        print(f"  [Overlapping Checker] Laya pre-gate: laya={tag}({probability:.2f}) "
+              f"llm={llm_result.get('tag')} agreed={agreed}")
+
+    return llm_result
+
+
+def get_overlap_gate_stats() -> dict:
+    """Counters plus `skip_precision`: of the cases where Laya's
+    confidence cleared the threshold (would have been skipped in "on"
+    mode), the fraction where it agreed with what the real LLM
+    arbitration then decided. None with no data yet. Check this is very
+    close to 1.0 before setting LAYA_OVERLAP_ARBITRATION=on."""
+    counts = {name: laya_gate.read_counter(_OVERLAP_COUNTER_PREFIX + name)
+              for name in _OVERLAP_COUNTERS}
+    would = counts["would_skip"]
+    counts["skip_precision"] = (1.0 - counts["would_skip_wrong"] / would) if would else None
+    return counts
 
 
 def _topic_vector_id(workspace_id: str, topic_id: str) -> str:
@@ -182,7 +314,7 @@ def check_topic(workspace_id: str, topic_id: str, name: str, summary: str,
         if candidates and candidates[0]["score"] >= HIGH_THRESHOLD:
             result = {"tag": "duplicate", "target_topic_id": candidates[0]["topic_id"]}
         elif candidates:
-            result = _llm_arbitrate(
+            result = _arbitrate(
                 {"name": name, "summary": summary}, candidates[:TOP_K],
                 session_id=session_id,
             )

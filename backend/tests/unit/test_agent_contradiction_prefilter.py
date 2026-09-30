@@ -343,3 +343,203 @@ class TestRunSideEffects:
 
         contradiction_prefilter.run()
         assert not any(k.startswith("stage_output:") for k in writes)
+
+
+# ---------------------------------------------------------------------
+# Laya pre-gate (Tier 4 of the Laya migration, 2026-09-29) -- a second,
+# optional narrowing pass over the keyword pass's own candidate pairs.
+# The suite-wide conftest.py autouse fixture forces
+# LAYA_CONTRADICTION_MODE = "off"; each test below opts back in by
+# monkeypatching it directly. laya_gate.predict is monkeypatched -- no
+# model is loaded.
+# ---------------------------------------------------------------------
+def _pairs_from(rows):
+    return contradiction_prefilter._find_candidate_pairs(rows)
+
+
+# NOTE: "no significant change" would match BOTH POSITIVE_TERMS
+# ("significant") and NEGATIVE_TERMS ("no significant") in
+# contradiction_prefilter.py's own crude keyword lists, making
+# _polarity() return None (ambiguous) rather than "negative" -- avoided
+# here on purpose so this fixture reliably produces exactly two pairs.
+TWO_PAIR_ROWS = [
+    _row("Paper A", "adults with insomnia", "a clear increase in sleep", node_id="na"),
+    _row("Paper B", "adults with insomnia", "showed no effect", node_id="nb"),
+    _row("Paper C", "children with adhd", "a clear benefit was observed", node_id="nc"),
+    _row("Paper D", "children with adhd", "no association was found", node_id="nd"),
+]
+
+
+def _genuine(p):
+    return {"answers": {"genuine": {"type": "noul", "noul": p}}}
+
+
+class TestLayaGateOff:
+    def test_gate_off_returns_pairs_unchanged_and_makes_no_call(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "off")
+        calls = []
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: calls.append(1))
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        result = contradiction_prefilter._laya_screen_pairs(pairs)
+        assert result == pairs
+        assert calls == []
+
+    def test_empty_pairs_makes_no_call_even_when_mode_is_on(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
+        calls = []
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: calls.append(1))
+        assert contradiction_prefilter._laya_screen_pairs([]) == []
+        assert calls == []
+
+
+class TestLayaGateObserve:
+    def test_observe_mode_never_drops_a_pair(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "observe")
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.01))
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        result = contradiction_prefilter._laya_screen_pairs(pairs)
+        assert len(result) == len(pairs) == 2
+
+    def test_observe_mode_counts_would_drop_but_does_not_drop(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "observe")
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.02))
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        result = contradiction_prefilter._laya_screen_pairs(pairs)
+        assert len(result) == 2
+        stats = contradiction_prefilter.get_contradiction_prefilter_stats()
+        assert stats["would_drop"] == 2 and stats["dropped"] == 0
+
+    def test_observe_mode_high_confidence_genuine_is_not_counted_as_would_drop(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "observe")
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.9))
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        contradiction_prefilter._laya_screen_pairs(pairs)
+        assert contradiction_prefilter.get_contradiction_prefilter_stats()["would_drop"] == 0
+
+
+class TestLayaGateOn:
+    def test_on_mode_drops_confident_false_positives(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.02))
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        result = contradiction_prefilter._laya_screen_pairs(pairs)
+        assert result == []
+        assert contradiction_prefilter.get_contradiction_prefilter_stats()["dropped"] == 2
+
+    def test_on_mode_keeps_pairs_above_the_drop_threshold(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.5))
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        result = contradiction_prefilter._laya_screen_pairs(pairs)
+        assert result == pairs
+
+    def test_on_mode_can_drop_only_some_pairs(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
+        replies = iter([_genuine(0.02), _genuine(0.8)])   # drop first pair, keep second
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: next(replies))
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        result = contradiction_prefilter._laya_screen_pairs(pairs)
+        assert len(result) == 1
+        assert result[0] == pairs[1]
+
+    def test_on_mode_never_adds_a_pair_the_keyword_pass_did_not_find(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.99))
+        assert contradiction_prefilter._laya_screen_pairs([]) == []
+
+    def test_on_mode_keeps_a_pair_when_laya_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: None)
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        result = contradiction_prefilter._laya_screen_pairs(pairs)
+        assert result == pairs   # fail open to "keep", same as a keyword false negative
+
+    def test_on_mode_keeps_a_pair_when_laya_raises(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", boom)
+        pairs = _pairs_from(TWO_PAIR_ROWS)
+        assert contradiction_prefilter._laya_screen_pairs(pairs) == pairs
+
+
+class TestLayaScreenPairHelper:
+    def test_sends_population_and_both_outcomes(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict",
+                            lambda state, q, site="u": seen.update(state=state, site=site) or _genuine(0.5))
+        pair = _pairs_from(TWO_PAIR_ROWS)[0]
+        contradiction_prefilter._laya_screen_pair(pair)
+        assert seen["state"]["population"] == "adults with insomnia"
+        assert "increase" in seen["state"]["outcome_a"]
+        assert "no effect" in seen["state"]["outcome_b"]
+        assert seen["site"] == "contradiction_prefilter.screen_pair"
+
+    def test_returns_none_on_malformed_result(self, monkeypatch):
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: {"answers": {}})
+        pair = _pairs_from(TWO_PAIR_ROWS)[0]
+        assert contradiction_prefilter._laya_screen_pair(pair) is None
+
+
+class TestRunWiresInTheScreeningPass:
+    """run() itself: with the gate off (conftest default), the screening
+    pass must be a no-op so run()'s existing behavior (covered by
+    TestRunSideEffects above) is unaffected. Same fixture pattern as
+    TestRunSideEffects: monkeypatch `read`/`create_edge`/`write_node`/
+    `write` directly rather than going through a real bus/graph backend.
+    """
+
+    def test_run_pair_count_unaffected_when_gate_is_off(self, fake_bus, monkeypatch):
+        rows = [
+            _row("A", "adults", "a clear increase", node_id="n1"),
+            _row("B", "adults", "showed no effect", node_id="n2"),
+        ]
+        monkeypatch.setattr(
+            contradiction_prefilter, "read",
+            lambda key, **k: {"papers": rows} if key == contradiction_prefilter.KEYS["extraction_table"]
+            else None,
+        )
+        monkeypatch.setattr(contradiction_prefilter, "create_edge", lambda *a, **k: {"edge_id": "e1"})
+        monkeypatch.setattr(contradiction_prefilter, "write_node", lambda **k: "node_g1")
+        monkeypatch.setattr(contradiction_prefilter, "write", lambda *a, **k: None)
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "off")
+        calls = []
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: calls.append(1))
+
+        result = contradiction_prefilter.run()
+
+        assert len(result["candidate_pairs"]) == 1
+        assert calls == []
+
+    def test_run_drops_a_pair_when_gate_is_on_and_confident(self, fake_bus, monkeypatch):
+        rows = [
+            _row("A", "adults", "a clear increase", node_id="n1"),
+            _row("B", "adults", "showed no effect", node_id="n2"),
+        ]
+        monkeypatch.setattr(
+            contradiction_prefilter, "read",
+            lambda key, **k: {"papers": rows} if key == contradiction_prefilter.KEYS["extraction_table"]
+            else None,
+        )
+        monkeypatch.setattr(contradiction_prefilter, "create_edge", lambda *a, **k: {"edge_id": "e1"})
+        monkeypatch.setattr(contradiction_prefilter, "write_node", lambda **k: "node_g1")
+        monkeypatch.setattr(contradiction_prefilter, "write", lambda *a, **k: None)
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
+        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
+        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.01))
+
+        result = contradiction_prefilter.run()
+
+        assert result["candidate_pairs"] == []
+        assert result["edges_written"] == 0
+
+
+class TestContradictionPrefilterStats:
+    def test_stats_are_zero_with_no_data(self):
+        stats = contradiction_prefilter.get_contradiction_prefilter_stats()
+        assert stats == {"would_drop": 0, "dropped": 0}
