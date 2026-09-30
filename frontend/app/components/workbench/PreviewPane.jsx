@@ -30,19 +30,32 @@
 // WorkbenchBody's plumbing, passed down as plain props the same way
 // CodeEditor and Explorer already receive them.
 //
+// W6.7 — previewing a proposal before keeping it. While an AI edit is
+// open for review (`state.review`), every provider reads an `overlay`
+// laid over the project's files — `{path: content|null}` from
+// reviewMode.js's reviewPreviewOverlay(), i.e. exactly what pressing
+// Done right now would leave on disk (undo a hunk and the preview
+// follows). A ribbon above the preview says so, with a "Show original"
+// toggle that drops the overlay (the preview then reads the ordinary
+// buffers again). The overlay is checked BEFORE buffers in
+// makeResolver() because a review replaces the tabs+editor area, so
+// the buffer for a file under review is the pre-proposal text. It is
+// read-only plumbing: nothing here writes to a buffer or the server.
+//
 // Security posture: sandbox="allow-scripts" only, matching
 // ArtifactRenderer.jsx/WireframePreview.jsx exactly (see either file's
 // own header for why "allow-scripts" alone, no allow-same-origin, no
 // allow-forms, is enough and deliberately not more).
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Crosshair, ExternalLink, Loader2, Monitor, Play, RefreshCw, Smartphone, Tablet } from "lucide-react";
 import { useEditorStore } from "../../lib/workbench/editorStore";
 import { detectKind } from "../../lib/preview/detectKind";
 import { bundleStatic } from "../../lib/preview/bundleStatic";
 import { injectConsoleBridge } from "../../lib/preview/consoleBridge";
 import { injectInspectorRuntime } from "../../lib/preview/inspectorRuntime";
-import { extractMmRanges, innermostMmAt } from "../../lib/preview/mmRange";
+import { extractMmRanges, innermostMmAt, parseMm } from "../../lib/preview/mmRange";
 import { elementFromMessage } from "../../lib/workbench/elementRef";
+import { reviewPreviewOverlay, applyOverlayToMeta, sameOverlay } from "../../lib/workbench/reviewMode"; // W6.7
 import { instrumentSource } from "../../lib/preview/instrument"; // W6.6
 import { shouldBundleFile, pickReactEntry, parseDependencies, withInjectedImport, inspectorPathFor } from "../../lib/preview/reactBundle"; // W6.6
 import { buildMmInspectorFileContent } from "../../lib/preview/mmInspectorFile"; // W6.6
@@ -85,9 +98,15 @@ const DEVICE_PRESETS = [
  * listing doesn't carry one the way the cloud provider's does) always
  * bypasses the cache and re-fetches — correctness over a cache hit for
  * a case this patch's own "Done when" doesn't specifically target.
+ *
+ * W6.7: `overlay` (a proposal under review — see this file's header)
+ * wins over everything: a string is that path's proposed content, and
+ * `null` means the proposal deletes it (→ "not found", which
+ * bundleStatic turns into a warning rather than a crash).
  */
-function makeResolver({ provider, filesMeta, buffers, cacheRef }) {
+function makeResolver({ provider, filesMeta, buffers, cacheRef, overlay }) {
   return async function resolveFile(path) {
+    if (overlay && path in overlay) return overlay[path];
     const buf = buffers[path];
     if (buf) return buf.edited; // open tab -- always the freshest possible content, unsaved edits included
 
@@ -172,7 +191,7 @@ function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warning
   );
 }
 
-function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement }) {
+function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement, overlay }) {
   const { state, consoleMessage } = useEditorStore();
   const [device, setDevice] = useState("desktop");
   const [built, setBuilt] = useState(null); // {html, warnings} | null while building the first time
@@ -214,11 +233,20 @@ function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    // W6.7: a build still in flight when its inputs change (most
+    // visibly the ribbon's original/proposed toggle) must not land
+    // afterwards and overwrite the newer one — the cleanup below flips
+    // this, and every state write after an await checks it.
+    let cancelled = false;
     debounceRef.current = setTimeout(async () => {
       try {
-        const entryContent = buffers[entryPath]?.edited ?? (await provider.read(entryPath)).content ?? "";
-        const resolveFile = makeResolver({ provider, filesMeta, buffers, cacheRef });
+        const entryContent =
+          overlay && entryPath in overlay
+            ? (overlay[entryPath] ?? "")
+            : (buffers[entryPath]?.edited ?? (await provider.read(entryPath)).content ?? "");
+        const resolveFile = makeResolver({ provider, filesMeta, buffers, cacheRef, overlay });
         const result = await bundleStatic({ entryPath, entryContent, resolveFile });
+        if (cancelled) return;
         // W6.2: inject the console/error bridge into every build, not
         // only on reload — the plan's own "Done when" is "a throw...
         // shows in Console within a second" while typing, so a rebuild
@@ -236,17 +264,20 @@ function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement
         setBuilt({ html, warnings: result.warnings, ranges });
         setBuildError(null);
       } catch (err) {
-        setBuildError(err?.message || String(err));
+        if (!cancelled) setBuildError(err?.message || String(err));
       }
     }, DEBOUNCE_MS);
-    return () => clearTimeout(debounceRef.current);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounceRef.current);
+    };
     // buffers is state.buffers's own object reference, which the
     // reducer replaces on every dispatch (including every keystroke's
     // EDIT_BUFFER) -- that's the "updates as you type" behavior the
     // plan's own "Done when" asks for, debounced by the timer above
     // rather than by narrowing this dependency list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entryPath, filesMeta, buffers, reloadNonce]);
+  }, [entryPath, filesMeta, buffers, reloadNonce, overlay]);
 
   // W6.2: the parent half of the bridge — one listener for this pane's
   // whole lifetime (not re-subscribed per build), reading the CURRENT
@@ -450,7 +481,7 @@ function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement
 // (does postMessage really reach us the way §5's own "prototype first"
 // note wonders) this patch cannot verify in a real browser. Keeping the
 // two independent means a surprise here can't regress the static path.
-function ReactPreview({ provider, filesMeta, cursor, onSelectElement }) {
+function ReactPreview({ provider, filesMeta, cursor, onSelectElement, overlay }) {
   const { state, consoleMessage } = useEditorStore();
   const [device, setDevice] = useState("desktop");
   const [assembled, setAssembled] = useState(null); // {files, dependencies, entry, nonce, ranges, warnings} | null
@@ -465,9 +496,10 @@ function ReactPreview({ provider, filesMeta, cursor, onSelectElement }) {
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    let cancelled = false; // W6.7 — same reason as StaticPreview's
     debounceRef.current = setTimeout(async () => {
       try {
-        const resolveFile = makeResolver({ provider, filesMeta, buffers, cacheRef });
+        const resolveFile = makeResolver({ provider, filesMeta, buffers, cacheRef, overlay });
         const paths = Object.keys(filesMeta || {}).filter(shouldBundleFile);
         const warnings = [];
 
@@ -486,6 +518,7 @@ function ReactPreview({ provider, filesMeta, cursor, onSelectElement }) {
             return [path, result.code];
           })
         );
+        if (cancelled) return;
         const files = Object.fromEntries(entries);
         const ranges = extractMmRanges(Object.values(files).join("\n"));
         const entry = pickReactEntry(paths);
@@ -509,12 +542,15 @@ function ReactPreview({ provider, filesMeta, cursor, onSelectElement }) {
         setAssembled({ files: sandpackFiles, dependencies, entry: entry ? `/${entry}` : undefined, nonce, ranges, warnings });
         setAssembleError(null);
       } catch (err) {
-        setAssembleError(err?.message || String(err));
+        if (!cancelled) setAssembleError(err?.message || String(err));
       }
     }, DEBOUNCE_MS);
-    return () => clearTimeout(debounceRef.current);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounceRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filesMeta, buffers]);
+  }, [filesMeta, buffers, overlay]);
 
   return (
     <div className="h-full min-h-0 flex flex-col">
@@ -682,7 +718,7 @@ function SandpackReactBridge({ nonce, ranges, cursor, activePath, onSelectElemen
   );
 }
 
-function PythonPreview({ filesMeta }) {
+function PythonPreview({ filesMeta, overlay }) {
   const { run } = usePyodideWorker();
   const [status, setStatus] = useState("idle"); // idle | loading | ok | error
   const [result, setResult] = useState(null);
@@ -700,6 +736,19 @@ function PythonPreview({ filesMeta }) {
 
   const { state } = useEditorStore();
 
+  // W6.7: is the file Run would execute coming from a proposal? Python
+  // has no live rebuild (see this component's own header note), so the
+  // output on screen belongs to whichever version was last run —
+  // flipping the ribbon's toggle clears it rather than leaving the
+  // ORIGINAL's output sitting under a "previewing proposed changes"
+  // ribbon (or the reverse).
+  const usingProposed = !!(overlay && entryPath && entryPath in overlay);
+  useEffect(() => {
+    setStatus("idle");
+    setResult(null);
+    setError(null);
+  }, [usingProposed]);
+
   async function handleRun() {
     setStatus("loading");
     setError(null);
@@ -710,7 +759,7 @@ function PythonPreview({ filesMeta }) {
       // -- PreviewPane passes `provider` down to StaticPreview only
       // today; wiring it here too is a reasonable, small follow-up once
       // "run the file as currently saved" turns out not to be enough.
-      const code = state.buffers[entryPath]?.edited;
+      const code = usingProposed ? overlay[entryPath] : state.buffers[entryPath]?.edited;
       const payload = await run(code ?? "");
       setResult(payload);
       setStatus("ok");
@@ -730,6 +779,7 @@ function PythonPreview({ filesMeta }) {
     <div className="h-full min-h-0 overflow-auto p-3 space-y-2">
       <p className="text-[11px] text-[var(--neutral-500)]">
         Running <span className="text-[var(--neutral-300)] font-mono">{entryPath}</span>
+        {usingProposed && <span className="text-amber-400"> · proposed version</span>}
       </p>
       <button
         type="button"
@@ -765,15 +815,86 @@ function EmptyState({ title, detail }) {
   );
 }
 
+// W6.7: the strip above the preview while a proposal is under review.
+// Amber on purpose (same colour PreviewPane already uses for "heads up"
+// warnings) — this is a preview of something that hasn't happened yet,
+// and it should never be mistaken for the real current state.
+function ProposalRibbon({ showingProposed, changedCount, onToggle }) {
+  const nothingKept = showingProposed && changedCount === 0;
+  return (
+    <div
+      role="status"
+      className="shrink-0 flex items-center justify-between gap-2 px-2 py-1 border-b border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-300"
+    >
+      <span className="truncate">
+        {!showingProposed
+          ? "Showing original — your current files"
+          : nothingKept
+            ? "Every change in this AI edit is undone — nothing to preview"
+            : `Previewing proposed changes · ${changedCount} file${changedCount === 1 ? "" : "s"}`}
+      </span>
+      {!nothingKept && (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-pressed={!showingProposed}
+          className="shrink-0 underline underline-offset-2 hover:text-amber-200"
+        >
+          {showingProposed ? "Show original" : "Show proposed"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * @param {object} props
  * @param {object} props.provider - the active FileProvider (WorkbenchBody's own, same one CodeEditor/Explorer use)
  * @param {{[path: string]: object}|null} props.filesMeta - FileProvider.list()'s result; null until the first load lands
  * @param {{line: number, col: number}|null} [props.cursor] - W6.5: the ACTIVE editor file's caret (CodeEditor's own 1-based report); drives the reverse highlight
- * @param {(selection: {mm: string, element: object}) => void} [props.onSelectElement] - W6.5: a click in the preview's inspect mode, already sanitized by elementRef.js's elementFromMessage()
+ * @param {(selection: {mm: string, element: object, sourceText?: string}) => void} [props.onSelectElement] - W6.5: a click in the preview's inspect mode, already sanitized by elementRef.js's elementFromMessage(). W6.7: `sourceText` is added when the clicked file is previewing a proposal (its data-mm ranges were computed against THAT text, not the file's buffer)
  */
 function PreviewPane({ provider, filesMeta, cursor, onSelectElement }) {
-  const detected = useMemo(() => detectKind(filesMeta || {}), [filesMeta]);
+  // W6.7: which review (if any) the person has flipped to "Show
+  // original" for. Keyed by proposal id rather than a bare boolean so
+  // opening a different review starts on the proposed version again,
+  // with no reset effect needed.
+  const { state } = useEditorStore();
+  const review = state.review;
+  const proposalId = review?.proposalId ?? null;
+  const [originalFor, setOriginalFor] = useState(null);
+  const showOriginal = proposalId != null && originalFor === proposalId;
+
+  // The overlay object keeps its identity across review updates that
+  // don't change any file's resulting text (REVIEW_FILE_UPDATE also
+  // carries +/- stats), because it's in the preview's rebuild effects'
+  // dependency lists — a new object every time would re-bundle for
+  // nothing.
+  const overlayRef = useRef(null);
+  const proposedOverlay = useMemo(() => {
+    if (!review) return null;
+    const next = reviewPreviewOverlay(review);
+    if (overlayRef.current && sameOverlay(overlayRef.current, next)) return overlayRef.current;
+    overlayRef.current = next;
+    return next;
+  }, [review]);
+  const overlay = showOriginal ? null : proposedOverlay;
+
+  const effectiveMeta = useMemo(() => applyOverlayToMeta(filesMeta, overlay), [filesMeta, overlay]);
+  const detected = useMemo(() => detectKind(effectiveMeta || {}), [effectiveMeta]);
+
+  // A click on an element whose file is previewing a proposal: hand the
+  // workbench the text its data-mm range was computed from, so the
+  // chip's snippet matches what was actually clicked.
+  const handleSelectElement = useCallback(
+    (selection) => {
+      if (!onSelectElement) return;
+      const parsed = parseMm(selection?.mm);
+      const text = parsed && overlay ? overlay[parsed.path] : undefined;
+      onSelectElement(typeof text === "string" ? { ...selection, sourceText: text } : selection);
+    },
+    [onSelectElement, overlay]
+  );
 
   if (!filesMeta) {
     return (
@@ -783,24 +904,44 @@ function PreviewPane({ provider, filesMeta, cursor, onSelectElement }) {
     );
   }
 
+  let body;
   if (detected.kind === "static") {
-    return (
+    body = (
       <StaticPreview
         provider={provider}
-        filesMeta={filesMeta}
+        filesMeta={effectiveMeta}
         entryPath={detected.entryPath}
         cursor={cursor}
-        onSelectElement={onSelectElement}
+        onSelectElement={handleSelectElement}
+        overlay={overlay}
       />
     );
+  } else if (detected.kind === "python") {
+    body = <PythonPreview filesMeta={effectiveMeta} overlay={overlay} />;
+  } else if (detected.kind === "react") {
+    body = <ReactPreview provider={provider} filesMeta={effectiveMeta} cursor={cursor} onSelectElement={handleSelectElement} overlay={overlay} />;
+  } else {
+    body = <EmptyState title="No preview available for this project type" detail={detected.reason} />;
   }
-  if (detected.kind === "python") {
-    return <PythonPreview filesMeta={filesMeta} />;
-  }
-  if (detected.kind === "react") {
-    return <ReactPreview provider={provider} filesMeta={filesMeta} cursor={cursor} onSelectElement={onSelectElement} />;
-  }
-  return <EmptyState title="No preview available for this project type" detail={detected.reason} />;
+
+  // The wrapper is ALWAYS rendered (only the ribbon is conditional) so
+  // `body` keeps the same position in the tree whether or not a review
+  // is open. Switching between "bare body" and "wrapper + body" would
+  // make React unmount and remount the preview every time a review
+  // opens or closes — reloading the iframe and dropping the device
+  // preset, inspect mode and a Python run's output for no reason.
+  return (
+    <div className="h-full min-h-0 flex flex-col">
+      {review && (
+        <ProposalRibbon
+          showingProposed={!showOriginal}
+          changedCount={Object.keys(proposedOverlay || {}).length}
+          onToggle={() => setOriginalFor(showOriginal ? null : proposalId)}
+        />
+      )}
+      <div className="flex-1 min-h-0">{body}</div>
+    </div>
+  );
 }
 
 export default PreviewPane;
