@@ -50,6 +50,7 @@ from datetime import UTC, datetime
 
 from eo import db, workspace_code_files
 from eo.audit_log import write_audit
+from eo.code_element_context import normalize_element_refs
 from eo.workspace_code_files import VersionConflictError
 from relay.emitter import EventType, emit_workspace_event
 
@@ -583,7 +584,11 @@ def create_proposal(ws_id: str, instruction: str, refs: list[dict],
     """
     if not instruction or not instruction.strip():
         raise ValueError("instruction cannot be empty")
-    refs = refs or []
+    # W7.1a: an element chip's `element` object is page data from the
+    # preview iframe — sanitized here (shape, types, lengths) so what is
+    # stored on the row, and what reaches the agent, is never the raw
+    # request blob. A no-op for refs without an `element` key.
+    refs = normalize_element_refs(refs or [])
     stored_refs, effective_refs = _expand_refs(refs, ws_id)
     paths = _paths_from_refs(effective_refs)
 
@@ -593,7 +598,14 @@ def create_proposal(ws_id: str, instruction: str, refs: list[dict],
         generate_edit = _default_generate_edit(session_id)
     try:
         result = generate_edit(ws_id, instruction, refs, current_files)
-        files = _build_files_payload(result.get("files", []), current_files)
+        # W7.1a: files the generator read on its own (a stylesheet it was
+        # shown for an element chip) come back as `extra_files` — the
+        # snapshot it edited against. Without it such a file would be
+        # stored as base_version 0 / original "", which makes Keep abort
+        # as "stale" and the review diff show the whole file as added.
+        # What create_proposal read up front always wins.
+        snapshot = {**(result.get("extra_files") or {}), **current_files}
+        files = _build_files_payload(result.get("files", []), snapshot)
         summary = result.get("summary") or instruction
         model_meta = result.get("model_meta") or {}
         status = "pending"
