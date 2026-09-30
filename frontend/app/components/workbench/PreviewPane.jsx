@@ -8,8 +8,10 @@
 //   - "static": the actual meat of this patch — live-bundles
 //     index.html + its local <link>/<script> files into one srcDoc,
 //     re-reading on every relevant change (debounced ~400ms).
-//   - "react": detected, but W6.6 is the patch that actually renders
-//     it (Sandpack) — a clear "coming later" message, not a dead end.
+//   - "react": W6.6 — Sandpack (hidden editor, preview only), the same
+//     console+inspector bridge as "static" carried in as a project file
+//     instead of injected into an HTML document (see
+//     lib/preview/mmInspectorFile.js's own header for why).
 //   - "python": runs through the SAME usePyodideWorker.js worker
 //     ArtifactRenderer.jsx's PythonArtifact already uses — click Run,
 //     see stdout/stderr, no live-typing auto-run (Pyodide's own
@@ -41,6 +43,10 @@ import { injectConsoleBridge } from "../../lib/preview/consoleBridge";
 import { injectInspectorRuntime } from "../../lib/preview/inspectorRuntime";
 import { extractMmRanges, innermostMmAt } from "../../lib/preview/mmRange";
 import { elementFromMessage } from "../../lib/workbench/elementRef";
+import { instrumentSource } from "../../lib/preview/instrument"; // W6.6
+import { shouldBundleFile, pickReactEntry, parseDependencies, withInjectedImport, inspectorPathFor } from "../../lib/preview/reactBundle"; // W6.6
+import { buildMmInspectorFileContent } from "../../lib/preview/mmInspectorFile"; // W6.6
+import { SandpackProvider, SandpackPreview, useSandpack } from "@codesandbox/sandpack-react"; // W6.6
 import { usePyodideWorker } from "../../hooks/usePyodideWorker";
 
 // W6.2: a fresh nonce per successful build, NOT per component mount —
@@ -101,8 +107,8 @@ function makeResolver({ provider, filesMeta, buffers, cacheRef }) {
 // Module-level (reads only the two refs it's handed) so the message
 // listener effect below can call it without listing a per-render
 // function in its dependency array.
-function postToFrame(iframeRef, nonceRef, message) {
-  iframeRef.current?.contentWindow?.postMessage({ source: "minime-parent", nonce: nonceRef.current, ...message }, "*");
+function postToFrame(iframeRef, nonce, message) {
+  iframeRef.current?.contentWindow?.postMessage({ source: "minime-parent", nonce, ...message }, "*");
 }
 
 function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings, inspecting, onToggleInspect }) {
@@ -291,7 +297,7 @@ function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement
         // off, so leaving it on would strand the person in a mode with
         // no keyboard exit.
         setInspecting(false);
-        postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: false });
+        postToFrame(iframeRef, nonceRef.current, { type: "minime:inspect", on: false });
         return;
       }
       if (data.type === "minime:inspectExited") {
@@ -317,7 +323,7 @@ function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement
   function handleToggleInspect() {
     const next = !inspecting;
     setInspecting(next);
-    postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: next });
+    postToFrame(iframeRef, nonceRef.current, { type: "minime:inspect", on: next });
   }
 
   // A rebuild swaps srcDoc, which reloads the frame into a FRESH
@@ -328,8 +334,8 @@ function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement
   // load, not just when set, so a runtime that somehow kept state can't
   // disagree with the toolbar / editor either.
   function handleIframeLoad() {
-    postToFrame(iframeRef, nonceRef, { type: "minime:inspect", on: inspecting });
-    postToFrame(iframeRef, nonceRef, { type: "minime:highlight", mm: highlightMmRef.current });
+    postToFrame(iframeRef, nonceRef.current, { type: "minime:inspect", on: inspecting });
+    postToFrame(iframeRef, nonceRef.current, { type: "minime:highlight", mm: highlightMmRef.current });
   }
 
   // W6.5, reverse direction: the innermost element containing the
@@ -343,7 +349,7 @@ function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement
   );
   useEffect(() => {
     highlightMmRef.current = highlightMm;
-    postToFrame(iframeRef, nonceRef, { type: "minime:highlight", mm: highlightMm });
+    postToFrame(iframeRef, nonceRef.current, { type: "minime:highlight", mm: highlightMm });
   }, [highlightMm]);
 
   function handleReload() {
@@ -412,6 +418,267 @@ function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement
         )}
       </div>
     </div>
+  );
+}
+
+// W6.6 (Build Workbench plan) — the "react" provider: Sandpack, hidden
+// editor (only <SandpackPreview> is mounted — same "no code tab, just
+// the rendered output" choice ArtifactRenderer.jsx already made for its
+// own model-generated React artifacts), the project's REAL files
+// (buffers preferred, matching StaticPreview's own makeResolver), and
+// the same console+inspector bridge as the static preview — just
+// carried in as a project file instead of injected into an HTML
+// document. See lib/preview/mmInspectorFile.js's own header for why
+// that split exists (Sandpack's bundler iframe is cross-origin; there
+// is no HTML this app can parse5-inject a <script> into the way
+// bundleStatic.js's output allows).
+//
+// Two components, not one, because useSandpack() only works inside
+// <SandpackProvider>: ReactPreview assembles the files/dependencies and
+// renders the provider; SandpackReactBridge is the actual consumer,
+// mounted as its child, doing everything that needs the live Sandpack
+// client (finding the iframe, wiring the message channel, the reverse
+// highlight). This mirrors BuildTab.jsx's own CodeAwareChatPanel split
+// (a provider a component can't read from itself, and a child that
+// can) for the identical reason.
+//
+// Message handling here is intentionally NOT shared with StaticPreview's
+// own onMessage effect via a common hook, even though the logic is very
+// similar — extracting one would mean touching StaticPreview's already
+// -working, already-tested implementation as part of THIS step, for a
+// feature (React/Sandpack) whose own underlying platform behavior
+// (does postMessage really reach us the way §5's own "prototype first"
+// note wonders) this patch cannot verify in a real browser. Keeping the
+// two independent means a surprise here can't regress the static path.
+function ReactPreview({ provider, filesMeta, cursor, onSelectElement }) {
+  const { state, consoleMessage } = useEditorStore();
+  const [device, setDevice] = useState("desktop");
+  const [assembled, setAssembled] = useState(null); // {files, dependencies, entry, nonce, ranges, warnings} | null
+  const [assembleError, setAssembleError] = useState(null);
+  const [inspecting, setInspecting] = useState(false);
+  const [lastSelection, setLastSelection] = useState(null);
+  const cacheRef = useRef(new Map());
+  const debounceRef = useRef(null);
+  const consoleIdRef = useRef(0);
+
+  const buffers = state.buffers;
+
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const resolveFile = makeResolver({ provider, filesMeta, buffers, cacheRef });
+        const paths = Object.keys(filesMeta || {}).filter(shouldBundleFile);
+        const warnings = [];
+
+        // Every file instrumented (W6.3's JSX half, finally wired in —
+        // instrumentSource() itself already no-ops for anything that
+        // isn't .js/.jsx/.ts/.tsx/.html, so this doesn't need its own
+        // per-extension branch the way bundleStatic.js's entry-only
+        // instrumentation does; a React project's clickable surface IS
+        // its JSX, unlike a static project's separate script files —
+        // see bundleStatic.js's own header for that comparison).
+        const entries = await Promise.all(
+          paths.map(async (path) => {
+            const content = await resolveFile(path);
+            const result = await instrumentSource(content, path);
+            if (result.note) warnings.push(`${path}: ${result.note}`);
+            return [path, result.code];
+          })
+        );
+        const files = Object.fromEntries(entries);
+        const ranges = extractMmRanges(Object.values(files).join("\n"));
+        const entry = pickReactEntry(paths);
+        const { dependencies } = parseDependencies(files["package.json"] ?? null);
+        const nonce = makeNonce();
+
+        let finalFiles = files;
+        if (entry) {
+          const inspectorPath = inspectorPathFor(entry);
+          finalFiles = {
+            ...withInjectedImport(files, entry, "./mm-inspector.js"),
+            [inspectorPath]: buildMmInspectorFileContent(nonce),
+          };
+        } else {
+          warnings.push("No recognized entry file (looked for src/main.jsx, src/index.js, etc.) — the preview will still try to run, but click-to-code and the console won't be available.");
+        }
+
+        // Sandpack's own path convention: every files/entry key carries
+        // a leading "/" (see ArtifactRenderer.jsx's own "/App.js").
+        const sandpackFiles = Object.fromEntries(Object.entries(finalFiles).map(([path, code]) => [`/${path}`, code]));
+        setAssembled({ files: sandpackFiles, dependencies, entry: entry ? `/${entry}` : undefined, nonce, ranges, warnings });
+        setAssembleError(null);
+      } catch (err) {
+        setAssembleError(err?.message || String(err));
+      }
+    }, DEBOUNCE_MS);
+    return () => clearTimeout(debounceRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filesMeta, buffers]);
+
+  return (
+    <div className="h-full min-h-0 flex flex-col">
+      <DeviceToolbar
+        device={device}
+        onDeviceChange={setDevice}
+        onReload={() => {}}
+        onOpenNewTab={() => {}}
+        warnings={assembled?.warnings}
+        inspecting={inspecting}
+        onToggleInspect={() => setInspecting((v) => !v)}
+      />
+      {lastSelection && (
+        <div className="shrink-0 flex items-center gap-2 px-2 py-1 border-b border-[var(--neutral-800)] font-mono text-[10px] text-[var(--neutral-400)]" title={lastSelection.mm}>
+          <span className="truncate">
+            {lastSelection.tag}
+            {lastSelection.classes.length > 0 ? `.${lastSelection.classes.join(".")}` : ""}
+          </span>
+          <span className="shrink-0 text-[var(--neutral-600)]">{lastSelection.mm}</span>
+          {lastSelection.dynamic && <span className="shrink-0 text-amber-400">dynamic — nearest source element</span>}
+          {lastSelection.instanceCount > 1 && <span className="shrink-0 text-[var(--neutral-500)]">×{lastSelection.instanceCount}</span>}
+        </div>
+      )}
+      <div className="flex-1 min-h-0 overflow-auto bg-[var(--neutral-900)] flex justify-center">
+        {assembleError ? (
+          <div className="p-4 text-xs text-red-400 whitespace-pre-wrap">{assembleError}</div>
+        ) : !assembled ? (
+          <div className="flex items-center gap-1.5 text-xs text-[var(--neutral-500)] m-auto">
+            <Loader2 size={12} className="animate-spin" /> Building preview…
+          </div>
+        ) : (
+          <div className="h-full" style={{ width: DEVICE_PRESETS.find((p) => p.id === device)?.width ?? "100%" }}>
+            {/* key={assembled.entry+deps} would force a full remount on
+                every keystroke (Sandpack re-bundles happily on a files
+                PROP change already); keying on nothing lets Sandpack do
+                its own incremental rebuild, the same "typing recompiles,
+                doesn't restart the whole client" behavior its HMR is
+                for. */}
+            <SandpackProvider
+              template="react"
+              theme="dark"
+              files={assembled.files}
+              customSetup={{ entry: assembled.entry, dependencies: assembled.dependencies }}
+              style={{ height: "100%", width: "100%" }}
+            >
+              <SandpackReactBridge
+                nonce={assembled.nonce}
+                ranges={assembled.ranges}
+                cursor={cursor}
+                activePath={state.activePath}
+                onSelectElement={onSelectElement}
+                consoleMessage={consoleMessage}
+                inspecting={inspecting}
+                setInspecting={setInspecting}
+                setLastSelection={setLastSelection}
+                consoleIdRef={consoleIdRef}
+              />
+            </SandpackProvider>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The actual Sandpack consumer — see ReactPreview's own header for why
+// this is split out as a child rather than folded into it.
+function SandpackReactBridge({ nonce, ranges, cursor, activePath, onSelectElement, consoleMessage, inspecting, setInspecting, setLastSelection, consoleIdRef }) {
+  const previewRef = useRef(null);
+  const iframeRef = useRef(null);
+  const { sandpack } = useSandpack();
+
+  // getClient() is null until Sandpack has actually created its runtime
+  // client — re-checked on every status change rather than assumed
+  // ready after some fixed delay or a single mount-time read.
+  useEffect(() => {
+    iframeRef.current = previewRef.current?.getClient?.()?.iframe || null;
+  }, [sandpack.status]);
+
+  useEffect(() => {
+    function onMessage(event) {
+      if (!iframeRef.current || event.source !== iframeRef.current.contentWindow) return;
+      const data = event.data;
+      if (!data || data.source !== "minime-preview" || data.nonce !== nonce) return;
+      if (data.type === "minime:select") {
+        const selection = elementFromMessage(data);
+        if (!selection) return;
+        setLastSelection({ mm: selection.mm, ...selection.element });
+        onSelectElement?.(selection);
+        setInspecting(false);
+        postToFrame(iframeRef, nonce, { type: "minime:inspect", on: false });
+        return;
+      }
+      if (data.type === "minime:inspectExited") {
+        setInspecting(false);
+        return;
+      }
+      consoleIdRef.current += 1;
+      consoleMessage({
+        id: consoleIdRef.current,
+        type: typeof data.type === "string" ? data.type : "console",
+        level: typeof data.level === "string" ? data.level : "log",
+        text: typeof data.text === "string" ? data.text : "",
+        stack: typeof data.stack === "string" ? data.stack : null,
+        sourceLine: typeof data.sourceLine === "number" ? data.sourceLine : null,
+        sourceColumn: typeof data.sourceColumn === "number" ? data.sourceColumn : null,
+        timestamp: typeof data.timestamp === "number" ? data.timestamp : Date.now(),
+      });
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [nonce, consoleMessage, onSelectElement, setInspecting, setLastSelection, consoleIdRef]);
+
+  // Sandpack's OWN bundler/compile errors (a syntax error, say) happen
+  // BEFORE any of the project's own code — including the imported
+  // inspector file — ever runs, so the custom bridge above can
+  // structurally never see them. Sandpack's own error channel is the
+  // only thing that can; shown via its built-in overlay
+  // (showSandpackErrorOverlay, default true on SandpackPreview) AND
+  // echoed into the same Console feed the runtime bridge's own messages
+  // land in, so a build failure isn't a DIFFERENT kind of silence.
+  useEffect(() => {
+    return sandpack.listen((message) => {
+      if (message.type !== "action" || message.action !== "show-error") return;
+      consoleIdRef.current += 1;
+      const where = message.path ? `${message.path}${message.line ? `:${message.line}` : ""} — ` : "";
+      consoleMessage({
+        id: consoleIdRef.current,
+        type: "error",
+        level: "error",
+        text: `${message.title ? message.title + ": " : ""}${where}${message.message || "Build error"}`,
+        stack: null,
+        timestamp: Date.now(),
+      });
+    });
+  }, [sandpack, consoleMessage, consoleIdRef]);
+
+  // Reverse highlight — same idea as StaticPreview's own, over `ranges`
+  // extracted from every instrumented project file instead of one HTML
+  // document.
+  const highlightMm = useMemo(
+    () => (ranges && cursor ? innermostMmAt(ranges, activePath, cursor.line, cursor.col - 1) : null),
+    [ranges, cursor, activePath]
+  );
+  useEffect(() => {
+    postToFrame(iframeRef, nonce, { type: "minime:highlight", mm: highlightMm });
+  }, [highlightMm, nonce]);
+
+  // Re-sent on every status change, same "a fresh runtime starts with
+  // nothing toggled on" reasoning as StaticPreview's own onLoad handler
+  // — Sandpack's own HMR can swap the running code without this
+  // component ever re-rendering for an unrelated reason otherwise.
+  useEffect(() => {
+    postToFrame(iframeRef, nonce, { type: "minime:inspect", on: inspecting });
+  }, [inspecting, nonce, sandpack.status]);
+
+  return (
+    <SandpackPreview
+      ref={previewRef}
+      showOpenInCodeSandbox={false}
+      showRefreshButton={false}
+      showOpenNewtab={false}
+      style={{ height: "100%", width: "100%" }}
+    />
   );
 }
 
@@ -531,7 +798,7 @@ function PreviewPane({ provider, filesMeta, cursor, onSelectElement }) {
     return <PythonPreview filesMeta={filesMeta} />;
   }
   if (detected.kind === "react") {
-    return <EmptyState title="React preview is coming soon" detail="This looks like a React project (package.json + a .jsx/.tsx file) — a live React preview isn't wired up yet." />;
+    return <ReactPreview provider={provider} filesMeta={filesMeta} cursor={cursor} onSelectElement={onSelectElement} />;
   }
   return <EmptyState title="No preview available for this project type" detail={detected.reason} />;
 }
