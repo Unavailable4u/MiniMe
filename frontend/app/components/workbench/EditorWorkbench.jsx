@@ -1124,8 +1124,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // chat dock visible if it's collapsed (BuildTab.jsx) — because a chip
   // added to a composer nobody can see isn't the "chip is in the
   // composer" the plan's Done-when describes. It requests no chat mode.
+  // W6.7: `sourceText` is set by PreviewPane when the clicked file is
+  // previewing a proposal under review — the element's mm range was
+  // computed against THAT text, so the chip's snippet must be cut from
+  // it too (the file's buffer still holds the pre-proposal content).
   const handleSelectElement = useCallback(
-    async ({ mm, element }) => {
+    async ({ mm, element, sourceText }) => {
       const parsed = parseMm(mm);
       if (!parsed) return;
       const { path } = parsed;
@@ -1141,7 +1145,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
       // the range was computed from that same text), else a fresh read;
       // same preference handleAddToChat above makes for a file chip.
       const openBuffer = stateRef.current.buffers[path];
-      let text = openBuffer ? openBuffer.edited : null;
+      let text = typeof sourceText === "string" ? sourceText : openBuffer ? openBuffer.edited : null;
       if (text == null) {
         try {
           text = (await provider.read(path)).content ?? "";

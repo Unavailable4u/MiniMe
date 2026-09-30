@@ -326,3 +326,86 @@ export function deletedPathsToKeep(files, decisions) {
     .filter((f) => f.op === "delete" && (decisionByPath.get(f.path) ?? "undo") === "keep")
     .map((f) => f.path);
 }
+
+/**
+ * W6.7 — what the preview should show while a proposal is under review:
+ * a `{path: content|null}` map laid over the project's files, where a
+ * string replaces (or creates) that path and `null` means "gone".
+ *
+ * This is deliberately derived through decisionForFile() — the same
+ * rule Done uses — rather than read straight off `proposed`, so the
+ * preview shows what pressing Done RIGHT NOW would leave on disk:
+ *   - a file whose hunks were all undone (or whose proposal was a
+ *     `create` that got undone) has no entry — the preview falls
+ *     through to the normal buffer/server content;
+ *   - a kept file shows the review editor's live text (`current`), so
+ *     undoing one hunk updates the preview too, and the line numbers
+ *     the inspector reports (data-mm) match what the review editor
+ *     itself is showing;
+ *   - a kept `delete` is `null`; a delete with lines brought back is
+ *     an "undo" (see decisionForFile()) and so has no entry.
+ *
+ * @param {{order: string[], files: Record<string, object>}|null} review
+ * @returns {Record<string, string|null>}
+ */
+export function reviewPreviewOverlay(review) {
+  const overlay = {};
+  for (const path of review?.order || []) {
+    const f = review.files[path];
+    if (!f) continue;
+    const { decision, finalContent } = decisionForFile({
+      op: f.op,
+      original: f.original,
+      proposed: f.proposed,
+      final: f.current,
+    });
+    if (decision !== "keep") continue;
+    overlay[path] = f.op === "delete" ? null : (finalContent ?? f.proposed ?? "");
+  }
+  return overlay;
+}
+
+/**
+ * The project's file list as it would look with the overlay applied:
+ * proposed `create`s appear, proposed `delete`s disappear. detectKind()
+ * and the React provider's file walk both run off this list, so a
+ * proposal that adds index.html (or removes the entry file) previews
+ * as the project it would become, not the one it is today.
+ *
+ * Returns `filesMeta` itself (same reference) when there is nothing to
+ * apply, so callers that list it in a dependency array don't re-run
+ * for nothing.
+ *
+ * @param {Record<string, object>|null} filesMeta
+ * @param {Record<string, string|null>|null} overlay
+ * @returns {Record<string, object>|null}
+ */
+export function applyOverlayToMeta(filesMeta, overlay) {
+  if (!filesMeta) return filesMeta;
+  const paths = Object.keys(overlay || {});
+  if (paths.length === 0) return filesMeta;
+  const next = { ...filesMeta };
+  for (const p of paths) {
+    if (overlay[p] === null) delete next[p];
+    else if (!(p in next)) next[p] = { proposed: true };
+  }
+  return next;
+}
+
+/**
+ * Shallow equality for two overlays — lets the preview keep the SAME
+ * overlay object across review updates that didn't change any file's
+ * resulting text (a stats-only REVIEW_FILE_UPDATE, say), so the
+ * preview's debounced rebuild isn't triggered by them.
+ *
+ * @param {Record<string, string|null>|null} a
+ * @param {Record<string, string|null>|null} b
+ * @returns {boolean}
+ */
+export function sameOverlay(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const ak = Object.keys(a);
+  if (ak.length !== Object.keys(b).length) return false;
+  return ak.every((k) => k in b && a[k] === b[k]);
+}

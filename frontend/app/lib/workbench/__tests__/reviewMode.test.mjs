@@ -22,6 +22,9 @@ const {
   unreviewableReason,
   resolvedMessage,
   deletedPathsToKeep,
+  reviewPreviewOverlay,
+  applyOverlayToMeta,
+  sameOverlay,
 } = loadSource("../reviewMode.js");
 
 let failures = 0;
@@ -362,6 +365,82 @@ assertEqual(
     ["gone.py", "also_gone.py"],
     "more than one kept delete are all returned, in file order"
   );
+}
+
+// ---------------------------------------------------------------------
+// W6.7 — reviewPreviewOverlay / applyOverlayToMeta / sameOverlay
+// ---------------------------------------------------------------------
+{
+  const mk = (files) => reviewFilesFromProposal({ files });
+  const css = { path: "style.css", op: "replace", base_version: 1, original: "a{color:blue}\n", proposed: "a{color:red}\n" };
+  const html = { path: "index.html", op: "create", base_version: 0, original: "", proposed: "<h1>hi</h1>\n" };
+  const gone = { path: "old.js", op: "delete", base_version: 2, original: "x()\n", proposed: "" };
+
+  // Fresh review: every editor's `current` is seeded as `proposed`.
+  assertEqual(
+    reviewPreviewOverlay(mk([css, html, gone])),
+    { "style.css": "a{color:red}\n", "index.html": "<h1>hi</h1>\n", "old.js": null },
+    "untouched review -> replace/create show proposed text, delete is null"
+  );
+
+  // Partly undone: the preview follows the editor's live text.
+  {
+    const r = mk([css]);
+    r.files["style.css"].current = "a{color:red}\nb{margin:0}\n";
+    assertEqual(
+      reviewPreviewOverlay(r),
+      { "style.css": "a{color:red}\nb{margin:0}\n" },
+      "a kept-with-edits file previews its CURRENT text, same as Done would write"
+    );
+  }
+
+  // Fully undone: no entry, so the preview falls through to real files.
+  {
+    const r = mk([css, html]);
+    r.files["style.css"].current = r.files["style.css"].original;
+    r.files["index.html"].current = "";
+    assertEqual(reviewPreviewOverlay(r), {}, "undone replace and undone create have no overlay entry");
+  }
+
+  // A delete with lines brought back is an "undo" — the file stays.
+  {
+    const r = mk([gone]);
+    r.files["old.js"].current = "x()\n";
+    assertEqual(reviewPreviewOverlay(r), {}, "a delete with lines brought back leaves the file (matches decisionForFile)");
+  }
+
+  // CRLF: CM6 reports LF-only text; an untouched CRLF file must still
+  // count as "whole proposal survived" and preview the stored text.
+  {
+    const crlf = { path: "a.txt", op: "replace", base_version: 1, original: "one\r\n", proposed: "two\r\n" };
+    const r = mk([crlf]);
+    r.files["a.txt"].current = "two\n";
+    assertEqual(reviewPreviewOverlay(r), { "a.txt": "two\r\n" }, "CRLF file: LF-only editor text still previews the stored proposed text");
+  }
+
+  assertEqual(reviewPreviewOverlay(null), {}, "reviewPreviewOverlay(null) -> {}");
+  assertEqual(reviewPreviewOverlay({ order: ["ghost"], files: {} }), {}, "a path missing from files is skipped, not thrown on");
+
+  // applyOverlayToMeta
+  const meta = { "style.css": { version: 3 }, "old.js": { version: 2 }, "keep.js": { version: 1 } };
+  assertEqual(
+    Object.keys(applyOverlayToMeta(meta, { "index.html": "<p/>", "old.js": null, "style.css": "x" })).sort(),
+    ["index.html", "keep.js", "style.css"],
+    "overlay adds created paths, removes deleted ones, leaves replaced ones"
+  );
+  assertEqual(applyOverlayToMeta(meta, { "style.css": "x" })["style.css"], { version: 3 }, "a replaced file keeps its real metadata");
+  assertEqual(applyOverlayToMeta(meta, {}) === meta, true, "empty overlay returns the SAME filesMeta reference");
+  assertEqual(applyOverlayToMeta(meta, null) === meta, true, "null overlay returns the SAME filesMeta reference");
+  assertEqual(applyOverlayToMeta(null, { a: "b" }), null, "null filesMeta stays null");
+  assertEqual(Object.keys(meta).length, 3, "applyOverlayToMeta does not mutate its input");
+
+  // sameOverlay
+  assertEqual(sameOverlay({ a: "1", b: null }, { a: "1", b: null }), true, "equal overlays (incl. null entries) compare same");
+  assertEqual(sameOverlay({ a: "1" }, { a: "2" }), false, "different text -> not same");
+  assertEqual(sameOverlay({ a: "1" }, { a: "1", b: "2" }), false, "different key count -> not same");
+  assertEqual(sameOverlay({ a: null }, { b: null }), false, "same count, different keys -> not same");
+  assertEqual(sameOverlay({}, {}), true, "two empty overlays are the same");
+  assertEqual(sameOverlay(null, {}), false, "null vs {} -> not same");
 }
 
 if (failures > 0) {
