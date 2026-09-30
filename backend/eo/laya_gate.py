@@ -58,12 +58,27 @@ Call sites (Tier 1): eo/output_guard.py (check_content_safety),
 eo/injection_guard.py (score_snippet), eo/semantic_cache.py
 (_verify_still_accurate), eo/device_archetype.py
 (resolve_ambiguous_archetype).
+
+Laya migration Tier 4 (2026-09-29) adds two small shared helpers below,
+parse_mode()/bump_counter()/read_counter(), for gates that sit in front
+of an existing LLM call rather than replacing it outright: an
+on/observe/off mode (Tier 2's eo/sga.py pre-gate and Tier 3's
+eo/laya_routing.py both hand-roll this same three-way parse; Tier 4's
+agents/overlapping_checker.py and agents/contradiction_prefilter.py use
+the shared version here instead of a third copy) and a tiny best-effort
+counter pair for tracking how often a gate's verdict would have agreed
+with the real call it might someday skip. Tier 2/3's existing local
+copies are left as they are -- this isn't a refactor of already-shipped
+code, just where new call sites should reach first.
 """
 import json
 import logging
 import os
 import threading
 import time
+
+from memory.bus import incr as _bus_incr
+from memory.bus import read as _bus_read
 
 logger = logging.getLogger(__name__)
 
@@ -191,3 +206,39 @@ def predict(state, questions, site: str = "unknown"):
         return None
     _log_decision(site, state, result)
     return result
+
+
+# ---------------------------------------------------------------------
+# Shared gate helpers (Tier 4, 2026-09-29) -- see module docstring above.
+# ---------------------------------------------------------------------
+
+_COUNTER_TTL_SECONDS = 60 * 60 * 24 * 30   # 30 days, same as eo/sga.py's own counters
+
+
+def parse_mode(raw, default: str, label: str = "gate") -> str:
+    """Shared on/observe/off parser. An unrecognized value is treated as
+    "off" -- a typo must never silently change routing/filtering
+    behavior -- with a warning naming which gate it was for."""
+    mode = (raw if raw not in (None, "") else default).strip().lower()
+    if mode in ("on", "observe", "off"):
+        return mode
+    logger.warning("[laya_gate] unknown mode %r for %s -- treating as 'off'", raw, label)
+    return "off"
+
+
+def bump_counter(key: str) -> None:
+    """Best-effort counter increment for gate observe/on-mode stats.
+    Never raises."""
+    try:
+        _bus_incr(key, ex=_COUNTER_TTL_SECONDS)
+    except Exception as exc:
+        logger.warning("[laya_gate] counter %s failed (non-fatal): %s", key, exc)
+
+
+def read_counter(key: str) -> int:
+    """Best-effort counter read; returns 0 on any failure (including a
+    key that was never bumped)."""
+    try:
+        return int(_bus_read(key, default=0) or 0)
+    except Exception:
+        return 0

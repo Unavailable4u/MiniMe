@@ -3,19 +3,23 @@ agents/contradiction_prefilter.py — Contradiction/gap detector, deterministic
 half (Part 3 §3.6).
 
 REAL_ACTION_ROLES tool agent, modeled on duplication_checker.py/
-academic_search.py's shape: makes zero LLM calls, only plain Python over
-KEYS["extraction_table"] (agents/extraction_table_builder.py's output,
-Part 3 §3.5), then writes Part 0 nodes/edges the same way academic_search.py
-does.
+academic_search.py's shape: makes zero generation-model calls (a local
+Laya screening pass, off by default, is not one — see below), only
+plain Python over KEYS["extraction_table"]
+(agents/extraction_table_builder.py's output, Part 3 §3.5), then writes
+Part 0 nodes/edges the same way academic_search.py does.
 
 This is deliberately ONLY the narrowing step. Comparing every paper's
 outcome against every other paper's outcome (an O(n^2) pair count) is
 exactly the kind of judgment call a plain string/keyword heuristic
 CANNOT safely make on its own -- "increase" vs "decrease" is a cheap,
-noisy signal, not a verdict. So this module's only job is to cut a large
-pair count down to a short, plausible candidate list (and a short list
-of coverage gaps) that a real reasoning pass can then actually examine.
-The judgment itself belongs to "contradiction_detector" -- deliberately
+noisy signal, not a verdict. So this module's job is to cut a large pair
+count down to a short, plausible candidate list (and a short list of
+coverage gaps) that a real reasoning pass can then actually examine. A
+second, optional narrowing pass (Laya migration Tier 4, 2026-09-29 --
+see _laya_screen_pairs() below) can additionally drop pairs a local
+model is confident are false positives, off by default. The judgment
+itself still belongs to "contradiction_detector" -- deliberately
 NOT a dedicated module (see eo/registry.py's REAL_ACTION_ROLES comment),
 which runs through agents/generic_worker.py like any other reasoning
 role.
@@ -45,6 +49,7 @@ import sys
 from collections import defaultdict
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo import laya_gate  # NEW — Laya migration Tier 4, see _laya_screen_pairs() below
 from eo.errors import MissingDependencyError
 from eo.graph_edges import create_edge
 from eo.knowledge_graph import write_node
@@ -66,6 +71,111 @@ NEGATIVE_TERMS = (
 
 MIN_PAPERS_FOR_GAP_CHECK = 3
 FIELD_NAMES = ["sample_size", "methodology", "population", "outcome", "effect_size"]
+
+# ---------------------------------------------------------------------
+# Laya migration Tier 4 (2026-09-29): a SECOND, optional narrowing pass
+# after the keyword pass above, not a replacement for it -- there's no
+# existing threshold band here the way agents/overlapping_checker.py has
+# one, since the keyword pass is already binary (polarity conflict found
+# or not). Same on/observe/off convention as every other gate in this
+# migration (eo/laya_gate.py's parse_mode()); default "observe" never
+# drops a pair -- it only scores each one and counts what "on" mode WOULD
+# have dropped (get_contradiction_prefilter_stats()).
+#
+# Deliberately asymmetric and conservative, unlike the keyword pass's own
+# stated "false negative is safe" policy: this pass can ONLY drop a pair
+# the keyword pass already found (never adds one), and only when Laya is
+# very confident (LAYA_CONTRADICTION_DROP_THRESHOLD, default 0.10 --
+# i.e. P(genuine) <= 10%) it's a false positive. A wrong KEEP costs
+# nothing (contradiction_detector still judges it for real, same as
+# today); a wrong DROP hides a pair from that judgment entirely, which
+# the keyword pass's own docstring says is NOT free the way a keyword
+# false negative is. Start in "observe" and read the decision log
+# (LAYA_DECISION_LOG) before ever setting this to "on" -- there is no
+# reliable machine-readable "did contradiction_detector confirm this
+# pair" signal to score against automatically the way Tier 3's gates
+# could (it's a free-form reasoning role, not a fixed JSON contract), so
+# get_contradiction_prefilter_stats() can only tell you HOW OFTEN this
+# would fire, not whether it's right.
+# ---------------------------------------------------------------------
+LAYA_CONTRADICTION_MODE = laya_gate.parse_mode(
+    os.environ.get("LAYA_CONTRADICTION_PREFILTER"), "observe", label="contradiction_prefilter")
+LAYA_CONTRADICTION_DROP_THRESHOLD = float(os.environ.get("LAYA_CONTRADICTION_DROP_THRESHOLD", "0.10"))
+_CONTRADICTION_COUNTER_PREFIX = "laya_contradiction_prefilter:"
+
+_CONTRADICTION_QUESTION = {
+    "genuine": {
+        "type": "noul",
+        "instructions": (
+            "A keyword pass flagged these two outcome descriptions as "
+            "possibly contradictory for the same population. Do they "
+            "actually report opposite findings, or does this look like a "
+            "false positive (the same finding worded differently, "
+            "unrelated aspects of the topic, or too little information "
+            "to tell)?"
+        ),
+        "criteria": {
+            "false": "likely a false positive -- not a real contradiction",
+            "true": "the two outcomes do appear to genuinely contradict "
+                    "each other for this population",
+        },
+        "labels": {"false": "FALSE_POSITIVE", "true": "GENUINE"},
+    },
+}
+
+
+def _laya_screen_pair(pair: dict):
+    """Returns P(genuine contradiction) for one candidate pair from a
+    local Laya call, or None on any failure -- caller keeps the pair in
+    that case, the same "a false negative here just means the LLM pass
+    never sees it, safe" posture this module's own docstring already
+    states for the keyword pass above."""
+    try:
+        a, b = pair["paper_a"], pair["paper_b"]
+        state = {
+            "population": laya_gate.clip(pair.get("population") or "", 150, "head"),
+            "outcome_a": laya_gate.clip(str(a.get("outcome") or ""), 300, "head"),
+            "outcome_b": laya_gate.clip(str(b.get("outcome") or ""), 300, "head"),
+        }
+        result = laya_gate.predict(state, _CONTRADICTION_QUESTION,
+                                    site="contradiction_prefilter.screen_pair")
+        if result is None:
+            return None
+        return float(result["answers"]["genuine"]["noul"])
+    except Exception:
+        return None
+
+
+def _laya_screen_pairs(pairs: list) -> list:
+    """Runs the Laya pre-gate over every keyword-matched pair -- see the
+    block comment above this section for the full reasoning. Returns
+    `pairs` unchanged when the gate is off, there's nothing to screen, or
+    (mode "observe") always -- only mode "on" can actually shrink the
+    list, and even then only pairs Laya is confident are false positives.
+    """
+    if LAYA_CONTRADICTION_MODE == "off" or not pairs:
+        return pairs
+    kept = []
+    for pair in pairs:
+        p_genuine = _laya_screen_pair(pair)
+        if p_genuine is None:
+            kept.append(pair)
+            continue
+        would_drop = p_genuine <= LAYA_CONTRADICTION_DROP_THRESHOLD
+        if would_drop:
+            laya_gate.bump_counter(_CONTRADICTION_COUNTER_PREFIX + "would_drop")
+        if would_drop and LAYA_CONTRADICTION_MODE == "on":
+            laya_gate.bump_counter(_CONTRADICTION_COUNTER_PREFIX + "dropped")
+            continue   # confident false positive -- never reaches contradiction_detector
+        kept.append(pair)
+    return kept
+
+
+def get_contradiction_prefilter_stats() -> dict:
+    """Counters only -- see the block comment above this section for why
+    there's no precision figure the way Tier 3's gates have one."""
+    return {name: laya_gate.read_counter(_CONTRADICTION_COUNTER_PREFIX + name)
+            for name in ("would_drop", "dropped")}
 
 
 def _workspace_id() -> str:
@@ -196,6 +306,7 @@ def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
 
     workspace_id = _workspace_id()
     pairs = _find_candidate_pairs(rows)
+    pairs = _laya_screen_pairs(pairs)   # NEW — Laya migration Tier 4, see block comment above
     gaps = _find_candidate_gaps(rows)
 
     # Part 0 edges: one "possible_contradiction" edge per candidate pair

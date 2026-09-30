@@ -1,0 +1,815 @@
+diff --git a/backend/agents/contradiction_prefilter.py b/backend/agents/contradiction_prefilter.py
+index 4e40691..0b7a7cd 100644
+--- a/backend/agents/contradiction_prefilter.py
++++ b/backend/agents/contradiction_prefilter.py
+@@ -3,19 +3,23 @@ agents/contradiction_prefilter.py — Contradiction/gap detector, deterministic
+ half (Part 3 §3.6).
+ 
+ REAL_ACTION_ROLES tool agent, modeled on duplication_checker.py/
+-academic_search.py's shape: makes zero LLM calls, only plain Python over
+-KEYS["extraction_table"] (agents/extraction_table_builder.py's output,
+-Part 3 §3.5), then writes Part 0 nodes/edges the same way academic_search.py
+-does.
++academic_search.py's shape: makes zero generation-model calls (a local
++Laya screening pass, off by default, is not one — see below), only
++plain Python over KEYS["extraction_table"]
++(agents/extraction_table_builder.py's output, Part 3 §3.5), then writes
++Part 0 nodes/edges the same way academic_search.py does.
+ 
+ This is deliberately ONLY the narrowing step. Comparing every paper's
+ outcome against every other paper's outcome (an O(n^2) pair count) is
+ exactly the kind of judgment call a plain string/keyword heuristic
+ CANNOT safely make on its own -- "increase" vs "decrease" is a cheap,
+-noisy signal, not a verdict. So this module's only job is to cut a large
+-pair count down to a short, plausible candidate list (and a short list
+-of coverage gaps) that a real reasoning pass can then actually examine.
+-The judgment itself belongs to "contradiction_detector" -- deliberately
++noisy signal, not a verdict. So this module's job is to cut a large pair
++count down to a short, plausible candidate list (and a short list of
++coverage gaps) that a real reasoning pass can then actually examine. A
++second, optional narrowing pass (Laya migration Tier 4, 2026-09-29 --
++see _laya_screen_pairs() below) can additionally drop pairs a local
++model is confident are false positives, off by default. The judgment
++itself still belongs to "contradiction_detector" -- deliberately
+ NOT a dedicated module (see eo/registry.py's REAL_ACTION_ROLES comment),
+ which runs through agents/generic_worker.py like any other reasoning
+ role.
+@@ -45,6 +49,7 @@ import sys
+ from collections import defaultdict
+ 
+ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from eo import laya_gate  # NEW — Laya migration Tier 4, see _laya_screen_pairs() below
+ from eo.errors import MissingDependencyError
+ from eo.graph_edges import create_edge
+ from eo.knowledge_graph import write_node
+@@ -67,6 +72,111 @@ NEGATIVE_TERMS = (
+ MIN_PAPERS_FOR_GAP_CHECK = 3
+ FIELD_NAMES = ["sample_size", "methodology", "population", "outcome", "effect_size"]
+ 
++# ---------------------------------------------------------------------
++# Laya migration Tier 4 (2026-09-29): a SECOND, optional narrowing pass
++# after the keyword pass above, not a replacement for it -- there's no
++# existing threshold band here the way agents/overlapping_checker.py has
++# one, since the keyword pass is already binary (polarity conflict found
++# or not). Same on/observe/off convention as every other gate in this
++# migration (eo/laya_gate.py's parse_mode()); default "observe" never
++# drops a pair -- it only scores each one and counts what "on" mode WOULD
++# have dropped (get_contradiction_prefilter_stats()).
++#
++# Deliberately asymmetric and conservative, unlike the keyword pass's own
++# stated "false negative is safe" policy: this pass can ONLY drop a pair
++# the keyword pass already found (never adds one), and only when Laya is
++# very confident (LAYA_CONTRADICTION_DROP_THRESHOLD, default 0.10 --
++# i.e. P(genuine) <= 10%) it's a false positive. A wrong KEEP costs
++# nothing (contradiction_detector still judges it for real, same as
++# today); a wrong DROP hides a pair from that judgment entirely, which
++# the keyword pass's own docstring says is NOT free the way a keyword
++# false negative is. Start in "observe" and read the decision log
++# (LAYA_DECISION_LOG) before ever setting this to "on" -- there is no
++# reliable machine-readable "did contradiction_detector confirm this
++# pair" signal to score against automatically the way Tier 3's gates
++# could (it's a free-form reasoning role, not a fixed JSON contract), so
++# get_contradiction_prefilter_stats() can only tell you HOW OFTEN this
++# would fire, not whether it's right.
++# ---------------------------------------------------------------------
++LAYA_CONTRADICTION_MODE = laya_gate.parse_mode(
++    os.environ.get("LAYA_CONTRADICTION_PREFILTER"), "observe", label="contradiction_prefilter")
++LAYA_CONTRADICTION_DROP_THRESHOLD = float(os.environ.get("LAYA_CONTRADICTION_DROP_THRESHOLD", "0.10"))
++_CONTRADICTION_COUNTER_PREFIX = "laya_contradiction_prefilter:"
++
++_CONTRADICTION_QUESTION = {
++    "genuine": {
++        "type": "noul",
++        "instructions": (
++            "A keyword pass flagged these two outcome descriptions as "
++            "possibly contradictory for the same population. Do they "
++            "actually report opposite findings, or does this look like a "
++            "false positive (the same finding worded differently, "
++            "unrelated aspects of the topic, or too little information "
++            "to tell)?"
++        ),
++        "criteria": {
++            "false": "likely a false positive -- not a real contradiction",
++            "true": "the two outcomes do appear to genuinely contradict "
++                    "each other for this population",
++        },
++        "labels": {"false": "FALSE_POSITIVE", "true": "GENUINE"},
++    },
++}
++
++
++def _laya_screen_pair(pair: dict):
++    """Returns P(genuine contradiction) for one candidate pair from a
++    local Laya call, or None on any failure -- caller keeps the pair in
++    that case, the same "a false negative here just means the LLM pass
++    never sees it, safe" posture this module's own docstring already
++    states for the keyword pass above."""
++    try:
++        a, b = pair["paper_a"], pair["paper_b"]
++        state = {
++            "population": laya_gate.clip(pair.get("population") or "", 150, "head"),
++            "outcome_a": laya_gate.clip(str(a.get("outcome") or ""), 300, "head"),
++            "outcome_b": laya_gate.clip(str(b.get("outcome") or ""), 300, "head"),
++        }
++        result = laya_gate.predict(state, _CONTRADICTION_QUESTION,
++                                    site="contradiction_prefilter.screen_pair")
++        if result is None:
++            return None
++        return float(result["answers"]["genuine"]["noul"])
++    except Exception:
++        return None
++
++
++def _laya_screen_pairs(pairs: list) -> list:
++    """Runs the Laya pre-gate over every keyword-matched pair -- see the
++    block comment above this section for the full reasoning. Returns
++    `pairs` unchanged when the gate is off, there's nothing to screen, or
++    (mode "observe") always -- only mode "on" can actually shrink the
++    list, and even then only pairs Laya is confident are false positives.
++    """
++    if LAYA_CONTRADICTION_MODE == "off" or not pairs:
++        return pairs
++    kept = []
++    for pair in pairs:
++        p_genuine = _laya_screen_pair(pair)
++        if p_genuine is None:
++            kept.append(pair)
++            continue
++        would_drop = p_genuine <= LAYA_CONTRADICTION_DROP_THRESHOLD
++        if would_drop:
++            laya_gate.bump_counter(_CONTRADICTION_COUNTER_PREFIX + "would_drop")
++        if would_drop and LAYA_CONTRADICTION_MODE == "on":
++            laya_gate.bump_counter(_CONTRADICTION_COUNTER_PREFIX + "dropped")
++            continue   # confident false positive -- never reaches contradiction_detector
++        kept.append(pair)
++    return kept
++
++
++def get_contradiction_prefilter_stats() -> dict:
++    """Counters only -- see the block comment above this section for why
++    there's no precision figure the way Tier 3's gates have one."""
++    return {name: laya_gate.read_counter(_CONTRADICTION_COUNTER_PREFIX + name)
++            for name in ("would_drop", "dropped")}
++
+ 
+ def _workspace_id() -> str:
+     # Same session-isolation reasoning as academic_search.py's own
+@@ -196,6 +306,7 @@ def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
+ 
+     workspace_id = _workspace_id()
+     pairs = _find_candidate_pairs(rows)
++    pairs = _laya_screen_pairs(pairs)   # NEW — Laya migration Tier 4, see block comment above
+     gaps = _find_candidate_gaps(rows)
+ 
+     # Part 0 edges: one "possible_contradiction" edge per candidate pair
+diff --git a/backend/agents/overlapping_checker.py b/backend/agents/overlapping_checker.py
+index 4346521..c233acd 100644
+--- a/backend/agents/overlapping_checker.py
++++ b/backend/agents/overlapping_checker.py
+@@ -25,9 +25,13 @@ Pipeline per newly-extracted topic:
+      with this module's own DEFAULT_STOPWORDS rather than either of
+      theirs, since those two hand-tuned sets differ from each other and
+      neither is "the" shared one; see utils/similarity.py).
+-  4. Only LLM-arbitrate the ambiguous band — thin, tag-only output,
+-     never prose. Below LOW_THRESHOLD: definitely new. Above
+-     HIGH_THRESHOLD: definitely the same, skip the LLM call entirely.
++  4. Only arbitrate the ambiguous band — thin, tag-only output, never
++     prose. Below LOW_THRESHOLD: definitely new. Above HIGH_THRESHOLD:
++     definitely the same, skip arbitration entirely. Within the band, a
++     local Laya call (Tier 4 of the Laya migration, 2026-09-29) gates
++     the LLM arbitration below — default mode "observe" always still
++     calls the LLM and only logs/scores Laya's verdict against it; see
++     _arbitrate()/get_overlap_gate_stats() below.
+   5. Upsert this topic's own embedding for future uploads to compare
+      against.
+ 
+@@ -50,6 +54,7 @@ import os
+ import sys
+ 
+ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from eo import laya_gate  # NEW — Laya migration Tier 4, see _arbitrate() below
+ from eo.registry import add_role_prompt, get_role_prompt
+ from memory.bus import vector_index
+ from utils.embedding import embed_text
+@@ -94,6 +99,133 @@ def _ensure_role_registered() -> None:
+                          source="overlapping_checker_seed")
+ 
+ 
++# ---------------------------------------------------------------------
++# Laya migration Tier 4 (2026-09-29): a pre-gate in front of the ambiguous-
++# band LLM arbitration below. Same on/observe/off convention as every
++# other gate in this migration (eo/laya_gate.py's parse_mode()); default
++# "observe" never changes what's returned -- it only computes Laya's
++# verdict, compares it against what the real LLM arbitration then
++# decides, and counts the result (get_overlap_gate_stats()). Check
++# skip_precision there before setting LAYA_OVERLAP_ARBITRATION=on.
++#
++# Laya answers only the TAG (new/duplicate/merge) as a 3-way `choice` --
++# target_topic_id, when the tag isn't "new", is always candidates[0]'s id
++# (already sorted by score, same assumption the deterministic
++# HIGH_THRESHOLD shortcut in check_topic() makes just above this
++# function). Laya's `choice` type can only select from a fixed label
++# set, so it cannot itself pick which of several arbitrary candidate ids
++# is the match the way the real LLM call can.
++#
++# UNVERIFIED: like every gate in this migration, the 0.85 confidence
++# threshold is a starting guess, not tuned on real duplicate/merge/new
++# examples -- and Tier 1 testing showed this checkpoint can be very
++# unconfident even on fairly clear cases (a 3-way near-tie on a
++# structurally similar question), so expect "observe" mode to show a low
++# would_skip rate at first, not a broken gate.
++# ---------------------------------------------------------------------
++LAYA_OVERLAP_MODE = laya_gate.parse_mode(
++    os.environ.get("LAYA_OVERLAP_ARBITRATION"), "observe", label="overlapping_checker")
++LAYA_OVERLAP_THRESHOLD = float(os.environ.get("LAYA_OVERLAP_THRESHOLD", "0.85"))
++_OVERLAP_COUNTER_PREFIX = "laya_overlap_gate:"
++_OVERLAP_COUNTERS = ("agreed", "disagreed", "would_skip", "would_skip_wrong", "skipped")
++
++_TAG_QUESTION = {
++    "tag": {
++        "type": "choice",
++        "instructions": (
++            "A NEW topic was extracted from an upload. Compare it against "
++            "the CANDIDATE existing topics (already similarity-matched, "
++            "highest score first). Is the new topic the same underlying "
++            "fact as the top candidate (duplicate), clearly related but "
++            "not identical (merge), or genuinely new?"
++        ),
++        "criteria": {
++            "duplicate": "near-identical to the top candidate -- the same "
++                         "underlying fact, safe to fold together",
++            "merge": "clearly related or overlapping with the top "
++                     "candidate but not identical -- worth keeping both "
++                     "and linking them",
++            "new": "none of the candidates are actually the same or "
++                   "closely related fact",
++        },
++    },
++}
++
++
++def _laya_tag(new_topic: dict, candidates: list[dict]):
++    """Returns (tag, probability_of_that_tag) from one local Laya call,
++    or None on any failure -- caller treats None exactly like the gate
++    being off (call the real LLM, no comparison to log). Only the top 2
++    candidates are shown (already sorted by score): Laya's ~300-token
++    budget can't fit TOP_K=5 the way the real LLM prompt does, and
++    target_topic_id only ever needs candidates[0] regardless (see the
++    block comment above this function). Uses the `probabilities` dict
++    rather than the `choice` answer's own `confidence` field -- Tier 1/3
++    testing found `confidence` can read misleadingly low even for a
++    clear top choice on this checkpoint.
++    """
++    try:
++        block = "\n".join(
++            f"- score={c['score']:.2f} :: {c['name']} — {c['summary'][:150]}"
++            for c in candidates[:2]
++        )
++        state = {
++            "new_topic": laya_gate.clip(f"{new_topic['name']}: {new_topic['summary']}", 300, "head"),
++            "candidates": laya_gate.clip(block, 400, "head"),
++        }
++        result = laya_gate.predict(state, _TAG_QUESTION, site="overlapping_checker.check_topic")
++        if result is None:
++            return None
++        answer = result["answers"]["tag"]
++        tag = answer["choice"]
++        return tag, float(answer["probabilities"][tag])
++    except Exception:
++        return None
++
++
++def _arbitrate(new_topic: dict, candidates: list[dict], session_id: str = None) -> dict:
++    """Gate in front of _llm_arbitrate() -- see the block comment above
++    this section for the full reasoning. Never raises: a Laya failure of
++    any kind just means no comparison this call, and the real LLM
++    arbitration always still runs unless mode is "on" AND Laya cleared
++    the confidence threshold.
++    """
++    laya_result = _laya_tag(new_topic, candidates) if LAYA_OVERLAP_MODE != "off" else None
++
++    if laya_result and LAYA_OVERLAP_MODE == "on" and laya_result[1] >= LAYA_OVERLAP_THRESHOLD:
++        tag, probability = laya_result
++        laya_gate.bump_counter(_OVERLAP_COUNTER_PREFIX + "skipped")
++        return {"tag": tag, "target_topic_id": candidates[0]["topic_id"] if tag != "new" else None}
++
++    llm_result = _llm_arbitrate(new_topic, candidates, session_id=session_id)
++
++    if laya_result:
++        tag, probability = laya_result
++        agreed = tag == llm_result.get("tag")
++        laya_gate.bump_counter(_OVERLAP_COUNTER_PREFIX + ("agreed" if agreed else "disagreed"))
++        if probability >= LAYA_OVERLAP_THRESHOLD:
++            laya_gate.bump_counter(_OVERLAP_COUNTER_PREFIX + "would_skip")
++            if not agreed:
++                laya_gate.bump_counter(_OVERLAP_COUNTER_PREFIX + "would_skip_wrong")
++        print(f"  [Overlapping Checker] Laya pre-gate: laya={tag}({probability:.2f}) "
++              f"llm={llm_result.get('tag')} agreed={agreed}")
++
++    return llm_result
++
++
++def get_overlap_gate_stats() -> dict:
++    """Counters plus `skip_precision`: of the cases where Laya's
++    confidence cleared the threshold (would have been skipped in "on"
++    mode), the fraction where it agreed with what the real LLM
++    arbitration then decided. None with no data yet. Check this is very
++    close to 1.0 before setting LAYA_OVERLAP_ARBITRATION=on."""
++    counts = {name: laya_gate.read_counter(_OVERLAP_COUNTER_PREFIX + name)
++              for name in _OVERLAP_COUNTERS}
++    would = counts["would_skip"]
++    counts["skip_precision"] = (1.0 - counts["would_skip_wrong"] / would) if would else None
++    return counts
++
++
+ def _topic_vector_id(workspace_id: str, topic_id: str) -> str:
+     return f"{ID_PREFIX}:{workspace_id}:{topic_id}"
+ 
+@@ -182,7 +314,7 @@ def check_topic(workspace_id: str, topic_id: str, name: str, summary: str,
+         if candidates and candidates[0]["score"] >= HIGH_THRESHOLD:
+             result = {"tag": "duplicate", "target_topic_id": candidates[0]["topic_id"]}
+         elif candidates:
+-            result = _llm_arbitrate(
++            result = _arbitrate(
+                 {"name": name, "summary": summary}, candidates[:TOP_K],
+                 session_id=session_id,
+             )
+diff --git a/backend/eo/laya_gate.py b/backend/eo/laya_gate.py
+index cf5350f..feaae43 100644
+--- a/backend/eo/laya_gate.py
++++ b/backend/eo/laya_gate.py
+@@ -58,6 +58,18 @@ Call sites (Tier 1): eo/output_guard.py (check_content_safety),
+ eo/injection_guard.py (score_snippet), eo/semantic_cache.py
+ (_verify_still_accurate), eo/device_archetype.py
+ (resolve_ambiguous_archetype).
++
++Laya migration Tier 4 (2026-09-29) adds two small shared helpers below,
++parse_mode()/bump_counter()/read_counter(), for gates that sit in front
++of an existing LLM call rather than replacing it outright: an
++on/observe/off mode (Tier 2's eo/sga.py pre-gate and Tier 3's
++eo/laya_routing.py both hand-roll this same three-way parse; Tier 4's
++agents/overlapping_checker.py and agents/contradiction_prefilter.py use
++the shared version here instead of a third copy) and a tiny best-effort
++counter pair for tracking how often a gate's verdict would have agreed
++with the real call it might someday skip. Tier 2/3's existing local
++copies are left as they are -- this isn't a refactor of already-shipped
++code, just where new call sites should reach first.
+ """
+ import json
+ import logging
+@@ -65,6 +77,9 @@ import os
+ import threading
+ import time
+ 
++from memory.bus import incr as _bus_incr
++from memory.bus import read as _bus_read
++
+ logger = logging.getLogger(__name__)
+ 
+ LAYA_MODEL = os.environ.get("LAYA_MODEL", "convaiinnovations/laya")
+@@ -191,3 +206,39 @@ def predict(state, questions, site: str = "unknown"):
+         return None
+     _log_decision(site, state, result)
+     return result
++
++
++# ---------------------------------------------------------------------
++# Shared gate helpers (Tier 4, 2026-09-29) -- see module docstring above.
++# ---------------------------------------------------------------------
++
++_COUNTER_TTL_SECONDS = 60 * 60 * 24 * 30   # 30 days, same as eo/sga.py's own counters
++
++
++def parse_mode(raw, default: str, label: str = "gate") -> str:
++    """Shared on/observe/off parser. An unrecognized value is treated as
++    "off" -- a typo must never silently change routing/filtering
++    behavior -- with a warning naming which gate it was for."""
++    mode = (raw if raw not in (None, "") else default).strip().lower()
++    if mode in ("on", "observe", "off"):
++        return mode
++    logger.warning("[laya_gate] unknown mode %r for %s -- treating as 'off'", raw, label)
++    return "off"
++
++
++def bump_counter(key: str) -> None:
++    """Best-effort counter increment for gate observe/on-mode stats.
++    Never raises."""
++    try:
++        _bus_incr(key, ex=_COUNTER_TTL_SECONDS)
++    except Exception as exc:
++        logger.warning("[laya_gate] counter %s failed (non-fatal): %s", key, exc)
++
++
++def read_counter(key: str) -> int:
++    """Best-effort counter read; returns 0 on any failure (including a
++    key that was never bumped)."""
++    try:
++        return int(_bus_read(key, default=0) or 0)
++    except Exception:
++        return 0
+diff --git a/backend/tests/conftest.py b/backend/tests/conftest.py
+index 4d4d50b..eb0e23a 100644
+--- a/backend/tests/conftest.py
++++ b/backend/tests/conftest.py
+@@ -606,3 +606,22 @@ def _laya_routing_gates_off(monkeypatch):
+     from eo import laya_routing
+     monkeypatch.setattr(laya_routing, "PANEL_GATE_MODE", "off")
+     monkeypatch.setattr(laya_routing, "GATEKEEPER_GATE_MODE", "off")
++
++
++# ---------------------------------------------------------------------------
++# Laya migration (Tier 4): agents/overlapping_checker.py and
++# agents/contradiction_prefilter.py each read their gate's mode into a
++# MODULE-LEVEL constant at import time (LAYA_OVERLAP_MODE /
++# LAYA_CONTRADICTION_MODE), the same shape as eo/sga.py's _PREGATE_MODE
++# and eo/laya_routing.py's two gates above -- so, same as those, tests
++# monkeypatch the constant directly rather than the env var, and this
++# fixture does the same for the whole suite by default. Off for both:
++# "observe" mode still makes a real Laya call per ambiguous-band item /
++# candidate pair, which existing tests for these two modules don't
++# expect and don't mock.
++# ---------------------------------------------------------------------------
++@pytest.fixture(autouse=True)
++def _laya_tier4_gates_off(monkeypatch):
++    from agents import contradiction_prefilter, overlapping_checker
++    monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "off")
++    monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "off")
+diff --git a/backend/tests/unit/test_agent_contradiction_prefilter.py b/backend/tests/unit/test_agent_contradiction_prefilter.py
+index ff10805..9a1778f 100644
+--- a/backend/tests/unit/test_agent_contradiction_prefilter.py
++++ b/backend/tests/unit/test_agent_contradiction_prefilter.py
+@@ -343,3 +343,203 @@ class TestRunSideEffects:
+ 
+         contradiction_prefilter.run()
+         assert not any(k.startswith("stage_output:") for k in writes)
++
++
++# ---------------------------------------------------------------------
++# Laya pre-gate (Tier 4 of the Laya migration, 2026-09-29) -- a second,
++# optional narrowing pass over the keyword pass's own candidate pairs.
++# The suite-wide conftest.py autouse fixture forces
++# LAYA_CONTRADICTION_MODE = "off"; each test below opts back in by
++# monkeypatching it directly. laya_gate.predict is monkeypatched -- no
++# model is loaded.
++# ---------------------------------------------------------------------
++def _pairs_from(rows):
++    return contradiction_prefilter._find_candidate_pairs(rows)
++
++
++# NOTE: "no significant change" would match BOTH POSITIVE_TERMS
++# ("significant") and NEGATIVE_TERMS ("no significant") in
++# contradiction_prefilter.py's own crude keyword lists, making
++# _polarity() return None (ambiguous) rather than "negative" -- avoided
++# here on purpose so this fixture reliably produces exactly two pairs.
++TWO_PAIR_ROWS = [
++    _row("Paper A", "adults with insomnia", "a clear increase in sleep", node_id="na"),
++    _row("Paper B", "adults with insomnia", "showed no effect", node_id="nb"),
++    _row("Paper C", "children with adhd", "a clear benefit was observed", node_id="nc"),
++    _row("Paper D", "children with adhd", "no association was found", node_id="nd"),
++]
++
++
++def _genuine(p):
++    return {"answers": {"genuine": {"type": "noul", "noul": p}}}
++
++
++class TestLayaGateOff:
++    def test_gate_off_returns_pairs_unchanged_and_makes_no_call(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "off")
++        calls = []
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: calls.append(1))
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        result = contradiction_prefilter._laya_screen_pairs(pairs)
++        assert result == pairs
++        assert calls == []
++
++    def test_empty_pairs_makes_no_call_even_when_mode_is_on(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
++        calls = []
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: calls.append(1))
++        assert contradiction_prefilter._laya_screen_pairs([]) == []
++        assert calls == []
++
++
++class TestLayaGateObserve:
++    def test_observe_mode_never_drops_a_pair(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "observe")
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.01))
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        result = contradiction_prefilter._laya_screen_pairs(pairs)
++        assert len(result) == len(pairs) == 2
++
++    def test_observe_mode_counts_would_drop_but_does_not_drop(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "observe")
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.02))
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        result = contradiction_prefilter._laya_screen_pairs(pairs)
++        assert len(result) == 2
++        stats = contradiction_prefilter.get_contradiction_prefilter_stats()
++        assert stats["would_drop"] == 2 and stats["dropped"] == 0
++
++    def test_observe_mode_high_confidence_genuine_is_not_counted_as_would_drop(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "observe")
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.9))
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        contradiction_prefilter._laya_screen_pairs(pairs)
++        assert contradiction_prefilter.get_contradiction_prefilter_stats()["would_drop"] == 0
++
++
++class TestLayaGateOn:
++    def test_on_mode_drops_confident_false_positives(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.02))
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        result = contradiction_prefilter._laya_screen_pairs(pairs)
++        assert result == []
++        assert contradiction_prefilter.get_contradiction_prefilter_stats()["dropped"] == 2
++
++    def test_on_mode_keeps_pairs_above_the_drop_threshold(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.5))
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        result = contradiction_prefilter._laya_screen_pairs(pairs)
++        assert result == pairs
++
++    def test_on_mode_can_drop_only_some_pairs(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
++        replies = iter([_genuine(0.02), _genuine(0.8)])   # drop first pair, keep second
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: next(replies))
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        result = contradiction_prefilter._laya_screen_pairs(pairs)
++        assert len(result) == 1
++        assert result[0] == pairs[1]
++
++    def test_on_mode_never_adds_a_pair_the_keyword_pass_did_not_find(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.99))
++        assert contradiction_prefilter._laya_screen_pairs([]) == []
++
++    def test_on_mode_keeps_a_pair_when_laya_is_unavailable(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: None)
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        result = contradiction_prefilter._laya_screen_pairs(pairs)
++        assert result == pairs   # fail open to "keep", same as a keyword false negative
++
++    def test_on_mode_keeps_a_pair_when_laya_raises(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
++
++        def boom(*a, **k):
++            raise RuntimeError("boom")
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", boom)
++        pairs = _pairs_from(TWO_PAIR_ROWS)
++        assert contradiction_prefilter._laya_screen_pairs(pairs) == pairs
++
++
++class TestLayaScreenPairHelper:
++    def test_sends_population_and_both_outcomes(self, monkeypatch):
++        seen = {}
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict",
++                            lambda state, q, site="u": seen.update(state=state, site=site) or _genuine(0.5))
++        pair = _pairs_from(TWO_PAIR_ROWS)[0]
++        contradiction_prefilter._laya_screen_pair(pair)
++        assert seen["state"]["population"] == "adults with insomnia"
++        assert "increase" in seen["state"]["outcome_a"]
++        assert "no effect" in seen["state"]["outcome_b"]
++        assert seen["site"] == "contradiction_prefilter.screen_pair"
++
++    def test_returns_none_on_malformed_result(self, monkeypatch):
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: {"answers": {}})
++        pair = _pairs_from(TWO_PAIR_ROWS)[0]
++        assert contradiction_prefilter._laya_screen_pair(pair) is None
++
++
++class TestRunWiresInTheScreeningPass:
++    """run() itself: with the gate off (conftest default), the screening
++    pass must be a no-op so run()'s existing behavior (covered by
++    TestRunSideEffects above) is unaffected. Same fixture pattern as
++    TestRunSideEffects: monkeypatch `read`/`create_edge`/`write_node`/
++    `write` directly rather than going through a real bus/graph backend.
++    """
++
++    def test_run_pair_count_unaffected_when_gate_is_off(self, fake_bus, monkeypatch):
++        rows = [
++            _row("A", "adults", "a clear increase", node_id="n1"),
++            _row("B", "adults", "showed no effect", node_id="n2"),
++        ]
++        monkeypatch.setattr(
++            contradiction_prefilter, "read",
++            lambda key, **k: {"papers": rows} if key == contradiction_prefilter.KEYS["extraction_table"]
++            else None,
++        )
++        monkeypatch.setattr(contradiction_prefilter, "create_edge", lambda *a, **k: {"edge_id": "e1"})
++        monkeypatch.setattr(contradiction_prefilter, "write_node", lambda **k: "node_g1")
++        monkeypatch.setattr(contradiction_prefilter, "write", lambda *a, **k: None)
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "off")
++        calls = []
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: calls.append(1))
++
++        result = contradiction_prefilter.run()
++
++        assert len(result["candidate_pairs"]) == 1
++        assert calls == []
++
++    def test_run_drops_a_pair_when_gate_is_on_and_confident(self, fake_bus, monkeypatch):
++        rows = [
++            _row("A", "adults", "a clear increase", node_id="n1"),
++            _row("B", "adults", "showed no effect", node_id="n2"),
++        ]
++        monkeypatch.setattr(
++            contradiction_prefilter, "read",
++            lambda key, **k: {"papers": rows} if key == contradiction_prefilter.KEYS["extraction_table"]
++            else None,
++        )
++        monkeypatch.setattr(contradiction_prefilter, "create_edge", lambda *a, **k: {"edge_id": "e1"})
++        monkeypatch.setattr(contradiction_prefilter, "write_node", lambda **k: "node_g1")
++        monkeypatch.setattr(contradiction_prefilter, "write", lambda *a, **k: None)
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_MODE", "on")
++        monkeypatch.setattr(contradiction_prefilter, "LAYA_CONTRADICTION_DROP_THRESHOLD", 0.10)
++        monkeypatch.setattr(contradiction_prefilter.laya_gate, "predict", lambda *a, **k: _genuine(0.01))
++
++        result = contradiction_prefilter.run()
++
++        assert result["candidate_pairs"] == []
++        assert result["edges_written"] == 0
++
++
++class TestContradictionPrefilterStats:
++    def test_stats_are_zero_with_no_data(self):
++        stats = contradiction_prefilter.get_contradiction_prefilter_stats()
++        assert stats == {"would_drop": 0, "dropped": 0}
+diff --git a/backend/tests/unit/test_agent_overlapping_checker.py b/backend/tests/unit/test_agent_overlapping_checker.py
+index 19d2d85..abc86c9 100644
+--- a/backend/tests/unit/test_agent_overlapping_checker.py
++++ b/backend/tests/unit/test_agent_overlapping_checker.py
+@@ -222,3 +222,166 @@ class TestAlwaysUpserts:
+         fake_vector_index.upsert.assert_called_once()
+         vectors = fake_vector_index.upsert.call_args.kwargs["vectors"]
+         assert vectors[0][0] == "topic:ws1:t1"
++
++
++# ---------------------------------------------------------------------
++# Laya pre-gate (Tier 4 of the Laya migration, 2026-09-29) -- gates the
++# ambiguous-band arbitration above via _arbitrate(). The suite-wide
++# conftest.py autouse fixture forces LAYA_OVERLAP_MODE = "off"; each test
++# below opts back in by monkeypatching it directly. laya_gate.predict is
++# monkeypatched -- no model is loaded.
++# ---------------------------------------------------------------------
++NEW_TOPIC = {"name": "Topic A", "summary": "summary A"}
++CANDIDATES = [{"topic_id": "t2", "name": "Related Topic", "score": 0.7,
++              "summary": "somewhat related summary"}]
++
++
++def _tag_reply(tag, probs=None):
++    probs = probs or {"new": 0.0, "duplicate": 0.0, "merge": 0.0}
++    probs[tag] = max(probs.get(tag, 0.0), 0.01)
++    return {"answers": {"tag": {"type": "choice", "choice": tag, "probabilities": probs}}}
++
++
++class TestLayaGateOff:
++    def test_gate_off_is_pure_passthrough_to_llm_arbitrate(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "off")
++        calls = []
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", lambda *a, **k: calls.append(1))
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
++                            lambda *a, **k: {"tag": "merge", "target_topic_id": "t2"})
++        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++        assert result == {"tag": "merge", "target_topic_id": "t2"}
++        assert calls == []
++
++
++class TestLayaGateObserve:
++    def test_observe_mode_still_calls_llm_and_does_not_change_the_result(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "observe")
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
++                            lambda *a, **k: _tag_reply("duplicate", {"duplicate": 0.99}))
++        llm_calls = []
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
++                            lambda *a, **k: llm_calls.append(1) or {"tag": "merge", "target_topic_id": "t2"})
++        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++        assert result == {"tag": "merge", "target_topic_id": "t2"}   # the LLM's answer, not Laya's
++        assert llm_calls == [1]
++
++    def test_observe_mode_counts_would_skip_and_disagreement(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "observe")
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
++                            lambda *a, **k: _tag_reply("duplicate", {"duplicate": 0.99}))
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
++                            lambda *a, **k: {"tag": "merge", "target_topic_id": "t2"})
++        overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++        stats = overlapping_checker.get_overlap_gate_stats()
++        assert stats["disagreed"] == 1 and stats["agreed"] == 0
++        assert stats["would_skip"] == 1 and stats["would_skip_wrong"] == 1
++        assert stats["skip_precision"] == pytest.approx(0.0)
++        assert stats["skipped"] == 0   # observe never actually skips
++
++    def test_observe_mode_low_confidence_is_not_counted_as_would_skip(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "observe")
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
++                            lambda *a, **k: _tag_reply("merge", {"merge": 0.4}))
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
++                            lambda *a, **k: {"tag": "merge", "target_topic_id": "t2"})
++        overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++        stats = overlapping_checker.get_overlap_gate_stats()
++        assert stats["agreed"] == 1
++        assert stats["would_skip"] == 0
++
++
++class TestLayaGateOn:
++    def test_on_mode_skips_llm_when_confident(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
++                            lambda *a, **k: _tag_reply("duplicate", {"duplicate": 0.95}))
++        llm_calls = []
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate", lambda *a, **k: llm_calls.append(1))
++
++        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++
++        assert result == {"tag": "duplicate", "target_topic_id": "t2"}   # candidates[0]'s id
++        assert llm_calls == []
++        assert overlapping_checker.get_overlap_gate_stats()["skipped"] == 1
++
++    def test_on_mode_new_tag_has_no_target_topic_id(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
++                            lambda *a, **k: _tag_reply("new", {"new": 0.95}))
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate", lambda *a, **k: (_ for _ in ()).throw(
++            AssertionError("LLM must not be called")))
++        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++        assert result == {"tag": "new", "target_topic_id": None}
++
++    def test_on_mode_falls_through_to_llm_below_threshold(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
++                            lambda *a, **k: _tag_reply("duplicate", {"duplicate": 0.5}))
++        llm_calls = []
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
++                            lambda *a, **k: llm_calls.append(1) or {"tag": "new", "target_topic_id": None})
++        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++        assert llm_calls == [1]
++        assert result == {"tag": "new", "target_topic_id": None}
++
++    def test_on_mode_falls_through_when_laya_unavailable(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", lambda *a, **k: None)
++        llm_calls = []
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
++                            lambda *a, **k: llm_calls.append(1) or {"tag": "merge", "target_topic_id": "t2"})
++        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++        assert llm_calls == [1]
++        assert result == {"tag": "merge", "target_topic_id": "t2"}
++
++    def test_on_mode_falls_through_when_laya_raises(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
++
++        def boom(*a, **k):
++            raise RuntimeError("boom")
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", boom)
++        llm_calls = []
++        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
++                            lambda *a, **k: llm_calls.append(1) or {"tag": "new", "target_topic_id": None})
++        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
++        assert llm_calls == [1]
++        assert result == {"tag": "new", "target_topic_id": None}
++
++
++class TestLayaTagHelper:
++    def test_uses_probabilities_not_the_choice_confidence_field(self, monkeypatch):
++        """Tier 1/3 lesson: the `choice` answer's own `confidence` field
++        can read misleadingly low even for a clear top choice on this
++        checkpoint -- _laya_tag must use `probabilities[choice]` instead."""
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", lambda *a, **k: {
++            "answers": {"tag": {"type": "choice", "choice": "duplicate",
++                                "confidence": 0.02,   # deliberately misleading
++                                "probabilities": {"duplicate": 0.9, "merge": 0.07, "new": 0.03}}}})
++        tag, prob = overlapping_checker._laya_tag(NEW_TOPIC, CANDIDATES)
++        assert tag == "duplicate" and prob == pytest.approx(0.9)
++
++    def test_only_shows_the_top_two_candidates(self, monkeypatch):
++        seen = {}
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
++                            lambda state, q, site="u": seen.update(state=state) or
++                            _tag_reply("new", {"new": 0.9}))
++        many = [{"topic_id": f"t{i}", "name": f"n{i}", "score": 0.9 - i * 0.01, "summary": f"s{i}"}
++                for i in range(5)]
++        overlapping_checker._laya_tag(NEW_TOPIC, many)
++        assert "n0" in seen["state"]["candidates"] and "n1" in seen["state"]["candidates"]
++        assert "n4" not in seen["state"]["candidates"]
++
++    def test_returns_none_on_malformed_result(self, monkeypatch):
++        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", lambda *a, **k: {"answers": {}})
++        assert overlapping_checker._laya_tag(NEW_TOPIC, CANDIDATES) is None
++
++
++class TestOverlapGateStatsPrecision:
++    def test_precision_is_none_with_no_data(self):
++        assert overlapping_checker.get_overlap_gate_stats()["skip_precision"] is None

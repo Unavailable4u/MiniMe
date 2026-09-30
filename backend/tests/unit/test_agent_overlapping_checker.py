@@ -222,3 +222,166 @@ class TestAlwaysUpserts:
         fake_vector_index.upsert.assert_called_once()
         vectors = fake_vector_index.upsert.call_args.kwargs["vectors"]
         assert vectors[0][0] == "topic:ws1:t1"
+
+
+# ---------------------------------------------------------------------
+# Laya pre-gate (Tier 4 of the Laya migration, 2026-09-29) -- gates the
+# ambiguous-band arbitration above via _arbitrate(). The suite-wide
+# conftest.py autouse fixture forces LAYA_OVERLAP_MODE = "off"; each test
+# below opts back in by monkeypatching it directly. laya_gate.predict is
+# monkeypatched -- no model is loaded.
+# ---------------------------------------------------------------------
+NEW_TOPIC = {"name": "Topic A", "summary": "summary A"}
+CANDIDATES = [{"topic_id": "t2", "name": "Related Topic", "score": 0.7,
+              "summary": "somewhat related summary"}]
+
+
+def _tag_reply(tag, probs=None):
+    probs = probs or {"new": 0.0, "duplicate": 0.0, "merge": 0.0}
+    probs[tag] = max(probs.get(tag, 0.0), 0.01)
+    return {"answers": {"tag": {"type": "choice", "choice": tag, "probabilities": probs}}}
+
+
+class TestLayaGateOff:
+    def test_gate_off_is_pure_passthrough_to_llm_arbitrate(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "off")
+        calls = []
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
+                            lambda *a, **k: {"tag": "merge", "target_topic_id": "t2"})
+        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+        assert result == {"tag": "merge", "target_topic_id": "t2"}
+        assert calls == []
+
+
+class TestLayaGateObserve:
+    def test_observe_mode_still_calls_llm_and_does_not_change_the_result(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "observe")
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
+                            lambda *a, **k: _tag_reply("duplicate", {"duplicate": 0.99}))
+        llm_calls = []
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
+                            lambda *a, **k: llm_calls.append(1) or {"tag": "merge", "target_topic_id": "t2"})
+        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+        assert result == {"tag": "merge", "target_topic_id": "t2"}   # the LLM's answer, not Laya's
+        assert llm_calls == [1]
+
+    def test_observe_mode_counts_would_skip_and_disagreement(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "observe")
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
+                            lambda *a, **k: _tag_reply("duplicate", {"duplicate": 0.99}))
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
+                            lambda *a, **k: {"tag": "merge", "target_topic_id": "t2"})
+        overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+        stats = overlapping_checker.get_overlap_gate_stats()
+        assert stats["disagreed"] == 1 and stats["agreed"] == 0
+        assert stats["would_skip"] == 1 and stats["would_skip_wrong"] == 1
+        assert stats["skip_precision"] == pytest.approx(0.0)
+        assert stats["skipped"] == 0   # observe never actually skips
+
+    def test_observe_mode_low_confidence_is_not_counted_as_would_skip(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "observe")
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
+                            lambda *a, **k: _tag_reply("merge", {"merge": 0.4}))
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
+                            lambda *a, **k: {"tag": "merge", "target_topic_id": "t2"})
+        overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+        stats = overlapping_checker.get_overlap_gate_stats()
+        assert stats["agreed"] == 1
+        assert stats["would_skip"] == 0
+
+
+class TestLayaGateOn:
+    def test_on_mode_skips_llm_when_confident(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
+                            lambda *a, **k: _tag_reply("duplicate", {"duplicate": 0.95}))
+        llm_calls = []
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate", lambda *a, **k: llm_calls.append(1))
+
+        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+
+        assert result == {"tag": "duplicate", "target_topic_id": "t2"}   # candidates[0]'s id
+        assert llm_calls == []
+        assert overlapping_checker.get_overlap_gate_stats()["skipped"] == 1
+
+    def test_on_mode_new_tag_has_no_target_topic_id(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
+                            lambda *a, **k: _tag_reply("new", {"new": 0.95}))
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("LLM must not be called")))
+        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+        assert result == {"tag": "new", "target_topic_id": None}
+
+    def test_on_mode_falls_through_to_llm_below_threshold(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_THRESHOLD", 0.85)
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
+                            lambda *a, **k: _tag_reply("duplicate", {"duplicate": 0.5}))
+        llm_calls = []
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
+                            lambda *a, **k: llm_calls.append(1) or {"tag": "new", "target_topic_id": None})
+        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+        assert llm_calls == [1]
+        assert result == {"tag": "new", "target_topic_id": None}
+
+    def test_on_mode_falls_through_when_laya_unavailable(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", lambda *a, **k: None)
+        llm_calls = []
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
+                            lambda *a, **k: llm_calls.append(1) or {"tag": "merge", "target_topic_id": "t2"})
+        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+        assert llm_calls == [1]
+        assert result == {"tag": "merge", "target_topic_id": "t2"}
+
+    def test_on_mode_falls_through_when_laya_raises(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker, "LAYA_OVERLAP_MODE", "on")
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", boom)
+        llm_calls = []
+        monkeypatch.setattr(overlapping_checker, "_llm_arbitrate",
+                            lambda *a, **k: llm_calls.append(1) or {"tag": "new", "target_topic_id": None})
+        result = overlapping_checker._arbitrate(NEW_TOPIC, CANDIDATES)
+        assert llm_calls == [1]
+        assert result == {"tag": "new", "target_topic_id": None}
+
+
+class TestLayaTagHelper:
+    def test_uses_probabilities_not_the_choice_confidence_field(self, monkeypatch):
+        """Tier 1/3 lesson: the `choice` answer's own `confidence` field
+        can read misleadingly low even for a clear top choice on this
+        checkpoint -- _laya_tag must use `probabilities[choice]` instead."""
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", lambda *a, **k: {
+            "answers": {"tag": {"type": "choice", "choice": "duplicate",
+                                "confidence": 0.02,   # deliberately misleading
+                                "probabilities": {"duplicate": 0.9, "merge": 0.07, "new": 0.03}}}})
+        tag, prob = overlapping_checker._laya_tag(NEW_TOPIC, CANDIDATES)
+        assert tag == "duplicate" and prob == pytest.approx(0.9)
+
+    def test_only_shows_the_top_two_candidates(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict",
+                            lambda state, q, site="u": seen.update(state=state) or
+                            _tag_reply("new", {"new": 0.9}))
+        many = [{"topic_id": f"t{i}", "name": f"n{i}", "score": 0.9 - i * 0.01, "summary": f"s{i}"}
+                for i in range(5)]
+        overlapping_checker._laya_tag(NEW_TOPIC, many)
+        assert "n0" in seen["state"]["candidates"] and "n1" in seen["state"]["candidates"]
+        assert "n4" not in seen["state"]["candidates"]
+
+    def test_returns_none_on_malformed_result(self, monkeypatch):
+        monkeypatch.setattr(overlapping_checker.laya_gate, "predict", lambda *a, **k: {"answers": {}})
+        assert overlapping_checker._laya_tag(NEW_TOPIC, CANDIDATES) is None
+
+
+class TestOverlapGateStatsPrecision:
+    def test_precision_is_none_with_no_data(self):
+        assert overlapping_checker.get_overlap_gate_stats()["skip_precision"] is None
