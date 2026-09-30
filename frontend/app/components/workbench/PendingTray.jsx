@@ -19,6 +19,7 @@ import { useState } from "react";
 import { AlertTriangle, Check, ChevronRight, Loader2, RefreshCw, X } from "lucide-react";
 import { fileDiffStats } from "../../lib/workbench/reviewMode";
 import ResponsiveSheet from "../mobile/ResponsiveSheet";
+import { elementLabel } from "../../lib/workbench/elementRef"; // W7.1b
 
 const OP_LABELS = { create: "new", delete: "deleted" }; // mirrors ReviewPanel.jsx's own copy
 
@@ -62,6 +63,19 @@ function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) 
             .map((r) => (
               <li key={r.id || r.path} className="truncate text-[11px] text-[var(--neutral-500)]">
                 {folderRefLabel(r)}
+              </li>
+            ))}
+        </ul>
+      )}
+      {/* W7.1b: what the edit was asked about, when it came from an element chip —
+          the same `button.btn-primary` label the chip itself wore. */}
+      {proposal.refs?.some((r) => r.kind === "element" && r.element) && (
+        <ul className="space-y-0.5">
+          {proposal.refs
+            .filter((r) => r.kind === "element" && r.element)
+            .map((r) => (
+              <li key={r.id || `${r.path}:${r.fromLine}`} className="truncate text-[11px] text-[var(--neutral-500)]">
+                Element {elementLabel(r.element)} · {r.path}{r.fromLine != null ? `:${r.fromLine}` : ""}
               </li>
             ))}
         </ul>

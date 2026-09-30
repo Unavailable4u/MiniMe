@@ -106,6 +106,7 @@ import { deleteSummary } from "../../lib/workbench/explorerOps";
 import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
 import { jumpToPosition } from "../../lib/workbench/gotoPosition";
 import { parseMm, rangeFromMm } from "../../lib/preview/mmRange"; // W6.5
+import { componentNamesFromSource, findUsageSites, usageCandidatePaths } from "../../lib/workbench/usageSites"; // W7.1b
 import {
   buildDecisions,
   deletedPathsToKeep,
@@ -160,6 +161,12 @@ const AUTOSAVE_DELAY_MS = 1500;
 const EXPLORER_DEFAULT_WIDTH = 240;
 const EXPLORER_MIN_WIDTH = 160;
 const EXPLORER_MAX_WIDTH = 480;
+
+// W7.1b: bounds on an element chip's "Find usages" scan (see the effect
+// below). Generous for a hand-built project; a bigger one gets a notice
+// that the search was partial rather than a long wait.
+const USAGE_SEARCH_MAX_FILES = 300;
+const USAGE_SEARCH_CONCURRENCY = 6;
 
 /**
  * One CodeMirror editor for one open file. Every open tab keeps its own
@@ -266,7 +273,19 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // W4.1: see this component's own import comment on why this is
   // available here even though CodeContextProvider is mounted in
   // BuildTab.jsx, above this whole component.
-  const { addRef, remapRefs, pendingJump, clearJump, pendingReview, clearReview, requestChatMode } = useCodeContext();
+  const {
+    addRef,
+    remapRefs,
+    pendingJump,
+    clearJump,
+    pendingReview,
+    clearReview,
+    requestChatMode,
+    // W7.1b
+    pendingUsage,
+    clearPendingUsage,
+    setUsageResult,
+  } = useCodeContext();
 
   // W3.1: which provider backs the workbench right now — read from
   // `layout.source` (see layoutPrefs.js's own header on why it lives
@@ -1185,6 +1204,69 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
     openFile(ref.path);
     jumpToPositionInPane(ref.path, { line: ref.fromLine ?? 1, endLine: ref.toLine ?? undefined });
   }, [pendingJump, clearJump, openFile, jumpToPositionInPane]);
+
+  // W7.1b: an element chip's "Find usages" (ContextChips.jsx →
+  // codeContext.js's REQUEST_USAGE_SITES). The store can't do this
+  // itself — the provider and the open buffers live here — so this names
+  // the component(s) the chip's file defines, reads the project's source
+  // files (an open tab's LIVE text when there is one, same preference as
+  // Project Search's getOpenText) and reports back through
+  // setUsageResult. usageSites.js is the text-search fallback the plan
+  // calls for; it lists candidates and adds nothing to the chat itself.
+  // `usageSeqRef` makes a newer request win over one still reading.
+  const usageSeqRef = useRef(0);
+  useEffect(() => {
+    if (!pendingUsage) return;
+    const ref = pendingUsage;
+    clearPendingUsage();
+    const seq = ++usageSeqRef.current;
+    (async () => {
+      try {
+        const open = stateRef.current.buffers[ref.path];
+        const ownText = open ? open.edited : (await provider.read(ref.path)).content ?? "";
+        const names = componentNamesFromSource(ref.path, ownText);
+        if (names.length === 0) {
+          setUsageResult({ refId: ref.id, status: "done", names, message: "Couldn't tell which component this file defines." });
+          return;
+        }
+        const all = usageCandidatePaths(allFilePaths, ref.path);
+        const candidates = all.slice(0, USAGE_SEARCH_MAX_FILES);
+        const texts = {};
+        for (let i = 0; i < candidates.length; i += USAGE_SEARCH_CONCURRENCY) {
+          if (seq !== usageSeqRef.current) return; // superseded
+          await Promise.all(
+            candidates.slice(i, i + USAGE_SEARCH_CONCURRENCY).map(async (p) => {
+              const b = stateRef.current.buffers[p];
+              if (b) {
+                texts[p] = b.edited;
+                return;
+              }
+              try {
+                texts[p] = (await provider.read(p)).content ?? "";
+              } catch {
+                // One unreadable file (deleted mid-scan, a network blip)
+                // just isn't searched — same stance as useProjectSearch.
+              }
+            })
+          );
+        }
+        if (seq !== usageSeqRef.current) return;
+        const { sites, truncated } = findUsageSites(texts, names, { excludePath: ref.path });
+        setUsageResult({
+          refId: ref.id,
+          status: "done",
+          names,
+          sites,
+          truncated,
+          message: all.length > candidates.length ? `Only the first ${candidates.length} of ${all.length} source files were searched.` : null,
+        });
+      } catch (err) {
+        if (seq === usageSeqRef.current) {
+          setUsageResult({ refId: ref.id, status: "error", message: `Couldn't search for usages: ${err.message}` });
+        }
+      }
+    })();
+  }, [pendingUsage, clearPendingUsage, setUsageResult, provider, allFilePaths]);
 
   // W5.3: fetches the proposal `pendingReview` only names by id — see
   // codeContext.js's SET_PENDING_REVIEW comment on why this doesn't
