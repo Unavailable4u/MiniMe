@@ -52,6 +52,7 @@ from agents.source_manager import (
 )
 from eo import (
     chat_workspace,
+    code_findings,  # NEW — W8.3a: scan/test findings stored alongside the code files
     code_loader,
     conversation_memory,
     fact_summarizer,  # NEW — Part 3, extended by Patch B2
@@ -798,7 +799,15 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
         return
 
     from memory.bus import KEYS, read_many
-    _vals = read_many([KEYS["fixed_code"], KEYS["submitted_code"], "file_map"], default=None)
+    # W8.3a: test_results / security_scan_results ride along in the same
+    # mget round trip -- they feed the findings stored below, and are
+    # read with .get() since a run that never reached the sandbox tester
+    # or the scanner pool simply has neither.
+    _vals = read_many(
+        [KEYS["fixed_code"], KEYS["submitted_code"], "file_map",
+         KEYS["test_results"], KEYS["security_scan_results"]],
+        default=None,
+    )
     code_source = _vals[KEYS["fixed_code"]] or _vals[KEYS["submitted_code"]]
     file_map = _vals["file_map"]
     if not code_source or not file_map:
@@ -821,6 +830,7 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
     # immediately. Path validation itself happens inside write_files()
     # (see its own docstring for why that's fine here).
     pending_files = []
+    written_modules = {}   # W8.3a: module_name -> {"path", "code"}, for findings
     for module_name, rel_path in file_map.items():
         data = code_source.get(module_name)
         if data is None:
@@ -848,6 +858,7 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
                   f"(not overwriting any existing file at that path).")
             continue
         pending_files.append({"file_path": rel_path, "content": code, "language": language})
+        written_modules[module_name] = {"path": rel_path, "code": code}
 
     if not pending_files:
         return
@@ -864,6 +875,32 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
               f"{len(pending_files)} file(s), ws_id={ws_id!r}, skipped "
               f"(fail-open): {exc}")
         return
+
+    # W8.3a — store this run's scan/test findings for the files just
+    # written, BEFORE the CODE_FILE_UPDATED event below, so the
+    # frontend's existing refetch-on-that-event finds them already
+    # there (no new event type needed). Every file in the batch has its
+    # findings REPLACED -- including with none -- since each one is a
+    # new version of its file and an older version's findings (and line
+    # numbers) don't apply to it. Fail-open, and kept in its own
+    # try/except so a findings hiccup can neither skip the event below
+    # nor fail the already-saved files.
+    try:
+        code_findings.replace_findings(
+            ws_id,
+            [row.get("file_path") for row in saved_rows],
+            code_findings.build_findings(
+                written_modules,
+                _vals.get(KEYS["test_results"]),
+                _vals.get(KEYS["security_scan_results"]),
+            ),
+            owner_id,
+            file_versions={row.get("file_path"): row.get("version") for row in saved_rows},
+        )
+    except Exception as exc:
+        print(f"  [task_runner] code findings write-back failed for "
+              f"{len(saved_rows)} file(s), ws_id={ws_id!r}, skipped "
+              f"(fail-open): {exc}")
 
     # NEW — same live-refetch pattern as _write_plan_panels()'s
     # PANEL_CONTENT_UPDATED emission: tell every dock/tab that has this
