@@ -61,7 +61,6 @@ from fastapi import (  # NEW — §9b
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 # B6 — auth/JWT verification (SUPABASE_URL, require_auth,
@@ -69,6 +68,7 @@ from fastapi.responses import JSONResponse
 # so api/routes/* modules can import it without a circular import back
 # into this file. See api/deps.py's module docstring for why.
 from api.deps import _verify_supabase_jwt
+from api.middleware import add_cors_and_error_middleware
 from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
 from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
 from eo import db  # NEW — startup DB pool warm-up, see _lifespan()
@@ -266,12 +266,12 @@ app = FastAPI(title="MiniMe v6 — EO layer API", lifespan=_lifespan)
 # read it. See that file's own copy of this same comment/definition.
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
+# CORS + the unhandled-error net, installed together because their ORDER
+# matters: without the error middleware sitting just inside CORS, an
+# unhandled exception (any DB error, any bug) is answered by Starlette's
+# outermost layer with NO CORS headers, and the browser reports an
+# opaque "Failed to fetch" instead of the real 500. See api/middleware.py.
+add_cors_and_error_middleware(app, ALLOWED_ORIGINS)
 
 
 # perf audit §4.6 / priority #9 (part 1): eo/db.py's cursor() now retries

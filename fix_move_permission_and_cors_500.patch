@@ -1,0 +1,686 @@
+diff --git a/backend/api/middleware.py b/backend/api/middleware.py
+new file mode 100644
+index 0000000..9a9e77d
+--- /dev/null
++++ b/backend/api/middleware.py
+@@ -0,0 +1,111 @@
++"""
++api/middleware.py — keeps unhandled server errors readable by the browser.
++
++THE PROBLEM THIS EXISTS TO SOLVE
++--------------------------------
++Starlette builds the middleware stack as
++
++    ServerErrorMiddleware -> [user middleware, e.g. CORSMiddleware] -> ExceptionMiddleware -> routes
++
++`HTTPException`, `RequestValidationError` and every exception that has
++its own `@app.exception_handler` (DatabaseUnavailable, AgentPoolSaturated,
++AgentTaskTimeout in api/server.py) are answered by ExceptionMiddleware,
++which sits INSIDE CORSMiddleware, so those responses get their
++`Access-Control-Allow-Origin` header. An exception nobody handles (a
++psycopg error, a plain bug) instead escapes all the way up to
++ServerErrorMiddleware, the OUTERMOST layer, which writes its bare
++"Internal Server Error" 500 from outside CORSMiddleware: no CORS
++headers. The browser then refuses to expose that response to the page
++and `fetch()` rejects with an opaque "TypeError: Failed to fetch" — so
++every backend bug (e.g. the Build tab's move/rename hitting a database
++permission error) looked like a connectivity problem, and the real
++status code and message were invisible to the frontend.
++
++(`@app.exception_handler(Exception)` does NOT help: Starlette routes
++that one specifically to ServerErrorMiddleware too, so it has the same
++problem.)
++
++THE FIX
++-------
++UnhandledErrorMiddleware sits just INSIDE CORSMiddleware. It catches
++whatever the routes/ExceptionMiddleware didn't handle and answers with a
++JSON 500 in the same `{"detail": ...}` shape HTTPException produces
++(what the frontend's error parsing already reads). That response then
++travels out through CORSMiddleware's `send`, which stamps the CORS
++headers on it like any other response.
++
++It then RE-RAISES the original exception. That is deliberate and is
++Starlette's own convention (ServerErrorMiddleware "always continues to
++raise the exception"): the response is already sent, so the re-raise
++changes nothing for the client, but it keeps the existing behavior of
++uvicorn logging the full traceback and Sentry's integration capturing
++the error. Swallowing it here would silence both.
++
++The client only ever sees a generic message; the exception text can
++contain SQL, table names or file paths and stays in the server log.
++
++Use add_cors_and_error_middleware() rather than adding the two
++middlewares by hand: the ORDER is the whole point (this one must be
++added BEFORE CORSMiddleware, since the last middleware added is the
++outermost), and having one function own it lets tests pin the order.
++"""
++import contextlib
++
++from fastapi import FastAPI
++from fastapi.middleware.cors import CORSMiddleware
++from fastapi.responses import JSONResponse
++from starlette.types import ASGIApp, Message, Receive, Scope, Send
++
++# Generic on purpose — see the module docstring.
++INTERNAL_ERROR_DETAIL = "Internal server error"
++
++
++class UnhandledErrorMiddleware:
++    """Pure-ASGI (not BaseHTTPMiddleware) so it adds no buffering or
++    task-group overhead to streaming responses such as the task SSE
++    stream. Only HTTP scopes are touched; websocket/lifespan pass
++    straight through."""
++
++    def __init__(self, app: ASGIApp) -> None:
++        self.app = app
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if scope["type"] != "http":
++            await self.app(scope, receive, send)
++            return
++
++        response_started = False
++
++        async def tracking_send(message: Message) -> None:
++            nonlocal response_started
++            if message["type"] == "http.response.start":
++                response_started = True
++            await send(message)
++
++        try:
++            await self.app(scope, receive, tracking_send)
++        except Exception:
++            # Once headers have gone out (e.g. a streaming response that
++            # failed midway) there is no way to change the status, so
++            # only answer if nothing has been sent yet.
++            if not response_started:
++                # Best effort: if the client already disconnected, the
++                # send fails — that must not mask the original error.
++                with contextlib.suppress(Exception):
++                    response = JSONResponse({"detail": INTERNAL_ERROR_DETAIL}, status_code=500)
++                    await response(scope, receive, send)
++            # Always re-raise: uvicorn logs the traceback, Sentry captures it.
++            raise
++
++
++def add_cors_and_error_middleware(app: FastAPI, allowed_origins: list[str]) -> None:
++    """Installs UnhandledErrorMiddleware and CORSMiddleware in the one
++    order that works: error middleware first (inner), CORS last
++    (outer), so the error middleware's 500 passes through CORS."""
++    app.add_middleware(UnhandledErrorMiddleware)
++    app.add_middleware(
++        CORSMiddleware,
++        allow_origins=allowed_origins,
++        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
++        allow_headers=["*"],
++    )
+diff --git a/backend/api/server.py b/backend/api/server.py
+index 4812a11..2eec08e 100644
+--- a/backend/api/server.py
++++ b/backend/api/server.py
+@@ -61,7 +61,6 @@ from fastapi import (  # NEW — §9b
+     WebSocket,
+     WebSocketDisconnect,
+ )
+-from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import JSONResponse
+ 
+ # B6 — auth/JWT verification (SUPABASE_URL, require_auth,
+@@ -69,6 +68,7 @@ from fastapi.responses import JSONResponse
+ # so api/routes/* modules can import it without a circular import back
+ # into this file. See api/deps.py's module docstring for why.
+ from api.deps import _verify_supabase_jwt
++from api.middleware import add_cors_and_error_middleware
+ from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
+ from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
+ from eo import db  # NEW — startup DB pool warm-up, see _lifespan()
+@@ -266,12 +266,12 @@ app = FastAPI(title="MiniMe v6 — EO layer API", lifespan=_lifespan)
+ # read it. See that file's own copy of this same comment/definition.
+ 
+ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+-app.add_middleware(
+-    CORSMiddleware,
+-    allow_origins=ALLOWED_ORIGINS,
+-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+-    allow_headers=["*"],
+-)
++# CORS + the unhandled-error net, installed together because their ORDER
++# matters: without the error middleware sitting just inside CORS, an
++# unhandled exception (any DB error, any bug) is answered by Starlette's
++# outermost layer with NO CORS headers, and the browser reports an
++# opaque "Failed to fetch" instead of the real 500. See api/middleware.py.
++add_cors_and_error_middleware(app, ALLOWED_ORIGINS)
+ 
+ 
+ # perf audit §4.6 / priority #9 (part 1): eo/db.py's cursor() now retries
+diff --git a/backend/eo/workspace_code_files.py b/backend/eo/workspace_code_files.py
+index 14a5799..874df43 100644
+--- a/backend/eo/workspace_code_files.py
++++ b/backend/eo/workspace_code_files.py
+@@ -874,17 +874,40 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
+     Unlike a plain overwrite, a move carries the file's identity
+     forward rather than treating the new path as a brand-new file:
+     every existing row in workspace_code_file_versions for the old
+-    path is re-keyed to the new path FIRST, then the content that was
+-    live at the old path is snapshotted into history at the new path
+-    (source="user" — there's no dedicated "move" source value; this
+-    doesn't touch migrations/0009_code_file_versions.sql's CHECK
+-    constraint, and a move is a person-initiated write-like action the
+-    same way a Save is), and finally the live row is re-inserted under
+-    the new path one version higher. End state: `get_file_history()`
+-    on the NEW path returns the file's complete history, old versions
+-    included, with no gap at the point of the move — same "nothing is
+-    ever lost, including this operation itself" posture
+-    restore_version() already documents for itself.
++    path is copied to the new path FIRST and the old-path rows then
++    deleted, then the content that was live at the old path is
++    snapshotted into history at the new path (source="user" — there's
++    no dedicated "move" source value; this doesn't touch
++    migrations/0009_code_file_versions.sql's CHECK constraint, and a
++    move is a person-initiated write-like action the same way a Save
++    is), and finally the live row is re-inserted under the new path
++    one version higher. End state: `get_file_history()` on the NEW
++    path returns the file's complete history, old versions included,
++    with no gap at the point of the move — same "nothing is ever lost,
++    including this operation itself" posture restore_version()
++    already documents for itself.
++
++    The history copy is INSERT ... SELECT + DELETE, never an UPDATE of
++    file_path: migration 0009 deliberately REVOKEs UPDATE on
++    workspace_code_file_versions from minime_app ("once a version row
++    is written ... nothing in this codebase should ever rewrite it"),
++    so an `update ... set file_path` is rejected by Postgres with
++    "permission denied" before it touches a single row — which is
++    exactly what made every move/rename return a 500 before this fix.
++    Insert + delete are both granted, and a version row is never
++    mutated, only copied under a new key and removed from the old one,
++    all inside this one transaction.
++
++    A destination path can already have history rows of its own even
++    though no live file is there (delete_file() removes the live row
++    but deliberately keeps history so the file stays restorable). Copying
++    the moved file's versions in unchanged would collide with those on
++    the (workspace_id, file_path, version) primary key, so incoming
++    version numbers are shifted up by the highest version already in
++    history at that destination. Existing history is left alone and
++    version numbers at a path stay strictly increasing; with no
++    leftover history the shift is 0 and numbers are carried over
++    as-is.
+ 
+     Refuses (raises ValueError, which the route layer turns into a
+     400) rather than silently overwriting when:
+@@ -904,7 +927,9 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
+         spec asks for. A destination that collides with another row
+         in the SAME batch (only possible if that row is also moving
+         away from under `from_path`) is not a real collision and is
+-        allowed.
++        allowed; the rows are processed in an order (see the sort
++        below) that guarantees such a row has already moved out of the
++        way by the time another one lands on its old path.
+ 
+     The initial discovery SELECT takes `for update` on every row this
+     move will touch, in one statement — same row-locking reasoning
+@@ -962,14 +987,54 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
+         if real_collisions:
+             raise ValueError(f"refusing to overwrite existing path(s): {sorted(real_collisions)}")
+ 
++        # Highest version already in history at each destination (see
++        # this function's docstring: a deleted file's history outlives
++        # its live row, and incoming versions must land above it).
++        cur.execute(
++            "select file_path, max(version) as max_version "
++            "from workspace_code_file_versions "
++            "where workspace_id = %s and file_path = any(%s) group by file_path",
++            (ws_id, new_paths),
++        )
++        dest_history_max = {r["file_path"]: r["max_version"] for r in cur.fetchall()}
++
++        # Rows are handled one at a time, so a row whose destination is
++        # ANOTHER batch row's current path (allowed above) must come
++        # after that row has moved away, or its insert hits a live
++        # primary-key conflict. That overlap only exists when `to_path`
++        # is an ancestor of `from_path` — moving `a/b` up to `a` when
++        # both `a/b/c` and `a/b/b/c` exist sends `a/b/b/c` -> `a/b/c`
++        # while `a/b/c` -> `a/c`. Every path shrinks by the same amount
++        # there, so shortest-first always moves the occupant of a
++        # destination out before whatever lands on it (without this the
++        # same move succeeds or fails with a UniqueViolation depending
++        # on the rows' physical order). Any other move can't overlap,
++        # so the discovery order is left alone.
++        if from_path.startswith(to_path + "/"):
++            moves.sort(key=lambda m: len(m[0]["file_path"]))
++
+         now = _now()
+         moved_shapes = []
+         for row, new_path in moves:
+             old_path = row["file_path"]
++            history_shift = dest_history_max.get(new_path, 0)
++            # Carry the old path's history over: copy under the new key,
++            # then drop the old rows. NEVER `update ... set file_path`
++            # here — minime_app has no UPDATE on this table (migration
++            # 0009), see this function's docstring.
++            cur.execute(
++                """
++                insert into workspace_code_file_versions
++                    (workspace_id, file_path, version, content, updated_at, updated_by, source)
++                select workspace_id, %s, version + %s, content, updated_at, updated_by, source
++                from workspace_code_file_versions
++                where workspace_id = %s and file_path = %s
++                """,
++                (new_path, history_shift, ws_id, old_path),
++            )
+             cur.execute(
+-                "update workspace_code_file_versions set file_path = %s "
+-                "where workspace_id = %s and file_path = %s",
+-                (new_path, ws_id, old_path),
++                "delete from workspace_code_file_versions where workspace_id = %s and file_path = %s",
++                (ws_id, old_path),
+             )
+             cur.execute(
+                 """
+@@ -977,14 +1042,14 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
+                     (workspace_id, file_path, version, content, updated_at, updated_by, source)
+                 values (%s, %s, %s, %s, %s, %s, %s)
+                 """,
+-                (ws_id, new_path, row["version"], row["content"],
++                (ws_id, new_path, row["version"] + history_shift, row["content"],
+                  row["updated_at"], row["updated_by"], "user"),
+             )
+             cur.execute(
+                 "delete from workspace_code_files where workspace_id = %s and file_path = %s",
+                 (ws_id, old_path),
+             )
+-            new_version = row["version"] + 1
++            new_version = row["version"] + history_shift + 1
+             cur.execute(
+                 """
+                 insert into workspace_code_files
+diff --git a/backend/tests/unit/test_api_middleware.py b/backend/tests/unit/test_api_middleware.py
+new file mode 100644
+index 0000000..6294443
+--- /dev/null
++++ b/backend/tests/unit/test_api_middleware.py
+@@ -0,0 +1,207 @@
++"""
++tests/unit/test_api_middleware.py — api/middleware.py.
++
++The bug these pin: an UNHANDLED exception (a DB error, any bug) used to
++be answered by Starlette's outermost ServerErrorMiddleware, i.e. from
++outside CORSMiddleware, so the 500 carried no Access-Control-Allow-Origin
++header and the browser surfaced it as an opaque "Failed to fetch"
++instead of a readable 500 (this is what made the Build tab's move/rename
++permission error look like a network failure).
++
++These tests build a small app through add_cors_and_error_middleware() —
++the exact function api/server.py calls — rather than importing
++api.server (which boots the DB pool, Sentry, Laya, MCP...), so the real
++middleware order is what's under test.
++"""
++import asyncio
++import warnings
++
++import pytest
++from fastapi import FastAPI, HTTPException, Request
++from fastapi.middleware.cors import CORSMiddleware
++from fastapi.responses import JSONResponse
++from fastapi.testclient import TestClient
++
++from api.middleware import (
++    INTERNAL_ERROR_DETAIL,
++    UnhandledErrorMiddleware,
++    add_cors_and_error_middleware,
++)
++
++warnings.filterwarnings("ignore", message=".*httpx.*", category=DeprecationWarning)
++
++ORIGIN = "http://localhost:3000"
++
++
++class _Saturated(Exception):
++    """Stands in for DatabaseUnavailable & co: has its own handler."""
++
++
++def _build_app() -> FastAPI:
++    app = FastAPI()
++
++    @app.exception_handler(_Saturated)
++    async def _saturated(request: Request, exc: _Saturated):
++        return JSONResponse({"detail": "busy"}, status_code=503, headers={"Retry-After": "2"})
++
++    add_cors_and_error_middleware(app, [ORIGIN])
++
++    @app.get("/boom")
++    def boom():
++        raise RuntimeError("select * from secret_table failed: permission denied")
++
++    @app.get("/http-error")
++    def http_error():
++        raise HTTPException(status_code=400, detail="bad path")
++
++    @app.get("/saturated")
++    def saturated():
++        raise _Saturated()
++
++    @app.get("/ok")
++    def ok():
++        return {"ok": True}
++
++    return app
++
++
++@pytest.fixture
++def client():
++    # raise_server_exceptions=False: look at the response a browser would get.
++    return TestClient(_build_app(), raise_server_exceptions=False)
++
++
++# ---------------------------------------------------------------------
++# The fix itself
++# ---------------------------------------------------------------------
++
++def test_unhandled_error_is_a_json_500_with_cors_headers(client):
++    r = client.get("/boom", headers={"Origin": ORIGIN})
++    assert r.status_code == 500
++    assert r.headers["access-control-allow-origin"] == ORIGIN
++    assert r.json() == {"detail": INTERNAL_ERROR_DETAIL}
++
++
++def test_unhandled_error_does_not_leak_exception_text(client):
++    r = client.get("/boom", headers={"Origin": ORIGIN})
++    assert "secret_table" not in r.text
++    assert "permission denied" not in r.text
++
++
++def test_unhandled_error_is_still_raised_to_the_server():
++    # The response is sent, but the exception must keep propagating so
++    # uvicorn logs the traceback and Sentry's integration captures it.
++    strict = TestClient(_build_app())  # raise_server_exceptions=True
++    with pytest.raises(RuntimeError, match="secret_table"):
++        strict.get("/boom", headers={"Origin": ORIGIN})
++
++
++def test_cors_is_not_broadened_for_other_origins(client):
++    r = client.get("/boom", headers={"Origin": "http://evil.example"})
++    assert r.status_code == 500
++    assert "access-control-allow-origin" not in r.headers
++
++
++# ---------------------------------------------------------------------
++# Nothing that already worked changes
++# ---------------------------------------------------------------------
++
++def test_http_exception_is_untouched(client):
++    r = client.get("/http-error", headers={"Origin": ORIGIN})
++    assert r.status_code == 400
++    assert r.json() == {"detail": "bad path"}
++    assert r.headers["access-control-allow-origin"] == ORIGIN
++
++
++def test_registered_exception_handlers_still_win(client):
++    r = client.get("/saturated", headers={"Origin": ORIGIN})
++    assert r.status_code == 503
++    assert r.headers["retry-after"] == "2"
++    assert r.json() == {"detail": "busy"}
++
++
++def test_successful_requests_are_untouched(client):
++    r = client.get("/ok", headers={"Origin": ORIGIN})
++    assert r.status_code == 200
++    assert r.json() == {"ok": True}
++
++
++def test_preflight_still_answered(client):
++    r = client.options("/boom", headers={"Origin": ORIGIN, "Access-Control-Request-Method": "POST"})
++    assert r.status_code == 200
++    assert "POST" in r.headers["access-control-allow-methods"]
++
++
++def test_premise_cors_alone_does_not_cover_unhandled_errors():
++    """Documents WHY the middleware exists: with CORSMiddleware alone,
++    Starlette's outermost layer answers an unhandled error without CORS
++    headers. If a Starlette upgrade ever makes this fail, the middleware
++    has become unnecessary and can be removed."""
++    app = FastAPI()
++    app.add_middleware(CORSMiddleware, allow_origins=[ORIGIN], allow_methods=["GET"], allow_headers=["*"])
++
++    @app.get("/boom")
++    def boom():
++        raise RuntimeError("x")
++
++    r = TestClient(app, raise_server_exceptions=False).get("/boom", headers={"Origin": ORIGIN})
++    assert r.status_code == 500
++    assert "access-control-allow-origin" not in r.headers
++
++
++# ---------------------------------------------------------------------
++# Raw-ASGI edge cases (driven directly; TestClient can't express these)
++# ---------------------------------------------------------------------
++
++def _run(middleware, scope):
++    sent = []
++
++    async def receive():
++        return {"type": "http.request", "body": b"", "more_body": False}
++
++    async def send(message):
++        sent.append(message)
++
++    async def go():
++        await middleware(scope, receive, send)
++
++    return sent, go
++
++
++def test_error_after_response_started_is_not_answered_twice():
++    async def app(scope, receive, send):
++        await send({"type": "http.response.start", "status": 200, "headers": []})
++        raise RuntimeError("died mid-stream")
++
++    sent, go = _run(UnhandledErrorMiddleware(app), {"type": "http"})
++    with pytest.raises(RuntimeError, match="died mid-stream"):
++        asyncio.run(go())
++
++    starts = [m for m in sent if m["type"] == "http.response.start"]
++    assert len(starts) == 1 and starts[0]["status"] == 200
++
++
++def test_failure_to_send_the_500_does_not_mask_the_original_error():
++    async def app(scope, receive, send):
++        raise ValueError("original")
++
++    async def receive():
++        return {"type": "http.request", "body": b"", "more_body": False}
++
++    async def disconnected_send(message):
++        raise OSError("client went away")
++
++    mw = UnhandledErrorMiddleware(app)
++    with pytest.raises(ValueError, match="original"):
++        asyncio.run(mw({"type": "http"}, receive, disconnected_send))
++
++
++@pytest.mark.parametrize("scope_type", ["websocket", "lifespan"])
++def test_non_http_scopes_pass_straight_through(scope_type):
++    async def app(scope, receive, send):
++        raise RuntimeError("ws failure")
++
++    sent, go = _run(UnhandledErrorMiddleware(app), {"type": scope_type})
++    with pytest.raises(RuntimeError, match="ws failure"):
++        asyncio.run(go())
++    assert sent == []  # no HTTP 500 invented for a non-HTTP scope
+diff --git a/backend/tests/unit/test_eo_workspace_code_files.py b/backend/tests/unit/test_eo_workspace_code_files.py
+index 7725723..940027e 100644
+--- a/backend/tests/unit/test_eo_workspace_code_files.py
++++ b/backend/tests/unit/test_eo_workspace_code_files.py
+@@ -79,10 +79,11 @@ def _now():
+ 
+ 
+ def _file_row(workspace_id="ws_1", file_path="src/app.py", content="print(1)",
+-              language="python"):
++              language="python", version=1):
+     return {
+         "workspace_id": workspace_id, "file_path": file_path, "content": content,
+-        "language": language, "updated_at": _now(), "updated_by": "user_1",
++        "language": language, "version": version,
++        "updated_at": _now(), "updated_by": "user_1",
+     }
+ 
+ 
+@@ -523,3 +524,156 @@ def test_move_path_writes_a_single_summary_audit_entry(monkeypatch):
+     workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
+ 
+     workspace_code_files.write_audit.assert_called_once()
++
++
++# ---------------------------------------------------------------------
++# move_path: grants, history carry-over, ordering
++#
++# The FakeCursor above never talks to Postgres, so on its own it can't
++# notice a statement the database would reject. Migration 0009 REVOKEs
++# UPDATE on workspace_code_file_versions from minime_app; move_path()
++# used to run `update workspace_code_file_versions set file_path = ...`
++# and returned a 500 on EVERY move/rename in production while every
++# test here stayed green. _GrantCheckingCursor rejects exactly what the
++# migration revokes, so that class of bug fails in unit tests too.
++# ---------------------------------------------------------------------
++
++import re
++
++_REVOKED = [  # (statement regex, what migrations/0009_code_file_versions.sql says)
++    (re.compile(r"^\s*update\s+workspace_code_file_versions\b", re.I | re.S),
++     "permission denied for table workspace_code_file_versions (0009 revokes UPDATE)"),
++]
++
++
++class _GrantCheckingCursor(FakeCursor):
++    def execute(self, query, params=None):
++        for pattern, message in _REVOKED:
++            if pattern.search(query):
++                raise PermissionError(message)
++        super().execute(query, params)
++
++
++def _statements(cursor, needle):
++    return [(q, p) for q, p in cursor.executed if needle in " ".join(q.split()).lower()]
++
++
++def test_grant_checking_cursor_really_rejects_update_on_versions():
++    cur = _GrantCheckingCursor()
++    with pytest.raises(PermissionError):
++        cur.execute("update workspace_code_file_versions set file_path = %s", ("x",))
++    cur.execute("insert into workspace_code_file_versions (a) values (%s)", (1,))  # granted
++
++
++def test_move_path_never_updates_the_versions_table(monkeypatch):
++    old_row = _file_row(file_path="src/old.js", version=3)
++    new_row = _file_row(file_path="src/new.js", version=4)
++    cursor = _GrantCheckingCursor(fetchall_results=[[old_row], []], fetchone_results=[new_row])
++    _install_fake_cursor(monkeypatch, cursor)
++
++    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")  # no PermissionError
++
++    assert not _statements(cursor, "update workspace_code_file_versions")
++
++
++def test_move_path_folder_never_updates_the_versions_table(monkeypatch):
++    r1 = _file_row(file_path="src/c/a.js", version=2)
++    r2 = _file_row(file_path="src/c/b.js", version=1)
++    cursor = _GrantCheckingCursor(
++        fetchall_results=[[r1, r2], []],
++        fetchone_results=[dict(r1, file_path="lib/c/a.js", version=3),
++                          dict(r2, file_path="lib/c/b.js", version=2)],
++    )
++    _install_fake_cursor(monkeypatch, cursor)
++
++    workspace_code_files.move_path("ws_1", "src/c", "lib/c", "user_1")
++
++    assert not _statements(cursor, "update workspace_code_file_versions")
++
++
++def test_move_path_carries_history_with_insert_select_then_delete(monkeypatch):
++    old_row = _file_row(file_path="src/old.js", version=3)
++    cursor = _GrantCheckingCursor(
++        fetchall_results=[[old_row], []],
++        fetchone_results=[_file_row(file_path="src/new.js", version=4)],
++    )
++    _install_fake_cursor(monkeypatch, cursor)
++
++    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
++
++    def norm(q):
++        return " ".join(q.split()).lower()
++
++    copy_idx = [i for i, (q, p) in enumerate(cursor.executed)
++                if norm(q).startswith("insert into workspace_code_file_versions") and "select" in norm(q)]
++    drop_idx = [i for i, (q, p) in enumerate(cursor.executed)
++                if norm(q).startswith("delete from workspace_code_file_versions")
++                and p == ("ws_1", "src/old.js")]
++    assert len(copy_idx) == 1 and len(drop_idx) == 1
++    # (new_path, version shift, ws_id, old_path) — no leftover history => shift 0
++    assert cursor.executed[copy_idx[0]][1] == ("src/new.js", 0, "ws_1", "src/old.js")
++    # copy BEFORE delete, or the old path's history is lost
++    assert copy_idx[0] < drop_idx[0]
++
++
++def test_move_path_snapshots_live_row_then_writes_it_one_version_higher(monkeypatch):
++    old_row = _file_row(file_path="src/old.js", version=3, content="live")
++    cursor = _GrantCheckingCursor(
++        fetchall_results=[[old_row], []],
++        fetchone_results=[_file_row(file_path="src/new.js", version=4)],
++    )
++    _install_fake_cursor(monkeypatch, cursor)
++
++    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
++
++    snapshot = [p for q, p in _statements(cursor, "insert into workspace_code_file_versions")
++                if p and len(p) == 7]  # the VALUES (...) snapshot, not the INSERT ... SELECT
++    assert snapshot[0][:4] == ("ws_1", "src/new.js", 3, "live")
++    live_insert = _statements(cursor, "insert into workspace_code_files")[0][1]
++    assert live_insert[1] == "src/new.js" and live_insert[4] == 4
++
++
++def test_move_path_onto_path_with_leftover_history_shifts_incoming_versions(monkeypatch):
++    # delete_file() keeps history, so a destination can have history rows
++    # (v1..v5 here) with no live row. Copying versions in unchanged would
++    # hit the (workspace_id, file_path, version) primary key.
++    old_row = _file_row(file_path="src/old.js", version=3)
++    cursor = _GrantCheckingCursor(
++        fetchall_results=[
++            [old_row],                                          # discovery
++            [],                                                 # no LIVE collision
++            [{"file_path": "src/new.js", "max_version": 5}],    # leftover history max
++        ],
++        fetchone_results=[_file_row(file_path="src/new.js", version=9)],
++    )
++    _install_fake_cursor(monkeypatch, cursor)
++
++    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
++
++    copy = [p for q, p in _statements(cursor, "insert into workspace_code_file_versions")
++            if p and len(p) == 4]
++    assert copy[0][:2] == ("src/new.js", 5)                     # versions shifted up by 5
++    snapshot = [p for q, p in _statements(cursor, "insert into workspace_code_file_versions")
++                if p and len(p) == 7]
++    assert snapshot[0][2] == 3 + 5                              # live row's snapshot above the leftovers
++    assert _statements(cursor, "insert into workspace_code_files")[0][1][4] == 3 + 5 + 1
++
++
++def test_move_path_up_into_an_ancestor_moves_the_occupying_row_out_first(monkeypatch):
++    # Moving a/b -> a sends a/b/b/c -> a/b/c while a/b/c -> a/c. Handled in
++    # discovery order, a/b/b/c (listed first here) would try to land on
++    # a/b/c while it's still live and hit a primary-key violation.
++    deep = _file_row(file_path="a/b/b/c", version=1)
++    shallow = _file_row(file_path="a/b/c", version=1)
++    cursor = _GrantCheckingCursor(
++        fetchall_results=[[deep, shallow], []],
++        fetchone_results=[_file_row(file_path="a/c", version=2),
++                          _file_row(file_path="a/b/c", version=2)],
++    )
++    _install_fake_cursor(monkeypatch, cursor)
++
++    result = workspace_code_files.move_path("ws_1", "a/b", "a", "user_1")
++
++    landed = [p[1] for q, p in _statements(cursor, "insert into workspace_code_files")]
++    assert landed == ["a/c", "a/b/c"]       # the occupant of a/b/c leaves before anything lands on it
++    assert len(result) == 2
