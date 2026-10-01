@@ -21,6 +21,7 @@ import { fileDiffStats } from "../../lib/workbench/reviewMode";
 import ResponsiveSheet from "../mobile/ResponsiveSheet";
 import { elementLabel } from "../../lib/workbench/elementRef"; // W7.1b
 import { isDeployProposal } from "../../lib/workbench/deployProposal"; // W8.5b
+import { isWireframeProposal } from "../../lib/workbench/wireframeCode"; // W8.6
 
 const OP_LABELS = { create: "new", delete: "deleted" }; // mirrors ReviewPanel.jsx's own copy
 
@@ -51,6 +52,13 @@ function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) 
     }
   };
 
+  // W8.6: a proposal filed from a wireframe has nothing to regenerate — the
+  // edit IS the wireframe, not a model's reading of an instruction, and
+  // replaying its one-line instruction through the code editor would
+  // rewrite index.html from that line. Its stale banner offers Review only;
+  // the way to refresh it is to send the wireframe again from Wireframes.
+  const fromWireframe = isWireframeProposal(proposal);
+
   return (
     <li className="space-y-2 rounded-md border border-[var(--neutral-800)] bg-[var(--neutral-900)] p-2.5">
       <p className="flex items-center gap-1.5 text-sm text-[var(--neutral-200)]">
@@ -60,6 +68,11 @@ function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) 
         {isDeployProposal(proposal) && (
           <span className="shrink-0 rounded bg-[var(--neutral-700)] px-1 text-[10px] uppercase tracking-wide text-[var(--neutral-300)]">
             Deploy
+          </span>
+        )}
+        {fromWireframe && (
+          <span className="shrink-0 rounded bg-[var(--neutral-700)] px-1 text-[10px] uppercase tracking-wide text-[var(--neutral-300)]">
+            Wireframe
           </span>
         )}
         <span className="truncate" title={proposal.instruction || undefined}>
@@ -121,17 +134,21 @@ function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) 
         <div className="flex items-center justify-between gap-2 rounded border border-amber-900/60 bg-amber-950/30 px-2 py-1.5 text-[11px] text-amber-300">
           <span className="flex items-center gap-1.5">
             <AlertTriangle size={12} className="shrink-0" />
-            File changed since this edit was proposed
+            {fromWireframe
+              ? "The file changed since this wireframe was filed — send it again from Wireframes to refresh it"
+              : "File changed since this edit was proposed"}
           </span>
           <span className="flex shrink-0 items-center gap-2.5">
-            <button
-              type="button"
-              onClick={() => run("regenerate", onRegenerate)}
-              disabled={busy != null}
-              className="flex items-center gap-1 underline underline-offset-2 hover:text-amber-200 disabled:opacity-50"
-            >
-              {busy === "regenerate" ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Regenerate
-            </button>
+            {!fromWireframe && (
+              <button
+                type="button"
+                onClick={() => run("regenerate", onRegenerate)}
+                disabled={busy != null}
+                className="flex items-center gap-1 underline underline-offset-2 hover:text-amber-200 disabled:opacity-50"
+              >
+                {busy === "regenerate" ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Regenerate
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onReview?.(proposal)}

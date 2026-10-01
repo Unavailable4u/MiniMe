@@ -38,7 +38,7 @@ import { planWorkOnStep } from "../../lib/workbench/instructionStep";
 // review as any AI edit. codeProposals.js is fetch/Pusher only (no CodeMirror,
 // so it doesn't pull the editor into this tab's chunk); deployProposal.js is the
 // pure decision logic (what the card shows, how a /propose response reads).
-import { listProposals, proposeDeployConfig, subscribeToProposalEvents } from "../../lib/workbench/codeProposals";
+import { listProposals, proposeDeployConfig, proposeWireframeCode, subscribeToProposalEvents } from "../../lib/workbench/codeProposals"; // CHANGED — W8.6: proposeWireframeCode
 import {
   deployCardView,
   describeProposeResponse,
@@ -46,6 +46,17 @@ import {
   deployProposalSummary,
   pickPendingDeployProposal,
 } from "../../lib/workbench/deployProposal";
+// NEW — W8.6: the Wireframes sub-tab's "Turn into code" files the wireframe as
+// a pending proposal for index.html, reviewed in the same Keep/Undo view as any
+// AI edit. wireframeCode.js is the pure decision logic (what the code row shows,
+// how the route's response reads), same split as deployProposal.js above.
+import {
+  describeWireframeResponse,
+  pickPendingWireframeProposal,
+  wireframeCodeBlocker,
+  wireframeCodeView,
+  wireframeProposalSummary,
+} from "../../lib/workbench/wireframeCode";
 
 // NEW — W4.2 (Build Workbench plan). BuildTab itself can't call
 // useCodeContext() — it's the component CREATING CodeContextProvider
@@ -290,6 +301,10 @@ function unfenceMermaid(text) {
   return (m ? m[1] : text || "").trim();
 }
 
+// The label the pasted wireframe goes by in the preview header, in "Send edit"
+// messages, and on the proposal "Turn into code" files (W8.6).
+const WIREFRAME_SCREEN_LABEL = "Pasted wireframe";
+
 // --- Wireframes — paste the initial HTML, then edit via the existing
 // WireframePreview.jsx round trip. Per WireframePreview's own docstring,
 // onRequestEdit reuses the ordinary chat-send function, and the edit
@@ -314,12 +329,100 @@ function unfenceMermaid(text) {
 // a badge that can only ever show one static label isn't telling the
 // person anything a badge is for. Revisit only if wireframe_sketcher ever
 // gets a direct-write path of its own.
-function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, sessionId, sendTask }) {
+function WireframesPanel({ workspaceId, apiUrl, fetchPanelContent, savePanelContent, sessionId, sendTask, onOpenEditor }) {
   const [raw, setRaw] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  const [codeBusy, setCodeBusy] = useState(false); // W8.6: a Turn-into-code request is in flight
+  const [codeError, setCodeError] = useState(null); // W8.6
+  const [pending, setPending] = useState(null); // W8.6: wireframeProposalSummary() of the pending wireframe proposal
+  const { requestReview } = useCodeContext(); // W8.6: this panel renders INSIDE CodeContextProvider (see the render below)
   const html = unfenceMermaid(raw.replace(/```html/i, "```")); // reuse the same fence-stripper for ```html blocks
+
+  // W8.6: leaving this sub-view (or switching project) while a request is
+  // still out must not set state on an unmounted panel.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  // W8.6: the pending wireframe proposal, if any — GET .../code/proposals
+  // ?status=pending filtered to the wireframe ones (wireframeCode.js),
+  // loaded on mount and re-loaded on CODE_PROPOSAL_READY/RESOLVED, so a Keep
+  // or Reject in the Editor (or another tab) clears the row here without a
+  // refresh. Same shape as DeployPanel's reload; a failed lookup leaves the
+  // row on what it last knew (console only) — it's a status line, not worth
+  // an error banner.
+  const reload = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const found = pickPendingWireframeProposal(await listProposals(apiUrl, workspaceId, { status: "pending" }));
+      if (!aliveRef.current) return;
+      setPending(found ? wireframeProposalSummary(found) : null);
+    } catch (err) {
+      console.error("Couldn't load the wireframe's review state:", err);
+    }
+  }, [apiUrl, workspaceId]);
+
+  useEffect(() => {
+    setPending(null); // another project's proposal must not linger while this one loads
+    setCodeError(null);
+    reload();
+  }, [reload]);
+
+  const reloadRef = useRef(reload);
+  useEffect(() => {
+    reloadRef.current = reload;
+  }, [reload]);
+  useEffect(() => {
+    if (!workspaceId) return undefined;
+    return subscribeToProposalEvents(workspaceId, {
+      onReady: () => reloadRef.current(),
+      onResolved: () => reloadRef.current(),
+    });
+  }, [workspaceId]);
+
+  // W8.6: files the wireframe AS SHOWN (the fence-stripped text the preview
+  // renders — not the saved copy, which may be older) for review. A re-send
+  // is fine: the backend rejects the earlier wireframe proposal once the new
+  // one exists, so a failure never costs the person the one they had.
+  async function handleTurnIntoCode() {
+    const blocker = wireframeCodeBlocker(html);
+    if (blocker) {
+      setCodeError(blocker);
+      return;
+    }
+    setCodeBusy(true);
+    setCodeError(null);
+    try {
+      const res = await proposeWireframeCode(apiUrl, workspaceId, {
+        html,
+        screenLabel: WIREFRAME_SCREEN_LABEL,
+        sessionId: sessionId || null,
+      });
+      if (!aliveRef.current) return;
+      const outcome = describeWireframeResponse(res);
+      if (outcome.ok) setPending(outcome.proposal);
+      else setCodeError(outcome.message);
+    } catch (err) {
+      if (aliveRef.current) setCodeError(err.message || "Couldn't file this wireframe for review.");
+    } finally {
+      if (aliveRef.current) setCodeBusy(false);
+    }
+  }
+
+  // Same order DeployPanel's Review and the chat card's Review use: go to
+  // the Editor, then ask it to open the proposal — it's mounted by the time
+  // it reads the request (see EditorWorkbench's pendingReview effect).
+  function handleReviewCode() {
+    if (!pending) return;
+    onOpenEditor?.();
+    requestReview(pending.id);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -376,8 +479,13 @@ function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, ses
       </div>
       <WireframePreview
         html={html}
-        screenLabel="Pasted wireframe"
+        screenLabel={WIREFRAME_SCREEN_LABEL}
         onRequestEdit={sendTask ? (instruction) => sendTask(instruction) : undefined}
+        onTurnIntoCode={handleTurnIntoCode}
+        onReviewCode={handleReviewCode}
+        codeView={wireframeCodeView({ pending, blocker: wireframeCodeBlocker(html) })}
+        codeBusy={codeBusy}
+        codeError={codeError}
       />
     </div>
   );
@@ -1752,10 +1860,12 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
               // scoped to `selected`), same wiring shape Plan used.
               <WireframesPanel
                 workspaceId={selected.id}
+                apiUrl={API_URL}
                 fetchPanelContent={fetchPanelContent}
                 savePanelContent={savePanelContent}
                 sessionId={dock.state.sessionId}
                 sendTask={dock.sendTask}
+                onOpenEditor={openEditorForStep}
               />
             ) : (
               <>

@@ -178,6 +178,43 @@ export async function proposeDeployConfig(apiUrl, sessionId) {
 }
 
 /**
+ * POST .../code/proposals/from-wireframe — W8.6. Files a wireframe's HTML
+ * as a PENDING proposal for index.html (api/routes/code_edit.py's
+ * create_wireframe_code_proposal(); see wireframeCode.js for how the
+ * response is read). The wireframe is sent as text, not as a ref: it
+ * lives in the Wireframes sub-tab's own saved panel text, not in the
+ * project's files, so there is no path for a ref to point at.
+ *
+ * No LLM call on the backend, so — like createProposal() above — it
+ * returns the FULLY STORED proposal straight away. Nothing is written to
+ * the project's files until that proposal is resolved with Keep.
+ *
+ * Throws on a real HTTP failure only; the notable one is a 400 for html
+ * the backend won't take (empty, no markup, over the size cap), which
+ * wireframeCode.js's wireframeCodeBlocker() normally catches first.
+ * `status: "failed"` on a 200 is possible too (the store keeps those rows
+ * so a badge has something to attach to) — callers read the body through
+ * describeWireframeResponse(), not just catch.
+ *
+ * @param {string} apiUrl
+ * @param {string} workspaceId
+ * @param {{html: string, screenLabel?: string | null, sessionId?: string | null}} input
+ */
+export async function proposeWireframeCode(apiUrl, workspaceId, { html, screenLabel, sessionId }) {
+  const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/proposals/from-wireframe`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({
+      html,
+      screen_label: screenLabel ?? null,
+      session_id: sessionId ?? null,
+    }),
+  });
+  if (!res.ok) throw new Error(await parseErrorDetail(res));
+  return res.json();
+}
+
+/**
  * relay/emitter.py's CODE_PROPOSAL_READY / CODE_PROPOSAL_RESOLVED, on
  * the same `workspace-${id}` channel fileProviders.js's
  * CloudFileProvider.subscribe() already binds to for

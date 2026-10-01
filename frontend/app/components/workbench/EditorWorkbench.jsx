@@ -104,6 +104,8 @@ import {
 // (proposeDeployConfig above), not the code_editor agent createCodeProposal
 // reaches — see handleTrayRegenerate below.
 import { isDeployProposal, regenerateDeployOutcome } from "../../lib/workbench/deployProposal";
+// W8.6: a wireframe proposal has no "regenerate" — see handleTrayRegenerate below.
+import { isWireframeProposal } from "../../lib/workbench/wireframeCode";
 import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
 import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
@@ -1588,9 +1590,22 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // proposals itself, but only once a new one actually exists, so a
   // regenerate that comes back unusable never costs the person the one
   // they had.
+  //
+  // W8.6: nor for a wireframe proposal, and this one must bail BEFORE
+  // anything is rejected. The edit is the wireframe itself, so there is
+  // nothing for a model to redo; replayed through createCodeProposal its
+  // one-line instruction ("Turn the wireframe … into index.html") would
+  // have the code_editor agent write index.html from that line alone. The
+  // tray doesn't offer Regenerate for these (PendingTray.jsx), so this is
+  // the backstop for any other caller; the person's way to refresh one is
+  // to send the wireframe again from Wireframes, which supersedes it.
   const handleTrayRegenerate = useCallback(
     async (proposal) => {
       try {
+        if (isWireframeProposal(proposal)) {
+          setNotice("This wireframe can't be regenerated here — send it again from Wireframes in Tasks.");
+          return;
+        }
         if (isDeployProposal(proposal)) {
           if (!proposal.session_id) {
             setNotice("This deploy config can't be regenerated from here — use Re-propose on the Deploy card in Tasks.");
