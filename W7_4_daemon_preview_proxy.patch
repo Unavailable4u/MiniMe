@@ -1,0 +1,2082 @@
+diff --git a/daemon/.env.example b/daemon/.env.example
+index 5401384..2750820 100644
+--- a/daemon/.env.example
++++ b/daemon/.env.example
+@@ -34,3 +34,31 @@ MINIME_BACKEND_WS_URL=
+ # connection to route a request to. Must match a real workspace_id in
+ # the backend (see /api/workspaces).
+ MINIME_WORKSPACE_ID=
++
++# =============================================================================
++# NEW — W7.4. Preview proxy (OPTIONAL). Leave MINIME_PREVIEW_TARGET empty and
++# none of this is used.
++#
++# With it on, the daemon also listens on http://127.0.0.1:<MINIME_PREVIEW_PORT>
++# and forwards to your dev server, stripping the headers that stop it being
++# embedded in MiniMe's preview and injecting the inspector script -- so you can
++# paste that address into the preview's "Dev server URL" box without editing
++# your app. (Mapping a clicked element to a source line still needs
++# @locator/babel-jsx or similar in your build; see the preview's "Set up
++# click-to-code" panel.)
++# =============================================================================
++
++# Your own dev server. Must be on this machine (localhost, 127.0.0.1 or
++# [::1]); just scheme://host:port, no path. The scheme is optional (http).
++# Example: http://localhost:5173
++MINIME_PREVIEW_TARGET=
++
++# Where MiniMe's web app runs -- the page the preview is embedded in. The
++# injected script is loaded from here and only ever talks to this origin.
++# Required when MINIME_PREVIEW_TARGET is set.
++# Local dev example: http://localhost:3000
++MINIME_FRONTEND_ORIGIN=
++
++# Port the proxy listens on (127.0.0.1 only). Optional, default 5199. Keep it
++# fixed: MiniMe remembers the URL you typed per workspace.
++MINIME_PREVIEW_PORT=
+diff --git a/daemon/README.md b/daemon/README.md
+index 0c38655..068c81a 100644
+--- a/daemon/README.md
++++ b/daemon/README.md
+@@ -54,6 +54,53 @@ Expected output on success:
+ Ctrl+C to stop. If it exits immediately with a config error instead,
+ fix whatever `daemon/.env` issue it names and rerun.
+ 
++## Preview proxy (W7.4, optional)
++
++Lets MiniMe's workbench preview **your own dev server** with the
++inspector working, without editing your app. Off unless you set
++`MINIME_PREVIEW_TARGET`.
++
++```
++MINIME_PREVIEW_TARGET=http://localhost:5173     # your dev server (this machine only)
++MINIME_FRONTEND_ORIGIN=http://localhost:3000    # where MiniMe's web app runs
++# MINIME_PREVIEW_PORT=5199                      # optional; keep it fixed
++```
++
++Restart the daemon and it logs `preview proxy ready: enter
++http://127.0.0.1:5199 ...`. Paste that address into the preview's
++**Dev server URL** box (Preview → Dev server URL) instead of your dev
++server's own. The proxy, on `127.0.0.1` only:
++
++- strips `X-Frame-Options` and the CSP `frame-ancestors` directive (the
++  rest of your CSP is kept), so the page can render inside the preview;
++- injects the inspector `<script>` into HTML *pages* (not into JSON,
++  scripts, or HTML fragments your app `fetch()`es), so the crosshair
++  works. If you already pasted the snippet by hand it isn't added twice;
++- tunnels WebSockets, so Vite / webpack / Next hot reload keeps working;
++- rewrites `Host`/`Origin`/`Referer` and redirect `Location`s so your dev
++  server sees its own address.
++
++It does **not** make clicks map to source lines by itself: your build
++still needs `@locator/babel-jsx` / `@locator/webpack-loader` (or `data-mm`
++attributes) -- see the preview's "Set up click-to-code" panel.
++
++Safety: it forwards only to the one loopback target you configured,
++refuses requests whose `Host` isn't `127.0.0.1:<port>` / `localhost:<port>`
++(DNS-rebinding), and is not usable as a general proxy. Details are in
++`preview_proxy.py`'s header.
++
++Known limits: a CSP set via `<meta http-equiv>` is left alone; an app that
++sends `Cross-Origin-Embedder-Policy: require-corp` will block the
++injected script; `Set-Cookie` `Domain=` attributes aren't rewritten;
++HTTP/1.1 only; a page over 16 MB isn't edited (502). If the daemon can't
++bind the port it logs why and keeps running without the proxy.
++
++To try the proxy alone, without pairing to the backend:
++
++```bash
++python -m daemon.preview_proxy --target http://localhost:5173 --frontend-origin http://localhost:3000
++```
++
+ ## Tests
+ 
+ ```bash
+@@ -68,4 +115,7 @@ pytest daemon/tests/ -v
+ - `path_guard.py` — the containment boundary (`assert_safe_root`,
+   `assert_within_root`) that every later part's tool calls must route
+   through.
+-- `tests/` — unit tests for both of the above.
++- `preview_proxy.py` — W7.4's reverse proxy (also runnable on its own:
++  `python -m daemon.preview_proxy --help`).
++- `tests/` — unit tests for the above; `test_preview_proxy.py` also runs
++  the real proxy in front of a fake dev server on loopback sockets.
+diff --git a/daemon/config.py b/daemon/config.py
+index 2cdd297..97ce723 100644
+--- a/daemon/config.py
++++ b/daemon/config.py
+@@ -26,6 +26,7 @@ from pathlib import Path
+ from dotenv import load_dotenv
+ 
+ from daemon.path_guard import PathGuardError, assert_safe_root
++from daemon.preview_proxy import PreviewConfigError, PreviewProxyConfig, build_preview_config
+ 
+ logger = logging.getLogger("minime_daemon")
+ 
+@@ -49,6 +50,9 @@ class DaemonConfig:
+     allowed_root: Path
+     backend_ws_url: str  # NEW — Part 2
+     workspace_id: str  # NEW — Part 2
++    # NEW — W7.4. None (the default) means the preview proxy is off,
++    # which is what every config written before W7.4 gets.
++    preview: PreviewProxyConfig | None = None
+ 
+ 
+ def load_config(env_path: Path | None = None) -> DaemonConfig:
+@@ -106,12 +110,28 @@ def load_config(env_path: Path | None = None) -> DaemonConfig:
+     except PathGuardError as exc:
+         raise ConfigError(str(exc)) from exc
+ 
++    # NEW — W7.4: the preview proxy is opt-in. Setting MINIME_PREVIEW_TARGET
++    # turns it on; the other two settings are then validated alongside it
++    # (a half-configured proxy is a startup error, not a silent no-op).
++    preview: PreviewProxyConfig | None = None
++    preview_target = os.environ.get("MINIME_PREVIEW_TARGET", "").strip()
++    if preview_target:
++        try:
++            preview = build_preview_config(
++                target=preview_target,
++                frontend_origin=os.environ.get("MINIME_FRONTEND_ORIGIN", "").strip(),
++                port=os.environ.get("MINIME_PREVIEW_PORT", "").strip(),
++            )
++        except PreviewConfigError as exc:
++            raise ConfigError(str(exc)) from exc
++
+     logger.info("config loaded: allowed root = %s", resolved_root)
+     return DaemonConfig(
+         pairing_token=token,
+         allowed_root=resolved_root,
+         backend_ws_url=backend_ws_url,
+         workspace_id=workspace_id,
++        preview=preview,
+     )
+ 
+ 
+diff --git a/daemon/minime_daemon.py b/daemon/minime_daemon.py
+index 525b32f..bffde4a 100644
+--- a/daemon/minime_daemon.py
++++ b/daemon/minime_daemon.py
+@@ -12,6 +12,11 @@ implements on the backend side, and idles on that socket (reconnecting
+ with backoff on drop) until Ctrl+C/SIGTERM. Still no tool-call message
+ shape -- that's Part 3.
+ 
++W7.4 adds an optional preview reverse proxy (daemon/preview_proxy.py),
++started next to the websocket connection when MINIME_PREVIEW_TARGET is
++set in daemon/.env. It's independent of pairing: if it can't bind its
++port the daemon logs why and carries on without it.
++
+ Run it:
+     cd MiniMe
+     pip install -r daemon/requirements.txt
+@@ -33,6 +38,7 @@ import sys
+ from daemon import connection
+ from daemon.config import ConfigError, DaemonConfig, load_config
+ from daemon.path_guard import PathGuardError, assert_within_root
++from daemon.preview_proxy import PreviewProxy
+ 
+ logging.basicConfig(
+     level=logging.INFO,
+@@ -87,6 +93,32 @@ def _self_check(config: DaemonConfig) -> None:
+         logger.info("self-check PASS: '../..' traversal is rejected")
+ 
+ 
++async def _start_preview_proxy(config: DaemonConfig) -> PreviewProxy | None:
++    """W7.4: start the preview proxy if it's configured. A proxy that
++    can't start (usually: port already in use) must not take the daemon
++    down with it -- the daemon's real job is the workspace tools."""
++    if config.preview is None:
++        return None
++    proxy = PreviewProxy(config.preview)
++    try:
++        await proxy.start()
++    except OSError as exc:
++        logger.error(
++            "preview proxy could not listen on 127.0.0.1:%s (%s) -- continuing without it; "
++            "set MINIME_PREVIEW_PORT to a free port",
++            config.preview.port,
++            exc,
++        )
++        return None
++    logger.info(
++        "preview proxy ready: enter %s as the Dev server URL in MiniMe -- it forwards to %s "
++        "and adds the inspector",
++        proxy.url,
++        config.preview.target_origin,
++    )
++    return proxy
++
++
+ async def _amain() -> int:
+     try:
+         config = load_config()
+@@ -126,7 +158,12 @@ async def _amain() -> int:
+     # NEW — Part 2: replaces Part 1's plain idle-sleep loop. Connects
+     # out to the backend, pairs, and reconnects with backoff on drop,
+     # until stop_event is set above.
+-    await connection.run_forever(config, stop_event)
++    preview_proxy = await _start_preview_proxy(config)
++    try:
++        await connection.run_forever(config, stop_event)
++    finally:
++        if preview_proxy is not None:
++            await preview_proxy.stop()
+ 
+     logger.info("minime_daemon stopped")
+     return 0
+diff --git a/daemon/preview_proxy.py b/daemon/preview_proxy.py
+new file mode 100644
+index 0000000..8e2f4f6
+--- /dev/null
++++ b/daemon/preview_proxy.py
+@@ -0,0 +1,903 @@
++"""
++daemon/preview_proxy.py — W7.4 (Build Workbench plan): the daemon's
++preview reverse proxy.
++
++WHAT IT IS. A small HTTP reverse proxy the daemon starts on
++127.0.0.1:<MINIME_PREVIEW_PORT> in front of the person's own dev server
++(MINIME_PREVIEW_TARGET, e.g. http://localhost:5173). Pasting the
++proxy's address into the workbench's "Dev server URL" box (W7.3) then
++gives them, with no change to their app:
++
++  1. An embeddable page. Dev servers that send `X-Frame-Options` or a
++     CSP `frame-ancestors` refuse to render inside the preview iframe;
++     the proxy strips both (everything else in the CSP is kept).
++  2. The inspector. The same one-line <script> W7.3 asks people to paste
++     into their HTML (previewUrl.js's buildInspectorSnippet(), served by
++     the frontend's /mm-inspector.js route) is injected into HTML
++     *document* responses, so hover/click selection works. Mapping a
++     clicked element to a source line still needs the build-time plugin
++     (`data-locatorjs` / `data-mm`) -- the proxy can't invent that.
++  3. Working live reload. WebSocket upgrades (Vite/webpack/Next HMR) are
++     tunnelled byte-for-byte to the dev server.
++
++HOW IT WORKS, AND WHY IT'S SHAPED THIS WAY.
++
++  - Stdlib only (asyncio streams). The daemon's dependency set is
++    deliberately tiny (requirements.txt), and a proxy that has to
++    tunnel WebSockets and rewrite one kind of response is easier to
++    reason about as ~one page of explicit HTTP/1.1 than as a framework
++    plus plugins.
++  - Only the *head* of each message is parsed. Bodies are copied with
++    their original framing (Content-Length / chunked / until-close), so
++    JS bundles, SSE streams and uploads pass through untouched. The one
++    exception is an HTML document, which is buffered (capped), edited,
++    and re-sent with a fresh Content-Length.
++  - One request per connection (`Connection: close` both ways). Slower
++    than keep-alive in theory, but loopback connects are microseconds
++    and it removes a whole class of request-smuggling / framing bugs.
++  - We ask the dev server for `Accept-Encoding: identity`, so HTML
++    arrives uncompressed and can be edited without a decompressor.
++
++SECURITY POSTURE. This is a listening socket on the user's machine that
++forwards to another local service, so it is deliberately hard to turn
++into anything else:
++
++  - It binds 127.0.0.1 only and forwards to ONE fixed upstream taken
++    from config -- never from the request. The target must be a
++    loopback address (same rule as the frontend's normalizePreviewUrl)
++    and can't be MiniMe itself or the proxy's own port.
++  - Requests must be origin-form (`GET /path`); absolute-form targets,
++    CONNECT and `*` are refused, so it is not an open proxy.
++  - The `Host` header must be 127.0.0.1:<port> or localhost:<port>.
++    That is the DNS-rebinding defence: a hostile site whose DNS flips to
++    127.0.0.1 sends `Host: evil.example`, and is refused instead of being
++    handed the person's dev app.
++  - Origin/Referer are only rewritten when they name the proxy itself.
++    An unrelated Origin (another site's) is forwarded as-is, so the dev
++    server's own CORS / origin checks still apply to it.
++  - Requests with ambiguous framing (Content-Length + Transfer-Encoding,
++    conflicting Content-Lengths, bare CR/LF or obsolete folding in a
++    header) are rejected rather than forwarded.
++
++KNOWN LIMITS (documented in daemon/README.md too): a CSP delivered via
++<meta http-equiv> is not touched; an app that sends
++`Cross-Origin-Embedder-Policy: require-corp` will block the injected
++script (the frontend route sends no CORP header); cookies with a
++`Domain=` attribute aren't rewritten; HTTP/1.1 only.
++
++Place this file at: daemon/preview_proxy.py
++"""
++from __future__ import annotations
++
++import argparse
++import asyncio
++import html
++import ipaddress
++import logging
++import re
++import ssl
++import sys
++from dataclasses import dataclass
++from urllib.parse import urlsplit
++
++logger = logging.getLogger("minime_daemon")
++
++# Stable on purpose: the workbench remembers the last URL typed per
++# workspace (previewUrl.js's savePreviewPrefs), so a port that changes
++# every launch would make that memory useless. Not a port any common
++# dev server defaults to (3000, 4200, 5173, 8000, 8080 ...).
++DEFAULT_PORT = 5199
++
++# Must stay in step with the frontend's INSPECTOR_SCRIPT_PATH
++# (frontend/app/lib/preview/previewUrl.js).
++INSPECTOR_SCRIPT_PATH = "/mm-inspector.js"
++
++_MAX_HEAD_BYTES = 64 * 1024
++_MAX_HTML_BYTES = 16 * 1024 * 1024  # HTML documents we're willing to buffer and edit
++_CHUNK = 64 * 1024
++_HEAD_TIMEOUT_SECONDS = 30.0  # an idle/speculative browser connection that never sends a request
++_CONNECT_TIMEOUT_SECONDS = 5.0
++# Generous: a framework's first request can sit in a compile step for a while.
++_RESPONSE_HEAD_TIMEOUT_SECONDS = 120.0
++
++_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
++_NONCE_RE = re.compile(r"^[A-Za-z0-9+/_=-]+$")
++_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
++_HEAD_CLOSE_RE = re.compile(rb"</head\s*>", re.IGNORECASE)
++_BODY_OPEN_RE = re.compile(rb"<body[\s>]", re.IGNORECASE)
++_BODY_CLOSE_RE = re.compile(rb"</body\s*>", re.IGNORECASE)
++
++_DEFAULT_PORTS = {"http": 80, "https": 443}
++
++
++# ---------------------------------------------------------------------
++# Config
++# ---------------------------------------------------------------------
++
++
++class PreviewConfigError(ValueError):
++    """Raised for any bad preview-proxy setting. config.py re-raises it
++    as ConfigError so the daemon fails at startup, same as every other
++    bad .env value."""
++
++
++@dataclass(frozen=True)
++class PreviewProxyConfig:
++    target_scheme: str  # "http" | "https"
++    target_host: str  # hostname without IPv6 brackets, lowercase
++    target_port: int
++    frontend_origin: str  # MiniMe's own origin: where the inspector script is loaded from
++    port: int = DEFAULT_PORT  # listen port on 127.0.0.1; 0 = pick a free one (tests)
++
++    @property
++    def target_origin(self) -> str:
++        return _origin(self.target_scheme, self.target_host, self.target_port)
++
++    @property
++    def target_host_header(self) -> str:
++        """What the dev server should see as `Host` (it may allow-list it)."""
++        return _host_header(self.target_scheme, self.target_host, self.target_port)
++
++
++def _host_header(scheme: str, host: str, port: int) -> str:
++    shown = f"[{host}]" if ":" in host else host
++    return shown if port == _DEFAULT_PORTS.get(scheme) else f"{shown}:{port}"
++
++
++def _origin(scheme: str, host: str, port: int) -> str:
++    return f"{scheme}://{_host_header(scheme, host, port)}"
++
++
++def _is_loopback_host(hostname: str) -> bool:
++    """Same rule as the frontend's isLoopbackHost(): localhost,
++    *.localhost, 127.0.0.0/8, ::1."""
++    h = hostname.lower().rstrip(".")
++    if h == "localhost" or h.endswith(".localhost"):
++        return True
++    try:
++        return ipaddress.ip_address(h).is_loopback
++    except ValueError:
++        return False
++
++
++def _split_http_url(raw: str, label: str) -> tuple[str, str, int]:
++    """Parse "scheme://host[:port]" (scheme optional, defaults to http)
++    into (scheme, host, port); anything more than an origin is an error,
++    so a pasted path or query can't silently be dropped."""
++    text = (raw or "").strip()
++    if not text:
++        raise PreviewConfigError(f"{label} is empty")
++    candidate = text if _SCHEME_RE.match(text) else f"http://{text}"
++    try:
++        parts = urlsplit(candidate)
++        port = parts.port
++    except ValueError as exc:
++        raise PreviewConfigError(f"{label} is not a valid address: {text!r}") from exc
++    if parts.scheme not in ("http", "https"):
++        raise PreviewConfigError(f"{label} must be an http:// or https:// address (got: {text!r})")
++    if parts.username or parts.password:
++        raise PreviewConfigError(f"{label} must not contain a username or password")
++    if not parts.hostname:
++        raise PreviewConfigError(f"{label} has no host: {text!r}")
++    if parts.path not in ("", "/") or parts.query or parts.fragment:
++        raise PreviewConfigError(f"{label} must be just scheme://host:port, no path or query (got: {text!r})")
++    return parts.scheme, parts.hostname, port or _DEFAULT_PORTS[parts.scheme]
++
++
++def _parse_listen_port(value: object) -> int:
++    if value is None or (isinstance(value, str) and not value.strip()):
++        return DEFAULT_PORT
++    try:
++        port = int(str(value).strip())
++    except ValueError as exc:
++        raise PreviewConfigError(f"MINIME_PREVIEW_PORT must be a number (got: {value!r})") from exc
++    if not 0 <= port <= 65535:
++        raise PreviewConfigError(f"MINIME_PREVIEW_PORT must be between 0 and 65535 (got: {port})")
++    return port
++
++
++def build_preview_config(target: str, frontend_origin: str, port: object = None) -> PreviewProxyConfig:
++    """Validate and normalise the three MINIME_PREVIEW_* / MINIME_FRONTEND_ORIGIN
++    settings. Raises PreviewConfigError on anything unsafe or meaningless."""
++    scheme, host, target_port = _split_http_url(target, "MINIME_PREVIEW_TARGET")
++    if not _is_loopback_host(host):
++        raise PreviewConfigError(
++            "MINIME_PREVIEW_TARGET must be a local address (localhost, 127.0.0.1 or [::1]) -- "
++            f"the preview proxy only fronts dev servers on this machine (got host: {host!r})"
++        )
++
++    if not (frontend_origin or "").strip():
++        raise PreviewConfigError(
++            "MINIME_FRONTEND_ORIGIN is not set in daemon/.env -- it's where MiniMe's web app "
++            "lives (e.g. http://localhost:3000), which the injected inspector script is loaded from"
++        )
++    f_scheme, f_host, f_port = _split_http_url(frontend_origin, "MINIME_FRONTEND_ORIGIN")
++
++    listen = _parse_listen_port(port)
++
++    # Same guard as the frontend's normalizePreviewUrl(): never proxy
++    # MiniMe to itself (a typo for "localhost:3000" is easy to make).
++    if _is_loopback_host(f_host) and f_scheme == scheme and f_port == target_port:
++        raise PreviewConfigError(
++            "MINIME_PREVIEW_TARGET is the address MiniMe itself runs on -- point it at your own app's dev server"
++        )
++    if listen and target_port == listen:
++        raise PreviewConfigError(
++            f"MINIME_PREVIEW_PORT ({listen}) is the same as the target's port -- the proxy would forward to itself"
++        )
++    if listen and _is_loopback_host(f_host) and f_port == listen:
++        raise PreviewConfigError(f"MINIME_PREVIEW_PORT ({listen}) collides with MiniMe's own port")
++
++    return PreviewProxyConfig(
++        target_scheme=scheme,
++        target_host=host,
++        target_port=target_port,
++        frontend_origin=_origin(f_scheme, f_host, f_port),
++        port=listen,
++    )
++
++
++# ---------------------------------------------------------------------
++# Pure helpers (header + HTML rewriting) -- no IO, unit-tested directly
++# ---------------------------------------------------------------------
++
++Headers = list[tuple[str, str]]
++
++
++def _header(headers: Headers, name: str) -> str | None:
++    lname = name.lower()
++    for key, value in headers:
++        if key.lower() == lname:
++            return value
++    return None
++
++
++def _tokens(value: str | None) -> list[str]:
++    return [t.strip().lower() for t in (value or "").split(",") if t.strip()]
++
++
++def _connection_tokens(headers: Headers) -> set[str]:
++    out: set[str] = set()
++    for key, value in headers:
++        if key.lower() == "connection":
++            out.update(_tokens(value))
++    return out
++
++
++def build_inspector_tag(origin: str, nonce: str | None = None) -> str:
++    """The <script> tag to inject. Identical in shape to the frontend's
++    buildInspectorSnippet() (the thing W7.3 asks people to paste), plus
++    an optional CSP nonce."""
++    o = html.escape(origin.rstrip("/"), quote=True)
++    nonce_attr = f' nonce="{html.escape(nonce, quote=True)}"' if nonce else ""
++    return f'<script src="{o}{INSPECTOR_SCRIPT_PATH}" data-mm-origin="{o}" defer{nonce_attr}></script>'
++
++
++def inject_inspector(document: bytes, tag: str) -> bytes:
++    """Insert `tag` into an HTML document: before </head> if there is
++    one, else before <body>, else before </body>, else at the end. A
++    document that already loads mm-inspector.js (someone who installed the
++    W7.3 snippet by hand) is returned unchanged."""
++    if INSPECTOR_SCRIPT_PATH.encode() in document:
++        return document
++    payload = tag.encode("utf-8")
++    for pattern in (_HEAD_CLOSE_RE, _BODY_OPEN_RE, _BODY_CLOSE_RE):
++        match = pattern.search(document)
++        if match:
++            at = match.start()
++            return document[:at] + payload + document[at:]
++    return document + payload
++
++
++def _find_nonce(tokens: list[str]) -> str | None:
++    for token in tokens:
++        if token.lower().startswith("'nonce-") and token.endswith("'"):
++            candidate = token[7:-1]
++            if candidate and _NONCE_RE.match(candidate):
++                return candidate
++    return None
++
++
++def _allow_origin(tokens: list[str], origin: str) -> list[str]:
++    if [t.lower() for t in tokens] == ["'none'"]:
++        return [origin]  # 'none' can't be combined with anything else
++    if origin in tokens:
++        return tokens
++    return [*tokens, origin]
++
++
++def rewrite_csp(value: str, script_origin: str) -> tuple[str | None, str | None]:
++    """Make a Content-Security-Policy header value safe to embed and
++    able to run the inspector script.
++
++      - `frame-ancestors` is dropped (it's what forbids the preview
++        iframe); every other directive is kept.
++      - `script-src` / `script-src-elem` (or, if neither exists, a new
++        `script-src-elem` copied from `default-src`) get `script_origin`
++        added, so a `script-src 'self'` app still loads the inspector.
++      - A `'nonce-…'` found in those directives is returned so the
++        injected tag can carry it (needed under 'strict-dynamic', which
++        ignores host allow-lists).
++
++    A header value may hold several comma-separated policies; each is
++    rewritten on its own. Returns (new_value_or_None_if_nothing_left,
++    nonce_or_None)."""
++    nonce: str | None = None
++    policies: list[str] = []
++    for policy in value.split(","):
++        out: list[str] = []
++        script_directive_seen = False
++        default_tokens: list[str] | None = None
++        for raw_directive in (d.strip() for d in policy.split(";")):
++            if not raw_directive:
++                continue
++            name, *tokens = raw_directive.split()
++            lname = name.lower()
++            if lname == "frame-ancestors":
++                continue
++            if lname in ("script-src", "script-src-elem"):
++                script_directive_seen = True
++                nonce = nonce or _find_nonce(tokens)
++                out.append(" ".join([name, *_allow_origin(tokens, script_origin)]))
++                continue
++            if lname == "default-src":
++                default_tokens = tokens
++                nonce = nonce or _find_nonce(tokens)
++            out.append(raw_directive)
++        if default_tokens is not None and not script_directive_seen:
++            out.append(" ".join(["script-src-elem", *_allow_origin(default_tokens, script_origin)]))
++        if out:
++            policies.append("; ".join(out))
++    return (", ".join(policies) or None), nonce
++
++
++def rewrite_request_headers(
++    headers: Headers,
++    cfg: PreviewProxyConfig,
++    proxy_origins: set[str],
++    *,
++    upgrade: bool,
++) -> Headers:
++    """Headers to send upstream. Host becomes the dev server's own (it
++    may allow-list it); Origin/Referer that name the proxy are mapped to
++    the dev server's origin; hop-by-hop headers are dropped."""
++    target_origin = cfg.target_origin
++    named_by_connection = _connection_tokens(headers)
++    out: Headers = []
++    for key, value in headers:
++        lkey = key.lower()
++        if lkey in ("proxy-authorization", "proxy-connection", "keep-alive", "te", "expect", "accept-encoding"):
++            continue
++        if lkey in named_by_connection and lkey not in ("upgrade", "connection"):
++            continue
++        if lkey in ("connection", "upgrade"):
++            if upgrade:
++                out.append((key, value))  # a WebSocket handshake needs these as sent
++            continue
++        if lkey == "host":
++            out.append((key, cfg.target_host_header))
++        elif lkey == "origin":
++            out.append((key, target_origin if value in proxy_origins else value))
++        elif lkey == "referer":
++            out.append((key, _swap_origin_prefix(value, proxy_origins, target_origin)))
++        else:
++            out.append((key, value))
++    out.append(("Accept-Encoding", "identity"))
++    if not upgrade:
++        out.append(("Connection", "close"))
++    return out
++
++
++def _swap_origin_prefix(url: str, old_origins: set[str], new_origin: str) -> str:
++    for old in old_origins:
++        if url == old or url.startswith((old + "/", old + "?", old + "#")):
++            return new_origin + url[len(old):]
++    return url
++
++
++def rewrite_response_headers(
++    headers: Headers,
++    cfg: PreviewProxyConfig,
++    proxy_origin: str,
++) -> tuple[Headers, str | None]:
++    """Headers to send the browser for a normal (non-101) response.
++    Returns (headers, csp_nonce_for_the_injected_script)."""
++    target_origin = cfg.target_origin
++    named_by_connection = _connection_tokens(headers)
++    out: Headers = []
++    nonce: str | None = None
++    for key, value in headers:
++        lkey = key.lower()
++        if lkey in ("x-frame-options", "connection", "keep-alive", "proxy-connection") or lkey in named_by_connection:
++            continue
++        if lkey == "content-security-policy":
++            rewritten, found = rewrite_csp(value, cfg.frontend_origin)
++            nonce = nonce or found
++            if rewritten:
++                out.append((key, rewritten))
++            continue
++        if lkey in ("location", "content-location"):
++            value = _swap_origin_prefix(value, {target_origin}, proxy_origin)
++        elif lkey == "access-control-allow-origin" and value == target_origin:
++            value = proxy_origin
++        out.append((key, value))
++    out.append(("Connection", "close"))
++    return out, nonce
++
++
++def should_inject(
++    request_headers: Headers,
++    response_headers: Headers,
++    *,
++    method: str,
++    status: int,
++    body_kind: str,
++    body_length: int,
++) -> bool:
++    """Only HTML *documents* get the inspector -- not an HTML fragment
++    fetch()ed by the app (htmx, partials), not a download."""
++    if method == "HEAD" or status < 200 or status in (204, 304) or body_kind == "none":
++        return False
++    media = (_header(response_headers, "content-type") or "").split(";")[0].strip().lower()
++    if media not in ("text/html", "application/xhtml+xml"):
++        return False
++    content_type = (_header(response_headers, "content-type") or "").lower()
++    if "charset=utf-16" in content_type or "charset=utf-32" in content_type:
++        return False  # not ASCII-compatible: splicing ASCII bytes would corrupt it
++    encoding = (_header(response_headers, "content-encoding") or "identity").strip().lower()
++    if encoding not in ("", "identity"):
++        return False
++    if body_kind == "length" and body_length > _MAX_HTML_BYTES:
++        return False
++    dest = _header(request_headers, "sec-fetch-dest")
++    if dest is not None:
++        return dest.strip().lower() in ("document", "iframe", "frame")
++    accept = _header(request_headers, "accept")  # older clients send no Sec-Fetch-*
++    return accept is None or "text/html" in accept.lower() or "*/*" in accept
++
++
++# ---------------------------------------------------------------------
++# HTTP/1.1 head + body plumbing
++# ---------------------------------------------------------------------
++
++
++class _ProxyError(Exception):
++    """A failure to report to the browser as a small error page. Only
++    raised before any response bytes have been sent."""
++
++    def __init__(self, status: int, message: str):
++        super().__init__(message)
++        self.status = status
++        self.message = message
++
++
++def _parse_head(raw: bytes, *, bad_status: int) -> tuple[str, Headers]:
++    """Split a message head into (start line, headers). Strict where
++    leniency would enable request smuggling: bare CR/LF/NUL inside a
++    line and obsolete line folding are refused."""
++    text = raw.lstrip(b"\r\n")[:-4].decode("latin-1") if raw.endswith(b"\r\n\r\n") else ""
++    if not text:
++        raise _ProxyError(bad_status, "Malformed HTTP message.")
++    lines = text.split("\r\n")
++    if any(ch in line for line in lines for ch in ("\r", "\n", "\x00")):
++        raise _ProxyError(bad_status, "Malformed HTTP message.")
++    headers: Headers = []
++    for line in lines[1:]:
++        if line[:1] in (" ", "\t"):
++            raise _ProxyError(bad_status, "Obsolete header folding is not supported.")
++        name, sep, value = line.partition(":")
++        if not sep or not _TOKEN_RE.match(name):
++            raise _ProxyError(bad_status, "Malformed header line.")
++        headers.append((name, value.strip(" \t")))
++    return lines[0], headers
++
++
++def _parse_request_line(line: str) -> tuple[str, str]:
++    parts = line.split(" ")
++    if len(parts) != 3 or not _TOKEN_RE.match(parts[0]) or parts[2] not in ("HTTP/1.0", "HTTP/1.1"):
++        raise _ProxyError(400, "Malformed request line.")
++    method, target = parts[0], parts[1]
++    if not target.startswith("/"):
++        # CONNECT host:port, absolute-form http://..., and `*`: all things
++        # only a general-purpose proxy would serve. This one isn't.
++        raise _ProxyError(400, "This proxy only serves requests addressed to it directly.")
++    return method, target
++
++
++def _parse_status_line(line: str) -> int:
++    parts = line.split(" ", 2)
++    if len(parts) < 2 or not parts[0].startswith("HTTP/1.") or not parts[1].isdigit():
++        raise _ProxyError(502, "Your dev server sent a response the preview proxy couldn't read.")
++    return int(parts[1])
++
++
++def _framing(headers: Headers, *, response: bool, status: int = 0, method: str = "GET") -> tuple[str, int]:
++    """How a message body is delimited: ("none"|"length"|"chunked"|"eof", n)."""
++    if response and (method == "HEAD" or status < 200 or status in (204, 304)):
++        return "none", 0
++    bad = 502 if response else 400
++    transfer = [t for key, value in headers if key.lower() == "transfer-encoding" for t in _tokens(value)]
++    lengths = [v for key, value in headers if key.lower() == "content-length" for v in _tokens(value)]
++    if transfer:
++        if transfer[-1] != "chunked":
++            raise _ProxyError(bad, "Unsupported Transfer-Encoding.")
++        if lengths and not response:
++            raise _ProxyError(400, "Ambiguous message framing.")  # classic request-smuggling shape
++        return "chunked", 0
++    if lengths:
++        if len(set(lengths)) != 1 or not lengths[0].isdigit():
++            raise _ProxyError(bad, "Invalid Content-Length.")
++        return "length", int(lengths[0])
++    return ("eof", 0) if response else ("none", 0)
++
++
++def _chunk_size(line: bytes) -> int:
++    return int(line[:-2].split(b";")[0].strip(), 16)  # ValueError on garbage -> connection is dropped
++
++
++async def _copy_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, framing: tuple[str, int]) -> None:
++    """Copy one message body with its framing intact."""
++    kind, size = framing
++    if kind == "length":
++        remaining = size
++        while remaining:
++            chunk = await reader.read(min(_CHUNK, remaining))
++            if not chunk:
++                raise asyncio.IncompleteReadError(b"", remaining)
++            writer.write(chunk)
++            await writer.drain()
++            remaining -= len(chunk)
++    elif kind == "chunked":
++        while True:
++            line = await reader.readuntil(b"\r\n")
++            writer.write(line)
++            n = _chunk_size(line)
++            if n == 0:
++                while True:  # trailer section, ends at a blank line
++                    trailer = await reader.readuntil(b"\r\n")
++                    writer.write(trailer)
++                    if trailer == b"\r\n":
++                        break
++                await writer.drain()
++                return
++            writer.write(await reader.readexactly(n + 2))  # data + its CRLF
++            await writer.drain()
++    elif kind == "eof":
++        while True:
++            chunk = await reader.read(_CHUNK)
++            if not chunk:
++                return
++            writer.write(chunk)
++            await writer.drain()
++
++
++async def _read_body(reader: asyncio.StreamReader, framing: tuple[str, int], limit: int) -> bytes:
++    """Read one message body fully and decoded (de-chunked), or raise
++    _ProxyError if it's bigger than `limit`."""
++    kind, size = framing
++    too_big = _ProxyError(502, "That page is too large for the preview proxy to add the inspector to.")
++    if kind == "length":
++        if size > limit:
++            raise too_big
++        return await reader.readexactly(size) if size else b""
++    parts: list[bytes] = []
++    total = 0
++    if kind == "chunked":
++        while True:
++            n = _chunk_size(await reader.readuntil(b"\r\n"))
++            if n == 0:
++                while (await reader.readuntil(b"\r\n")) != b"\r\n":
++                    pass
++                return b"".join(parts)
++            total += n
++            if total > limit:
++                raise too_big
++            parts.append(await reader.readexactly(n))
++            await reader.readexactly(2)
++    while True:  # until close
++        chunk = await reader.read(_CHUNK)
++        if not chunk:
++            return b"".join(parts)
++        total += len(chunk)
++        if total > limit:
++            raise too_big
++        parts.append(chunk)
++
++
++def _format_head(start_line: str, headers: Headers) -> bytes:
++    lines = [start_line, *(f"{key}: {value}" for key, value in headers)]
++    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
++
++
++async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
++    try:
++        while True:
++            data = await reader.read(_CHUNK)
++            if not data:
++                return
++            writer.write(data)
++            await writer.drain()
++    except (ConnectionError, OSError):
++        return
++
++
++async def _tunnel(
++    a_reader: asyncio.StreamReader,
++    a_writer: asyncio.StreamWriter,
++    b_reader: asyncio.StreamReader,
++    b_writer: asyncio.StreamWriter,
++) -> None:
++    """Shuttle bytes both ways until either side closes (WebSocket)."""
++    tasks = [asyncio.ensure_future(_pipe(a_reader, b_writer)), asyncio.ensure_future(_pipe(b_reader, a_writer))]
++    try:
++        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
++    finally:
++        for task in tasks:
++            task.cancel()
++        await asyncio.gather(*tasks, return_exceptions=True)
++
++
++# ---------------------------------------------------------------------
++# The server
++# ---------------------------------------------------------------------
++
++
++class _ConnState:
++    """Whether response bytes have gone out yet -- after that, an error
++    page can no longer be sent and the connection is just closed."""
++
++    started = False
++
++
++class PreviewProxy:
++    """start() binds 127.0.0.1:<config.port>; stop() tears down the
++    listener and any open connections (a WebSocket would otherwise keep
++    Server.wait_closed() waiting forever)."""
++
++    def __init__(self, config: PreviewProxyConfig):
++        self._cfg = config
++        self._server: asyncio.AbstractServer | None = None
++        self._port: int | None = None
++        self._writers: set[asyncio.StreamWriter] = set()
++        self._upstream_ok: bool | None = None  # for log de-duplication only
++        self._ssl: ssl.SSLContext | None = None
++        if config.target_scheme == "https":
++            # Verification is switched off ON PURPOSE: the target is
++            # restricted to loopback (validated in build_preview_config),
++            # where there is no network path to attack, and local dev
++            # servers present self-signed certificates (Vite's basic-ssl,
++            # mkcert without a trusted root, ...). Verifying would only
++            # make https dev servers unusable.
++            self._ssl = ssl.create_default_context()
++            self._ssl.check_hostname = False  # nosemgrep
++            self._ssl.verify_mode = ssl.CERT_NONE  # nosemgrep
++
++    @property
++    def port(self) -> int:
++        if self._port is None:
++            raise RuntimeError("preview proxy is not started")
++        return self._port
++
++    @property
++    def url(self) -> str:
++        return f"http://127.0.0.1:{self.port}"
++
++    async def start(self) -> None:
++        self._server = await asyncio.start_server(
++            self._handle, host="127.0.0.1", port=self._cfg.port, limit=_MAX_HEAD_BYTES
++        )
++        self._port = self._server.sockets[0].getsockname()[1]
++
++    async def stop(self) -> None:
++        server, self._server = self._server, None
++        if server is None:
++            return
++        server.close()
++        for writer in list(self._writers):
++            writer.close()
++        try:
++            await asyncio.wait_for(server.wait_closed(), timeout=2.0)
++        except asyncio.TimeoutError:
++            logger.debug("preview proxy: connections still closing after 2s, giving up waiting")
++
++    # -- request handling ------------------------------------------------
++
++    def _allowed_hosts(self) -> set[str]:
++        hosts = {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
++        if self.port == 80:
++            hosts |= {"127.0.0.1", "localhost"}
++        return hosts
++
++    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
++        state = _ConnState()
++        self._writers.add(writer)
++        try:
++            await self._serve(reader, writer, state)
++        except _ProxyError as exc:
++            if not state.started:
++                await self._send_error(writer, exc.status, exc.message)
++        except (ConnectionError, OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError) as exc:
++            logger.debug("preview proxy: connection ended: %r", exc)
++            if not state.started and not isinstance(exc, (ConnectionError, asyncio.IncompleteReadError)):
++                await self._send_error(writer, 502, "The preview proxy couldn't complete that request.")
++        except Exception:
++            logger.exception("preview proxy: unexpected error")
++            if not state.started:
++                await self._send_error(writer, 500, "The preview proxy hit an internal error.")
++        finally:
++            self._writers.discard(writer)
++            writer.close()
++
++    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, state: _ConnState) -> None:
++        cfg = self._cfg
++        try:
++            raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), _HEAD_TIMEOUT_SECONDS)
++        except asyncio.LimitOverrunError:
++            raise _ProxyError(431, "Request headers are too large.") from None
++        except (asyncio.TimeoutError, asyncio.IncompleteReadError):
++            return  # a speculative/idle connection that never sent a request
++
++        start_line, headers = _parse_head(raw, bad_status=400)
++        method, target = _parse_request_line(start_line)
++
++        # DNS-rebinding defence -- see the module docstring.
++        host = (_header(headers, "host") or "").lower()
++        allowed = self._allowed_hosts()
++        if host not in allowed:
++            raise _ProxyError(403, "Blocked: this proxy only answers requests addressed to 127.0.0.1 or localhost.")
++        proxy_origins = {f"http://{h}" for h in allowed}
++        proxy_origin = f"http://{host}"
++
++        upgrade = "upgrade" in _connection_tokens(headers) and "websocket" in _tokens(_header(headers, "upgrade"))
++        framing = _framing(headers, response=False)
++        if upgrade and framing[0] != "none":
++            raise _ProxyError(400, "A WebSocket handshake can't carry a body.")
++        expects_continue = "100-continue" in _tokens(_header(headers, "expect"))
++
++        up_headers = rewrite_request_headers(headers, cfg, proxy_origins, upgrade=upgrade)
++        up_reader, up_writer = await self._connect_upstream()
++        try:
++            up_writer.write(_format_head(f"{method} {target} HTTP/1.1", up_headers))
++            if expects_continue:
++                # We stripped `Expect` upstream, so answer it ourselves or
++                # the client waits for a 100 that would never come.
++                writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
++                await writer.drain()
++            await _copy_body(reader, up_writer, framing)
++            await up_writer.drain()
++
++            while True:  # skip interim responses (100 Continue, 103 Early Hints)
++                try:
++                    raw_resp = await asyncio.wait_for(up_reader.readuntil(b"\r\n\r\n"), _RESPONSE_HEAD_TIMEOUT_SECONDS)
++                except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
++                    raise _ProxyError(
++                        502, f"Your dev server at {cfg.target_origin} closed the connection without answering."
++                    ) from None
++                status_line, resp_headers = _parse_head(raw_resp, bad_status=502)
++                status = _parse_status_line(status_line)
++                if status != 101 and 100 <= status < 200:
++                    continue
++                break
++
++            if status == 101:
++                if not upgrade:
++                    raise _ProxyError(502, "Your dev server tried to switch protocols unprompted.")
++                state.started = True
++                writer.write(raw_resp)  # handshake reply verbatim; the tunnel is opaque after it
++                await writer.drain()
++                await _tunnel(reader, writer, up_reader, up_writer)
++                return
++
++            resp_framing = _framing(resp_headers, response=True, status=status, method=method)
++            out_headers, nonce = rewrite_response_headers(resp_headers, cfg, proxy_origin)
++            reason = status_line.split(" ", 2)[2] if status_line.count(" ") >= 2 else ""
++            out_line = f"HTTP/1.1 {status} {reason}".rstrip()
++
++            if should_inject(
++                headers, resp_headers, method=method, status=status,
++                body_kind=resp_framing[0], body_length=resp_framing[1],
++            ):
++                document = await _read_body(up_reader, resp_framing, _MAX_HTML_BYTES)
++                edited = inject_inspector(document, build_inspector_tag(cfg.frontend_origin, nonce))
++                # The edited copy is a different representation: drop the
++                # headers that describe the original bytes, and stop the
++                # browser caching a copy that embeds a script tag.
++                stale = {
++                    "content-length", "transfer-encoding", "etag", "last-modified", "cache-control",
++                    "expires", "pragma", "content-md5", "digest", "content-digest", "repr-digest",
++                }
++                out_headers = [(k, v) for k, v in out_headers if k.lower() not in stale]
++                out_headers += [("Content-Length", str(len(edited))), ("Cache-Control", "no-store")]
++                state.started = True
++                writer.write(_format_head(out_line, out_headers) + edited)
++                await writer.drain()
++            else:
++                state.started = True
++                writer.write(_format_head(out_line, out_headers))
++                await _copy_body(up_reader, writer, resp_framing)
++                await writer.drain()
++        finally:
++            up_writer.close()
++
++    async def _connect_upstream(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
++        cfg = self._cfg
++        try:
++            pair = await asyncio.wait_for(
++                asyncio.open_connection(cfg.target_host, cfg.target_port, ssl=self._ssl, limit=_MAX_HEAD_BYTES),
++                _CONNECT_TIMEOUT_SECONDS,
++            )
++        except (OSError, asyncio.TimeoutError):
++            if self._upstream_ok is not False:  # one line per outage, not one per asset request
++                logger.warning("preview proxy: can't reach your dev server at %s -- is it running?", cfg.target_origin)
++            self._upstream_ok = False
++            raise _ProxyError(
++                502, f"Couldn't reach your dev server at {cfg.target_origin}. Is it running? Reload once it is."
++            ) from None
++        if self._upstream_ok is False:
++            logger.info("preview proxy: dev server at %s is reachable again", cfg.target_origin)
++        self._upstream_ok = True
++        return pair
++
++    @staticmethod
++    async def _send_error(writer: asyncio.StreamWriter, status: int, message: str) -> None:
++        reasons = {400: "Bad Request", 403: "Forbidden", 431: "Request Header Fields Too Large",
++                   500: "Internal Server Error", 502: "Bad Gateway"}
++        body = (
++            "<!doctype html><meta charset=utf-8><title>MiniMe preview proxy</title>"
++            '<body style="font:14px system-ui,sans-serif;padding:24px;color:#444">'
++            f"<h3>MiniMe preview proxy</h3><p>{html.escape(message)}</p></body>"
++        ).encode("utf-8")
++        head = _format_head(
++            f"HTTP/1.1 {status} {reasons.get(status, 'Error')}",
++            [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body))),
++             ("Cache-Control", "no-store"), ("Connection", "close")],
++        )
++        try:
++            writer.write(head + body)
++            await writer.drain()
++        except (ConnectionError, OSError):
++            pass
++
++
++# ---------------------------------------------------------------------
++# Standalone entry point: `python -m daemon.preview_proxy --target ...`
++# Runs just the proxy, without pairing with the backend -- handy for
++# trying it out, and it's what the integration tests exercise.
++# ---------------------------------------------------------------------
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(
++        prog="python -m daemon.preview_proxy",
++        description="Run only the MiniMe preview proxy (no backend pairing).",
++    )
++    parser.add_argument("--target", required=True, help="your dev server, e.g. http://localhost:5173")
++    parser.add_argument("--frontend-origin", required=True, help="MiniMe's web app, e.g. http://localhost:3000")
++    parser.add_argument("--port", default=None, help=f"listen port on 127.0.0.1 (default {DEFAULT_PORT})")
++    args = parser.parse_args(argv)
++
++    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
++    try:
++        config = build_preview_config(args.target, args.frontend_origin, args.port)
++    except PreviewConfigError as exc:
++        print(f"error: {exc}", file=sys.stderr)
++        return 2
++
++    async def _run() -> None:
++        proxy = PreviewProxy(config)
++        await proxy.start()
++        logger.info("preview proxy: %s -> %s (Ctrl+C to stop)", proxy.url, config.target_origin)
++        try:
++            await asyncio.Event().wait()
++        finally:
++            await proxy.stop()
++
++    try:
++        asyncio.run(_run())
++    except KeyboardInterrupt:
++        pass
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/daemon/tests/test_config_preview.py b/daemon/tests/test_config_preview.py
+new file mode 100644
+index 0000000..3221306
+--- /dev/null
++++ b/daemon/tests/test_config_preview.py
+@@ -0,0 +1,109 @@
++"""
++daemon/tests/test_config_preview.py — W7.4: the optional preview-proxy
++settings in daemon/.env (MINIME_PREVIEW_TARGET / MINIME_FRONTEND_ORIGIN /
++MINIME_PREVIEW_PORT) as load_config() sees them.
++
++Kept apart from test_config.py on purpose: that file's fixture predates
++W7.4, and "no preview settings at all" (what every one of its tests
++writes) is itself one of the cases proven here.
++
++Run: pytest daemon/tests/test_config_preview.py -v
++"""
++import os
++
++import pytest
++
++from daemon.config import ConfigError, load_config
++
++_PREVIEW_VARS = ("MINIME_PREVIEW_TARGET", "MINIME_FRONTEND_ORIGIN", "MINIME_PREVIEW_PORT")
++
++
++@pytest.fixture(autouse=True)
++def _isolate_preview_env():
++    # load_config() uses load_dotenv(override=True), which writes into the
++    # real os.environ and outlives the test -- so clear these before and
++    # after, or one test's preview settings leak into the next config load
++    # (including test_config.py's, which expects none).
++    for name in _PREVIEW_VARS:
++        os.environ.pop(name, None)
++    yield
++    for name in _PREVIEW_VARS:
++        os.environ.pop(name, None)
++
++
++def _env(tmp_path, extra=""):
++    root = tmp_path / "project"
++    root.mkdir()
++    env_file = tmp_path / ".env"
++    env_file.write_text(
++        "MINIME_PAIRING_TOKEN=" + "a" * 32 + "\n"
++        f"MINIME_ALLOWED_ROOT={root}\n"
++        "MINIME_BACKEND_WS_URL=ws://localhost:8000\n"
++        "MINIME_WORKSPACE_ID=test-workspace\n" + extra
++    )
++    return env_file
++
++
++def test_preview_is_off_when_not_configured(tmp_path):
++    assert load_config(env_path=_env(tmp_path)).preview is None
++
++
++def test_preview_is_configured_from_env(tmp_path):
++    config = load_config(
++        env_path=_env(
++            tmp_path,
++            "MINIME_PREVIEW_TARGET=http://localhost:5173\n"
++            "MINIME_FRONTEND_ORIGIN=http://localhost:3000\n"
++            "MINIME_PREVIEW_PORT=5200\n",
++        )
++    )
++    assert config.preview is not None
++    assert config.preview.target_origin == "http://localhost:5173"
++    assert config.preview.frontend_origin == "http://localhost:3000"
++    assert config.preview.port == 5200
++
++
++def test_preview_port_defaults_to_the_stable_default(tmp_path):
++    config = load_config(
++        env_path=_env(
++            tmp_path,
++            "MINIME_PREVIEW_TARGET=localhost:5173\nMINIME_FRONTEND_ORIGIN=http://localhost:3000\n",
++        )
++    )
++    assert config.preview.port == 5199
++
++
++def test_target_without_frontend_origin_fails_at_startup(tmp_path):
++    env_file = _env(tmp_path, "MINIME_PREVIEW_TARGET=http://localhost:5173\n")
++    with pytest.raises(ConfigError, match="MINIME_FRONTEND_ORIGIN is not set"):
++        load_config(env_path=env_file)
++
++
++def test_a_non_local_target_fails_at_startup(tmp_path):
++    env_file = _env(
++        tmp_path,
++        "MINIME_PREVIEW_TARGET=http://example.com:3000\nMINIME_FRONTEND_ORIGIN=http://localhost:3000\n",
++    )
++    with pytest.raises(ConfigError, match="local address"):
++        load_config(env_path=env_file)
++
++
++def test_a_bad_preview_port_fails_at_startup(tmp_path):
++    env_file = _env(
++        tmp_path,
++        "MINIME_PREVIEW_TARGET=http://localhost:5173\n"
++        "MINIME_FRONTEND_ORIGIN=http://localhost:3000\n"
++        "MINIME_PREVIEW_PORT=nope\n",
++    )
++    with pytest.raises(ConfigError, match="MINIME_PREVIEW_PORT"):
++        load_config(env_path=env_file)
++
++
++def test_the_blank_lines_in_env_example_mean_off(tmp_path):
++    # daemon/.env.example ships these three keys empty; copying it as-is
++    # (the documented setup step) must not turn the proxy on or fail.
++    env_file = _env(
++        tmp_path,
++        "MINIME_PREVIEW_TARGET=\nMINIME_FRONTEND_ORIGIN=\nMINIME_PREVIEW_PORT=\n",
++    )
++    assert load_config(env_path=env_file).preview is None
+diff --git a/daemon/tests/test_minime_daemon_preview.py b/daemon/tests/test_minime_daemon_preview.py
+new file mode 100644
+index 0000000..28af51f
+--- /dev/null
++++ b/daemon/tests/test_minime_daemon_preview.py
+@@ -0,0 +1,64 @@
++"""
++daemon/tests/test_minime_daemon_preview.py — W7.4: how minime_daemon.py
++starts the preview proxy. The proxy's own behaviour is covered in
++test_preview_proxy.py; this is only the wiring -- in particular that a
++proxy which can't start never takes the daemon down with it.
++
++Run: pytest daemon/tests/test_minime_daemon_preview.py -v
++"""
++import asyncio
++import logging
++from pathlib import Path
++
++from daemon.config import DaemonConfig
++from daemon.minime_daemon import _start_preview_proxy
++from daemon.preview_proxy import PreviewProxyConfig
++
++
++def _config(preview):
++    return DaemonConfig(
++        pairing_token="a" * 32,
++        allowed_root=Path("/tmp"),
++        backend_ws_url="ws://localhost:8000",
++        workspace_id="w",
++        preview=preview,
++    )
++
++
++def _preview(port):
++    return PreviewProxyConfig("http", "localhost", 5173, "http://localhost:3000", port=port)
++
++
++def test_no_preview_settings_means_no_proxy():
++    assert asyncio.run(_start_preview_proxy(_config(None))) is None
++
++
++def test_configured_proxy_starts_listens_and_stops():
++    async def scenario():
++        proxy = await _start_preview_proxy(_config(_preview(0)))
++        assert proxy is not None
++        try:
++            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)  # it is really listening
++            writer.close()
++        finally:
++            await proxy.stop()
++        return proxy.url
++
++    assert asyncio.run(scenario()).startswith("http://127.0.0.1:")
++
++
++def test_a_busy_port_is_logged_and_survived(caplog):
++    async def scenario():
++        blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
++        busy_port = blocker.sockets[0].getsockname()[1]
++        try:
++            return await _start_preview_proxy(_config(_preview(busy_port))), busy_port
++        finally:
++            blocker.close()
++            await blocker.wait_closed()
++
++    with caplog.at_level(logging.ERROR, logger="minime_daemon"):
++        proxy, busy_port = asyncio.run(scenario())
++
++    assert proxy is None  # no exception: the daemon carries on without the proxy
++    assert any("continuing without it" in r.message and str(busy_port) in r.message for r in caplog.records)
+diff --git a/daemon/tests/test_preview_proxy.py b/daemon/tests/test_preview_proxy.py
+new file mode 100644
+index 0000000..a773dd0
+--- /dev/null
++++ b/daemon/tests/test_preview_proxy.py
+@@ -0,0 +1,757 @@
++"""
++daemon/tests/test_preview_proxy.py — W7.4: the preview reverse proxy.
++
++Two layers, like the rest of this repo's tests:
++
++  - pure functions (config validation, CSP / header rewriting, HTML
++    injection, the inject-or-not decision) tested directly;
++  - the real server on real loopback sockets, in front of a tiny fake
++    "dev server", driven with hand-written raw HTTP so framing, header
++    handling and the refusal paths are asserted byte-for-byte rather
++    than through a client library that would tidy them up.
++
++No pytest-asyncio (not a daemon dependency): each scenario is an async
++function run with asyncio.run().
++
++Run: pytest daemon/tests/test_preview_proxy.py -v
++"""
++from __future__ import annotations
++
++import asyncio
++import os
++import shutil
++import ssl
++import subprocess
++from contextlib import asynccontextmanager
++
++import pytest
++
++from daemon.preview_proxy import (
++    PreviewConfigError,
++    PreviewProxy,
++    PreviewProxyConfig,
++    build_inspector_tag,
++    build_preview_config,
++    inject_inspector,
++    rewrite_csp,
++    rewrite_request_headers,
++    rewrite_response_headers,
++    should_inject,
++)
++
++FRONTEND = "http://localhost:3000"
++TAG = build_inspector_tag(FRONTEND)
++
++
++# ---------------------------------------------------------------------
++# build_preview_config
++# ---------------------------------------------------------------------
++
++
++def test_config_normalises_a_loopback_target():
++    cfg = build_preview_config("localhost:5173", "http://localhost:3000/", "5199")
++    assert (cfg.target_scheme, cfg.target_host, cfg.target_port) == ("http", "localhost", 5173)
++    assert cfg.target_origin == "http://localhost:5173"
++    assert cfg.frontend_origin == "http://localhost:3000"  # trailing slash dropped
++    assert cfg.port == 5199
++
++
++def test_config_default_port_and_default_scheme_ports():
++    assert build_preview_config("http://127.0.0.1:5173", FRONTEND).port == 5199
++    cfg = build_preview_config("https://localhost", FRONTEND)
++    assert cfg.target_port == 443 and cfg.target_origin == "https://localhost"  # default port omitted from the origin
++
++
++def test_config_accepts_ipv6_and_dot_localhost():
++    assert build_preview_config("http://[::1]:8080", FRONTEND).target_origin == "http://[::1]:8080"
++    assert build_preview_config("http://app.localhost:3001", FRONTEND).target_host == "app.localhost"
++
++
++@pytest.mark.parametrize(
++    "target",
++    [
++        "http://example.com:3000",  # not local
++        "http://192.168.1.20:3000",  # LAN, not loopback
++        "http://0.0.0.0:3000",
++        "ftp://localhost:21",
++        "http://user:pw@localhost:3000",
++        "http://localhost:3000/app",  # an origin, not a URL with a path
++        "http://localhost:3000?x=1",
++        "http://localhost:notaport",
++        "",
++    ],
++)
++def test_config_rejects_unsafe_or_malformed_targets(target):
++    with pytest.raises(PreviewConfigError):
++        build_preview_config(target, FRONTEND)
++
++
++def test_config_requires_the_frontend_origin():
++    with pytest.raises(PreviewConfigError, match="MINIME_FRONTEND_ORIGIN is not set"):
++        build_preview_config("http://localhost:5173", "")
++
++
++def test_config_refuses_to_proxy_minime_to_itself():
++    with pytest.raises(PreviewConfigError, match="MiniMe itself"):
++        build_preview_config("http://127.0.0.1:3000", "http://localhost:3000")  # alias of the same loopback port
++
++
++def test_config_refuses_a_proxy_that_would_forward_to_itself_or_collide_with_minime():
++    with pytest.raises(PreviewConfigError, match="forward to itself"):
++        build_preview_config("http://localhost:5199", FRONTEND, "5199")
++    with pytest.raises(PreviewConfigError, match="collides"):
++        build_preview_config("http://localhost:5173", FRONTEND, "3000")
++
++
++@pytest.mark.parametrize("port", ["abc", "-1", "70000"])
++def test_config_rejects_bad_listen_ports(port):
++    with pytest.raises(PreviewConfigError, match="MINIME_PREVIEW_PORT"):
++        build_preview_config("http://localhost:5173", FRONTEND, port)
++
++
++# ---------------------------------------------------------------------
++# inspector tag + injection
++# ---------------------------------------------------------------------
++
++
++def test_inspector_tag_matches_the_snippet_the_frontend_shows():
++    # frontend/app/lib/preview/previewUrl.js buildInspectorSnippet(origin)
++    assert TAG == (
++        '<script src="http://localhost:3000/mm-inspector.js" '
++        'data-mm-origin="http://localhost:3000" defer></script>'
++    )
++
++
++def test_inspector_tag_carries_a_nonce_and_escapes_attributes():
++    assert build_inspector_tag(FRONTEND, "abc123").endswith(' defer nonce="abc123"></script>')
++    hostile = build_inspector_tag('http://x"onload="y')
++    assert "&quot;" in hostile and 'x"onload' not in hostile
++
++
++def test_inject_goes_before_head_close_case_insensitively():
++    doc = b"<html><HEAD><title>t</title></HEAD ><body>hi</body></html>"
++    out = inject_inspector(doc, TAG)
++    assert out == b"<html><HEAD><title>t</title>" + TAG.encode() + b"</HEAD ><body>hi</body></html>"
++
++
++def test_inject_falls_back_to_body_then_end():
++    assert inject_inspector(b"<body>x</body>", TAG) == TAG.encode() + b"<body>x</body>"
++    assert inject_inspector(b"<p>fragment</p>", TAG) == b"<p>fragment</p>" + TAG.encode()
++    assert inject_inspector(b"<p>x</p></body>", TAG) == b"<p>x</p>" + TAG.encode() + b"</body>"
++
++
++def test_inject_leaves_a_page_that_already_has_the_snippet_alone():
++    doc = b'<head><script src="http://localhost:3000/mm-inspector.js"></script></head>'
++    assert inject_inspector(doc, TAG) == doc
++
++
++# ---------------------------------------------------------------------
++# CSP
++# ---------------------------------------------------------------------
++
++
++def test_csp_drops_frame_ancestors_and_keeps_the_rest():
++    value, nonce = rewrite_csp("default-src 'self'; frame-ancestors 'none'; img-src *", FRONTEND)
++    assert "frame-ancestors" not in value
++    assert "img-src *" in value and "default-src 'self'" in value
++    assert nonce is None
++
++
++def test_csp_only_frame_ancestors_means_no_header_at_all():
++    assert rewrite_csp("frame-ancestors 'self'", FRONTEND) == (None, None)
++
++
++def test_csp_script_src_gets_the_inspector_origin():
++    value, _ = rewrite_csp("script-src 'self'; object-src 'none'", FRONTEND)
++    assert "script-src 'self' http://localhost:3000" in value
++    value, _ = rewrite_csp("script-src 'none'", FRONTEND)
++    assert value == "script-src http://localhost:3000"  # 'none' can't be combined with a source
++
++
++def test_csp_default_src_only_gets_a_script_src_elem_so_other_fetches_are_unchanged():
++    value, _ = rewrite_csp("default-src 'self'", FRONTEND)
++    assert value == "default-src 'self'; script-src-elem 'self' http://localhost:3000"
++
++
++def test_csp_nonce_is_returned_for_the_injected_tag():
++    _, nonce = rewrite_csp("script-src 'nonce-AbC+/=_-' 'strict-dynamic'", FRONTEND)
++    assert nonce == "AbC+/=_-"
++    _, nonce = rewrite_csp("script-src 'nonce-\"><x>'", FRONTEND)
++    assert nonce is None  # not a legal nonce: never put it in an attribute
++
++
++def test_csp_multiple_policies_each_rewritten():
++    value, _ = rewrite_csp("script-src 'self', frame-ancestors 'none'; img-src data:", FRONTEND)
++    assert value == "script-src 'self' http://localhost:3000, img-src data:"
++
++
++# ---------------------------------------------------------------------
++# header rewriting
++# ---------------------------------------------------------------------
++
++CFG = PreviewProxyConfig("http", "localhost", 5173, FRONTEND, port=5199)
++PROXY_ORIGINS = {"http://127.0.0.1:5199", "http://localhost:5199"}
++
++
++def _as_dict(headers):
++    return {k.lower(): v for k, v in headers}
++
++
++def test_request_headers_are_pointed_at_the_dev_server():
++    out = rewrite_request_headers(
++        [
++            ("Host", "127.0.0.1:5199"),
++            ("Origin", "http://127.0.0.1:5199"),
++            ("Referer", "http://127.0.0.1:5199/page?x=1"),
++            ("Accept-Encoding", "gzip, br"),
++            ("Connection", "keep-alive, X-Secret"),
++            ("X-Secret", "dropped because Connection names it"),
++            ("Keep-Alive", "timeout=5"),
++            ("Cookie", "a=b"),
++        ],
++        CFG, PROXY_ORIGINS, upgrade=False,
++    )
++    d = _as_dict(out)
++    assert d["host"] == "localhost:5173"
++    assert d["origin"] == "http://localhost:5173"
++    assert d["referer"] == "http://localhost:5173/page?x=1"
++    assert d["accept-encoding"] == "identity"
++    assert d["connection"] == "close"
++    assert d["cookie"] == "a=b"
++    assert "x-secret" not in d and "keep-alive" not in d
++
++
++def test_a_foreign_origin_is_not_rewritten_so_the_dev_servers_cors_still_applies():
++    out = rewrite_request_headers(
++        [("Host", "127.0.0.1:5199"), ("Origin", "https://evil.example")], CFG, PROXY_ORIGINS, upgrade=False
++    )
++    assert _as_dict(out)["origin"] == "https://evil.example"
++
++
++def test_websocket_handshake_headers_survive():
++    out = rewrite_request_headers(
++        [
++            ("Host", "127.0.0.1:5199"),
++            ("Connection", "Upgrade"),
++            ("Upgrade", "websocket"),
++            ("Sec-WebSocket-Key", "k"),
++            ("Sec-WebSocket-Protocol", "vite-hmr"),
++        ],
++        CFG, PROXY_ORIGINS, upgrade=True,
++    )
++    d = _as_dict(out)
++    assert d["connection"] == "Upgrade" and d["upgrade"] == "websocket"
++    assert d["sec-websocket-protocol"] == "vite-hmr"
++
++
++def test_response_headers_lose_embed_blockers_and_get_mapped_back():
++    out, nonce = rewrite_response_headers(
++        [
++            ("X-Frame-Options", "DENY"),
++            ("Content-Security-Policy", "frame-ancestors 'none'; img-src *"),
++            ("Location", "http://localhost:5173/login?next=/"),
++            ("Access-Control-Allow-Origin", "http://localhost:5173"),
++            ("Connection", "keep-alive"),
++            ("Set-Cookie", "sid=1; Path=/"),
++        ],
++        CFG, "http://127.0.0.1:5199",
++    )
++    d = _as_dict(out)
++    assert "x-frame-options" not in d
++    assert d["content-security-policy"] == "img-src *"
++    assert d["location"] == "http://127.0.0.1:5199/login?next=/"
++    assert d["access-control-allow-origin"] == "http://127.0.0.1:5199"
++    assert d["connection"] == "close"
++    assert d["set-cookie"] == "sid=1; Path=/"
++    assert nonce is None
++
++
++# ---------------------------------------------------------------------
++# should_inject
++# ---------------------------------------------------------------------
++
++HTML = [("Content-Type", "text/html; charset=utf-8")]
++
++
++def _inject(req, resp=HTML, **kw):
++    args = {"method": "GET", "status": 200, "body_kind": "length", "body_length": 10}
++    args.update(kw)
++    return should_inject(req, resp, **args)
++
++
++def test_inject_only_for_html_documents():
++    assert _inject([("Sec-Fetch-Dest", "iframe")])
++    assert _inject([("Sec-Fetch-Dest", "document")])
++    assert not _inject([("Sec-Fetch-Dest", "empty")])  # fetch()/XHR of an HTML fragment
++    assert not _inject([("Sec-Fetch-Dest", "script")])
++    assert not _inject([("Sec-Fetch-Dest", "iframe")], [("Content-Type", "application/json")])
++    assert not _inject([("Sec-Fetch-Dest", "iframe")], HTML, method="HEAD")
++    assert not _inject([("Sec-Fetch-Dest", "iframe")], HTML, status=304)
++    assert not _inject([("Sec-Fetch-Dest", "iframe")], HTML, body_kind="none")
++
++
++def test_inject_falls_back_to_accept_when_a_client_sends_no_fetch_metadata():
++    assert _inject([("Accept", "text/html,application/xhtml+xml")])
++    assert not _inject([("Accept", "application/json")])
++    assert _inject([])
++
++
++def test_inject_skips_what_it_cannot_safely_edit():
++    req = [("Sec-Fetch-Dest", "iframe")]
++    assert not _inject(req, [("Content-Type", "text/html"), ("Content-Encoding", "br")])
++    assert not _inject(req, [("Content-Type", "text/html; charset=utf-16")])
++    assert not _inject(req, HTML, body_length=64 * 1024 * 1024)
++
++
++# ---------------------------------------------------------------------
++# The server, end to end on real sockets
++# ---------------------------------------------------------------------
++
++
++def http_response(status=200, headers=(), body=b"", chunked=False):
++    reason = {200: "OK", 301: "Moved Permanently", 404: "Not Found"}.get(status, "X")
++    lines = [f"HTTP/1.1 {status} {reason}", *(f"{k}: {v}" for k, v in headers), "Connection: close"]
++    if chunked:
++        lines.append("Transfer-Encoding: chunked")
++        mid = max(1, len(body) // 2)
++        pieces = [body[:mid], body[mid:]]
++        payload = b"".join(f"{len(p):x}\r\n".encode() + p + b"\r\n" for p in pieces if p) + b"0\r\n\r\n"
++    else:
++        lines.append(f"Content-Length: {len(body)}")
++        payload = body
++    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + payload
++
++
++class FakeUpstream:
++    """A stand-in dev server. `handler(request, reader, writer)` gets the
++    parsed request and either returns raw response bytes or writes to the
++    socket itself (returning None)."""
++
++    def __init__(self, handler, ssl_context=None):
++        self.handler = handler
++        self.ssl_context = ssl_context
++        self.requests: list[dict] = []
++        self._writers: set[asyncio.StreamWriter] = set()
++
++    async def start(self):
++        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0, ssl=self.ssl_context)
++        self.port = self._server.sockets[0].getsockname()[1]
++
++    async def stop(self):
++        self._server.close()
++        for w in list(self._writers):
++            w.close()
++        await asyncio.wait_for(self._server.wait_closed(), 2)
++
++    async def _serve(self, reader, writer):
++        self._writers.add(writer)
++        try:
++            head = await reader.readuntil(b"\r\n\r\n")
++            lines = head.decode("latin-1").split("\r\n")
++            method, target, _ = lines[0].split(" ")
++            headers = {}
++            for line in lines[1:]:
++                if line:
++                    k, v = line.split(":", 1)
++                    headers[k.lower()] = v.strip()
++            body = b""
++            if "content-length" in headers:
++                body = await reader.readexactly(int(headers["content-length"]))
++            elif headers.get("transfer-encoding") == "chunked":
++                while True:
++                    size = int((await reader.readuntil(b"\r\n")).strip() or b"0", 16)
++                    if size == 0:
++                        await reader.readuntil(b"\r\n")
++                        break
++                    body += await reader.readexactly(size)
++                    await reader.readexactly(2)
++            request = {"method": method, "target": target, "headers": headers, "body": body}
++            self.requests.append(request)
++            out = await self.handler(request, reader, writer)
++            if out is not None:
++                writer.write(out)
++                await writer.drain()
++        except (asyncio.IncompleteReadError, ConnectionError):
++            pass
++        finally:
++            writer.close()
++
++
++@asynccontextmanager
++async def running(handler, frontend=FRONTEND, ssl_context=None):
++    upstream = FakeUpstream(handler, ssl_context)
++    await upstream.start()
++    scheme = "https" if ssl_context else "http"
++    proxy = PreviewProxy(PreviewProxyConfig(scheme, "127.0.0.1", upstream.port, frontend, port=0))
++    await proxy.start()
++    try:
++        yield proxy, upstream
++    finally:
++        await proxy.stop()
++        await upstream.stop()
++
++
++def build_request(proxy, path="/", method="GET", headers=(), body=b"", host=None):
++    sent = {k.lower() for k, _ in headers}
++    lines = [f"{method} {path} HTTP/1.1"]
++    if "host" not in sent:
++        lines.append(f"Host: {host or f'127.0.0.1:{proxy.port}'}")
++    lines += [f"{k}: {v}" for k, v in headers]
++    if body and not ({"content-length", "transfer-encoding"} & sent):
++        lines.append(f"Content-Length: {len(body)}")
++    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
++
++
++async def exchange(proxy, raw: bytes):
++    """Send raw bytes, read until the proxy closes; return (status, headers, body)."""
++    reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
++    writer.write(raw)
++    await writer.drain()
++    data = await asyncio.wait_for(reader.read(-1), 5)
++    writer.close()
++    head, _, body = data.partition(b"\r\n\r\n")
++    lines = head.decode("latin-1").split("\r\n")
++    headers = [tuple(line.split(": ", 1)) for line in lines[1:]]
++    return int(lines[0].split(" ")[1]), headers, body
++
++
++def get(headers, name):
++    values = [v for k, v in headers if k.lower() == name.lower()]
++    return values[0] if values else None
++
++
++def run(coro):
++    return asyncio.run(asyncio.wait_for(coro, 20))
++
++
++def test_html_gets_the_inspector_and_loses_its_embed_blockers():
++    html_doc = b"<!doctype html><html><head><title>app</title></head><body><div id=root></div></body></html>"
++
++    async def handler(req, r, w):
++        return http_response(
++            200,
++            [
++                ("Content-Type", "text/html; charset=utf-8"),
++                ("X-Frame-Options", "SAMEORIGIN"),
++                ("Content-Security-Policy", "default-src 'self'; frame-ancestors 'self'"),
++                ("ETag", '"abc"'),
++            ],
++            html_doc,
++        )
++
++    async def scenario():
++        async with running(handler) as (proxy, upstream):
++            raw = build_request(proxy, "/", headers=[("Sec-Fetch-Dest", "iframe"), ("Accept-Encoding", "gzip, br")])
++            status, headers, body = await exchange(proxy, raw)
++            seen = upstream.requests[0]
++            return status, headers, body, seen, upstream.port
++
++    status, headers, body, seen, up_port = run(scenario())
++    assert status == 200
++    assert TAG.encode() in body and body.index(TAG.encode()) < body.index(b"</head>")
++    assert get(headers, "x-frame-options") is None
++    csp = get(headers, "content-security-policy")
++    assert "frame-ancestors" not in csp and "script-src-elem 'self' http://localhost:3000" in csp
++    assert int(get(headers, "content-length")) == len(body)
++    assert get(headers, "etag") is None and get(headers, "cache-control") == "no-store"
++    # What the dev server saw:
++    assert seen["headers"]["host"] == f"127.0.0.1:{up_port}"
++    assert seen["headers"]["accept-encoding"] == "identity"
++    assert seen["headers"]["connection"] == "close"
++
++
++def test_a_csp_nonce_is_copied_onto_the_injected_script():
++    async def handler(req, r, w):
++        return http_response(
++            200,
++            [("Content-Type", "text/html"), ("Content-Security-Policy", "script-src 'nonce-XyZ9' 'strict-dynamic'")],
++            b"<head></head>",
++        )
++
++    async def scenario():
++        async with running(handler) as (proxy, _):
++            return await exchange(proxy, build_request(proxy, headers=[("Sec-Fetch-Dest", "iframe")]))
++
++    _, _, body = run(scenario())
++    assert b'defer nonce="XyZ9"></script>' in body
++
++
++def test_non_html_passes_through_byte_for_byte_with_its_framing():
++    blob = os.urandom(200_000)
++
++    async def handler(req, r, w):
++        if req["target"] == "/chunked.js":
++            return http_response(200, [("Content-Type", "application/javascript")], b"console.log('hi'); // chunked", chunked=True)
++        return http_response(200, [("Content-Type", "application/octet-stream")], blob)
++
++    async def scenario():
++        async with running(handler) as (proxy, _):
++            a = await exchange(proxy, build_request(proxy, "/blob.bin"))
++            b = await exchange(proxy, build_request(proxy, "/chunked.js"))
++            return a, b
++
++    (s1, h1, b1), (s2, h2, b2) = run(scenario())
++    assert s1 == 200 and b1 == blob
++    assert s2 == 200 and get(h2, "transfer-encoding") == "chunked"
++    assert b2.endswith(b"0\r\n\r\n") and b"console.log" in b2  # chunk framing preserved
++
++
++def test_an_html_fragment_fetched_by_the_app_is_not_modified():
++    fragment = b"<li>row</li></head>"
++
++    async def handler(req, r, w):
++        return http_response(200, [("Content-Type", "text/html")], fragment)
++
++    async def scenario():
++        async with running(handler) as (proxy, _):
++            return await exchange(proxy, build_request(proxy, "/partial", headers=[("Sec-Fetch-Dest", "empty")]))
++
++    _, _, body = run(scenario())
++    assert body == fragment
++
++
++def test_a_chunked_html_document_is_reassembled_and_injected():
++    async def handler(req, r, w):
++        return http_response(200, [("Content-Type", "text/html")], b"<html><head></head><body>streamed</body></html>", chunked=True)
++
++    async def scenario():
++        async with running(handler) as (proxy, _):
++            return await exchange(proxy, build_request(proxy, headers=[("Sec-Fetch-Dest", "iframe")]))
++
++    _, headers, body = run(scenario())
++    assert get(headers, "transfer-encoding") is None
++    assert int(get(headers, "content-length")) == len(body)
++    assert body.startswith(b"<html><head>" + TAG.encode() + b"</head>") and body.endswith(b"streamed</body></html>")
++
++
++def test_redirects_are_pointed_back_at_the_proxy():
++    async def handler(req, r, w):
++        return http_response(301, [("Location", f"http://127.0.0.1:{upstream_port[0]}/login")], b"")
++
++    upstream_port = [0]
++
++    async def scenario():
++        async with running(handler) as (proxy, upstream):
++            upstream_port[0] = upstream.port
++            status, headers, _ = await exchange(proxy, build_request(proxy, "/"))
++            return status, headers, proxy.port
++
++    status, headers, proxy_port = run(scenario())
++    assert status == 301
++    assert get(headers, "location") == f"http://127.0.0.1:{proxy_port}/login"
++
++
++def test_requests_for_any_other_host_header_are_refused_before_reaching_the_dev_server():
++    async def handler(req, r, w):
++        return http_response(200, [], b"secret")
++
++    async def scenario():
++        async with running(handler) as (proxy, upstream):
++            res = [
++                await exchange(proxy, build_request(proxy, host="evil.example")),  # DNS rebinding
++                await exchange(proxy, build_request(proxy, host=f"evil.example:{proxy.port}")),
++                await exchange(proxy, build_request(proxy, host="127.0.0.1:1")),  # wrong port
++            ]
++            return res, len(upstream.requests)
++
++    results, reached_upstream = run(scenario())
++    assert [r[0] for r in results] == [403, 403, 403]
++    assert all(b"secret" not in r[2] for r in results)
++    assert reached_upstream == 0
++
++
++def test_it_is_not_an_open_proxy():
++    async def handler(req, r, w):
++        return http_response(200, [], b"x")
++
++    async def scenario():
++        async with running(handler) as (proxy, upstream):
++            res = [
++                await exchange(proxy, build_request(proxy, "http://example.com/")),  # absolute-form
++                await exchange(proxy, build_request(proxy, "example.com:443", method="CONNECT")),
++                await exchange(proxy, build_request(proxy, "*", method="OPTIONS")),
++            ]
++            return res, len(upstream.requests)
++
++    results, reached_upstream = run(scenario())
++    assert [r[0] for r in results] == [400, 400, 400]
++    assert reached_upstream == 0
++
++
++def test_ambiguous_or_malformed_framing_is_refused_not_forwarded():
++    async def handler(req, r, w):
++        return http_response(200, [], b"x")
++
++    async def scenario():
++        async with running(handler) as (proxy, upstream):
++            both = build_request(proxy, "/x", "POST", [("Content-Length", "3"), ("Transfer-Encoding", "chunked")], b"abc")
++            two_lengths = build_request(proxy, "/x", "POST", [("Content-Length", "3"), ("Content-Length", "4")], b"abc")
++            bare_lf = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-A: 1\nX-B: 2\r\n\r\n" % proxy.port
++            folded = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-A: 1\r\n  continued\r\n\r\n" % proxy.port
++            res = [await exchange(proxy, raw) for raw in (both, two_lengths, bare_lf, folded)]
++            return res, len(upstream.requests)
++
++    results, reached_upstream = run(scenario())
++    assert [r[0] for r in results] == [400, 400, 400, 400]
++    assert reached_upstream == 0
++
++
++def test_request_bodies_reach_the_dev_server_intact_and_origin_is_mapped():
++    async def handler(req, r, w):
++        return http_response(200, [("Content-Type", "text/plain")], b"ok")
++
++    chunked_body = b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"
++
++    async def scenario():
++        async with running(handler) as (proxy, upstream):
++            origin = f"http://127.0.0.1:{proxy.port}"
++            await exchange(proxy, build_request(proxy, "/api", "POST", [("Origin", origin)], b'{"a":1}'))
++            await exchange(proxy, build_request(proxy, "/up", "PUT", [("Transfer-Encoding", "chunked")], chunked_body))
++            return upstream.requests, upstream.port
++
++    (post, put), up_port = run(scenario())
++    assert post["body"] == b'{"a":1}' and post["headers"]["origin"] == f"http://127.0.0.1:{up_port}"
++    assert put["body"] == b"Wikipedia"
++
++
++def test_expect_continue_is_answered_by_the_proxy():
++    async def handler(req, r, w):
++        return http_response(200, [], req["body"])
++
++    async def scenario():
++        async with running(handler) as (proxy, upstream):
++            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
++            writer.write(build_request(proxy, "/big", "POST", [("Expect", "100-continue"), ("Content-Length", "5")]))
++            await writer.drain()
++            interim = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)  # would hang if we forwarded Expect
++            writer.write(b"hello")
++            await writer.drain()
++            rest = await asyncio.wait_for(reader.read(-1), 5)
++            writer.close()
++            return interim, rest, upstream.requests[0]
++
++    interim, rest, seen = run(scenario())
++    assert interim.startswith(b"HTTP/1.1 100 Continue")
++    assert rest.endswith(b"hello") and "expect" not in seen["headers"]
++
++
++def test_unreachable_dev_server_gets_a_readable_502_not_a_hang():
++    async def scenario():
++        # Bind then close a socket to learn a port nothing is listening on.
++        probe = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
++        dead_port = probe.sockets[0].getsockname()[1]
++        probe.close()
++        await probe.wait_closed()
++        proxy = PreviewProxy(PreviewProxyConfig("http", "127.0.0.1", dead_port, FRONTEND, port=0))
++        await proxy.start()
++        try:
++            return await exchange(proxy, build_request(proxy)), dead_port
++        finally:
++            await proxy.stop()
++
++    (status, headers, body), dead_port = run(scenario())
++    assert status == 502
++    assert f"http://127.0.0.1:{dead_port}".encode() in body and b"Is it running" in body
++    assert get(headers, "x-frame-options") is None  # the error page itself must be embeddable too
++
++
++def websocket_upgrade_handler(log):
++    async def handler(req, reader, writer):
++        log.append(req)
++        writer.write(
++            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
++            b"Sec-WebSocket-Accept: abc\r\n\r\n"
++        )
++        await writer.drain()
++        while data := await reader.read(1024):  # echo, shouted
++            writer.write(data.upper())
++            await writer.drain()
++        return None
++
++    return handler
++
++
++def test_websocket_upgrades_are_tunnelled_so_hmr_keeps_working():
++    log: list[dict] = []
++
++    async def scenario():
++        async with running(websocket_upgrade_handler(log)) as (proxy, upstream):
++            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
++            writer.write(
++                build_request(
++                    proxy, "/?token=t", headers=[
++                        ("Connection", "Upgrade"), ("Upgrade", "websocket"),
++                        ("Sec-WebSocket-Key", "k"), ("Sec-WebSocket-Protocol", "vite-hmr"),
++                        ("Origin", f"http://127.0.0.1:{proxy.port}"),
++                    ],
++                )
++            )
++            await writer.drain()
++            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
++            writer.write(b"ping")
++            await writer.drain()
++            echoed = await asyncio.wait_for(reader.readexactly(4), 5)
++            writer.close()
++            return head, echoed, upstream.port
++
++    head, echoed, up_port = run(scenario())
++    assert head.startswith(b"HTTP/1.1 101") and b"Sec-WebSocket-Accept: abc" in head
++    assert echoed == b"PING"
++    seen = log[0]["headers"]
++    assert seen["upgrade"] == "websocket" and "upgrade" in seen["connection"].lower()
++    assert seen["sec-websocket-protocol"] == "vite-hmr"
++    assert seen["origin"] == f"http://127.0.0.1:{up_port}"  # dev servers check this on the handshake
++
++
++def test_stop_does_not_hang_on_an_open_websocket():
++    async def scenario():
++        async with running(websocket_upgrade_handler([])) as (proxy, _):
++            reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
++            writer.write(build_request(proxy, "/", headers=[("Connection", "Upgrade"), ("Upgrade", "websocket")]))
++            await writer.drain()
++            await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
++            await asyncio.wait_for(proxy.stop(), 5)  # the tunnel is still open
++            writer.close()
++        return True
++
++    assert run(scenario())
++
++
++def test_a_page_with_the_snippet_already_installed_is_not_double_injected():
++    page = b'<head><script src="http://localhost:3000/mm-inspector.js" data-mm-origin="http://localhost:3000" defer></script></head>'
++
++    async def handler(req, r, w):
++        return http_response(200, [("Content-Type", "text/html")], page)
++
++    async def scenario():
++        async with running(handler) as (proxy, _):
++            return await exchange(proxy, build_request(proxy, headers=[("Sec-Fetch-Dest", "iframe")]))
++
++    _, _, body = run(scenario())
++    assert body == page
++
++
++@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs the openssl CLI to mint a throwaway certificate")
++def test_an_https_dev_server_with_a_self_signed_certificate_works(tmp_path):
++    # Vite's basic-ssl, mkcert without a trusted root, `next --experimental-https`:
++    # local https dev servers present certificates nothing trusts. The proxy
++    # connects to loopback targets without verifying them (see PreviewProxy.__init__).
++    key, cert = tmp_path / "key.pem", tmp_path / "cert.pem"
++    subprocess.run(
++        ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
++         "-subj", "/CN=localhost", "-days", "1", "-keyout", str(key), "-out", str(cert)],
++        check=True, capture_output=True,
++    )
++    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
++    server_ctx.load_cert_chain(cert, key)
++
++    async def handler(req, r, w):
++        return http_response(200, [("Content-Type", "text/html")], b"<head></head>secure")
++
++    async def scenario():
++        async with running(handler, ssl_context=server_ctx) as (proxy, upstream):
++            result = await exchange(proxy, build_request(proxy, headers=[("Sec-Fetch-Dest", "iframe")]))
++            return result, upstream.port
++
++    (status, _, body), up_port = run(scenario())
++    assert status == 200 and TAG.encode() in body and body.endswith(b"secure")

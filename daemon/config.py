@@ -26,6 +26,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from daemon.path_guard import PathGuardError, assert_safe_root
+from daemon.preview_proxy import PreviewConfigError, PreviewProxyConfig, build_preview_config
 
 logger = logging.getLogger("minime_daemon")
 
@@ -49,6 +50,9 @@ class DaemonConfig:
     allowed_root: Path
     backend_ws_url: str  # NEW — Part 2
     workspace_id: str  # NEW — Part 2
+    # NEW — W7.4. None (the default) means the preview proxy is off,
+    # which is what every config written before W7.4 gets.
+    preview: PreviewProxyConfig | None = None
 
 
 def load_config(env_path: Path | None = None) -> DaemonConfig:
@@ -106,12 +110,28 @@ def load_config(env_path: Path | None = None) -> DaemonConfig:
     except PathGuardError as exc:
         raise ConfigError(str(exc)) from exc
 
+    # NEW — W7.4: the preview proxy is opt-in. Setting MINIME_PREVIEW_TARGET
+    # turns it on; the other two settings are then validated alongside it
+    # (a half-configured proxy is a startup error, not a silent no-op).
+    preview: PreviewProxyConfig | None = None
+    preview_target = os.environ.get("MINIME_PREVIEW_TARGET", "").strip()
+    if preview_target:
+        try:
+            preview = build_preview_config(
+                target=preview_target,
+                frontend_origin=os.environ.get("MINIME_FRONTEND_ORIGIN", "").strip(),
+                port=os.environ.get("MINIME_PREVIEW_PORT", "").strip(),
+            )
+        except PreviewConfigError as exc:
+            raise ConfigError(str(exc)) from exc
+
     logger.info("config loaded: allowed root = %s", resolved_root)
     return DaemonConfig(
         pairing_token=token,
         allowed_root=resolved_root,
         backend_ws_url=backend_ws_url,
         workspace_id=workspace_id,
+        preview=preview,
     )
 
 
