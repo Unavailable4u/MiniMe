@@ -123,6 +123,15 @@ import {
   planAiUpdateBaselines,
   visibleAiUpdates,
 } from "../../lib/workbench/aiUpdates"; // W8.2
+import {
+  annotateFindings,
+  countProblems,
+  editorDiagnostics,
+  fileVersions,
+  normalizeFindings,
+  sameFindings,
+  tabBadge,
+} from "../../lib/workbench/problems"; // W8.3b
 import { useProjectSearch } from "../../hooks/useProjectSearch";
 import {
   BOTTOM_PANEL_DEFAULT_HEIGHT,
@@ -154,6 +163,7 @@ import HistoryPanel from "./HistoryPanel";
 import PendingTray from "./PendingTray";
 import PreviewColumn from "./PreviewColumn";
 import PreviewPane from "./PreviewPane"; // NEW — W6.1: mounted below, replacing the placeholder PreviewColumn shows when its children prop is omitted
+import ProblemsPanel from "./ProblemsPanel"; // W8.3b
 import ProjectSearchPanel from "./ProjectSearchPanel";
 import QuickOpen from "./QuickOpen";
 import ReviewPanel from "./ReviewPanel";
@@ -219,6 +229,10 @@ const EditorPane = memo(function EditorPane({
   // callback.
   onAddToChat,
   onRangeChange,
+  // W8.3b: this file's problems, already limited to the findings made
+  // against exactly the text this pane shows (see problems.js's
+  // editorDiagnostics()). Undefined when there are none.
+  diagnostics,
 }) {
   const editorRef = useRef(null);
   const shown = active && visible;
@@ -244,6 +258,7 @@ const EditorPane = memo(function EditorPane({
         onCursorChange={(pos) => onCursor(path, pos)}
         onAddToChat={onAddToChat ? (sel) => onAddToChat(path, sel) : undefined}
         onRangeChange={onRangeChange ? (mapRange) => onRangeChange(path, mapRange) : undefined}
+        diagnostics={diagnostics}
       />
     </div>
   );
@@ -593,6 +608,45 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   const refreshRef = useRef(refreshFromServer);
   refreshRef.current = refreshFromServer;
 
+  // W8.3b: the Problems panel's data — the pipeline's test/scan findings
+  // for this workspace (provider.findings(), cleaned up by problems.js).
+  // Held here rather than inside ProblemsPanel because four things read
+  // it and none of them can wait for that panel to be the open tab: the
+  // tab's count, the status bar's count, each open editor's underlines,
+  // and the panel itself.
+  //
+  // It is refetched from the provider's ONE subscribe() callback below
+  // (and on visibility regain), not through a Pusher subscription of its
+  // own — see CloudFileProvider.findings() for why a second one is a
+  // bug, not just a duplicate. `findingsSeqRef` makes a newer fetch win
+  // over an older one that lands late, same as `listSeqRef` for the file
+  // list; a failed fetch keeps the last good list and reports why.
+  const [findings, setFindings] = useState([]);
+  const [findingsError, setFindingsError] = useState(null);
+  const findingsSeqRef = useRef(0);
+  const loadFindings = useCallback(async () => {
+    const seq = ++findingsSeqRef.current;
+    try {
+      const next = normalizeFindings(await provider.findings());
+      if (seq !== findingsSeqRef.current) return;
+      setFindings((prev) => (sameFindings(prev, next) ? prev : next));
+      setFindingsError(null);
+    } catch (err) {
+      if (seq === findingsSeqRef.current) setFindingsError(err.message);
+    }
+  }, [provider]);
+  const loadFindingsRef = useRef(loadFindings);
+  loadFindingsRef.current = loadFindings;
+
+  // Initial load, and again whenever the file source changes — another
+  // provider is another set of files, so nothing from the old one's
+  // findings applies (and a stale in-flight fetch for it is superseded).
+  useEffect(() => {
+    setFindings((prev) => (prev.length ? [] : prev));
+    setFindingsError(null);
+    loadFindings();
+  }, [loadFindings]);
+
   // W8.2: turn one pipeline write into toast entries. `baselines` were
   // captured when the event arrived, BEFORE the refresh replaced any
   // clean buffer (afterwards the old text is gone). The server's text
@@ -667,6 +721,11 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
         Promise.resolve(refreshRef.current())
           .catch(() => {})
           .then(() => announceRef.current(baselines));
+        // W8.3b: the backend stores a run's findings BEFORE it emits this
+        // event, so this fetch sees them. Any code_file_updated reloads
+        // (a kept proposal's too — its files just moved version, which is
+        // what turns their old findings stale).
+        loadFindingsRef.current();
         if (filePaths?.length) proposalFilesChanged(filePaths);
       }),
     [provider, proposalFilesChanged]
@@ -679,7 +738,10 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // re-reads files that actually moved.
   useEffect(() => {
     function onVisibility() {
-      if (document.visibilityState === "visible") refreshRef.current();
+      if (document.visibilityState === "visible") {
+        refreshRef.current();
+        loadFindingsRef.current(); // W8.3b: a missed event would otherwise leave Problems out of date too
+      }
     }
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
@@ -1716,6 +1778,37 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
 
   const { tabs, buffers, activePath, review } = state;
   const activeBuffer = activePath ? buffers[activePath] : null;
+
+  // W8.3b: the findings as they stand against the files as they are now.
+  // `annotated` keeps findings that went out of date (marked `stale` —
+  // the file moved to a newer version) and drops ones whose file is gone;
+  // the counts leave the stale ones out. See problems.js's header for why
+  // the list and the counts differ on that, and the editor differs again.
+  const fileVersionMap = useMemo(() => fileVersions(filesMeta), [filesMeta]);
+  const annotatedFindings = useMemo(() => annotateFindings(findings, fileVersionMap), [findings, fileVersionMap]);
+  const problemCounts = useMemo(() => countProblems(annotatedFindings), [annotatedFindings]);
+  const bottomBadges = useMemo(() => {
+    const problems = tabBadge(problemCounts);
+    return problems ? { problems } : undefined;
+  }, [problemCounts]);
+
+  // Per open file: the findings drawn as underlines. Which ones belong
+  // is decided by the version of the text IN THE BUFFER (editorDiagnostics),
+  // so this depends on each tab's version and nothing else about the
+  // buffers — a keystroke changes `buffers` but not this key, and must
+  // not rebuild every pane's props. The memo reads the live tabs/buffers
+  // through stateRef; the key is what says they changed.
+  const bufferVersionsKey = tabs.map((p) => `${p}\u0000${buffers[p]?.version ?? ""}`).join("\u0001");
+  const diagnosticsByPath = useMemo(() => {
+    const { tabs: openTabs, buffers: openBuffers } = stateRef.current;
+    const out = {};
+    for (const path of openTabs) {
+      const list = editorDiagnostics(findings, path, openBuffers[path]?.version);
+      if (list.length) out[path] = list;
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findings, bufferVersionsKey]);
   // W5.3: files in the open review whose NORMAL tab also has unsaved
   // edits — ReviewPanel.jsx's own amber banner (the proposal was made
   // against the saved version, not the buffer).
@@ -1859,14 +1952,39 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
     [state.console, consoleClear, handleFixWithAI]
   );
 
+  // W8.3b: a row's click opens its file at the finding's line — the same
+  // open-then-jump pair a search result uses (jumpToPositionInPane retries
+  // until a just-opened file's pane has mounted). A file-level finding
+  // (no line) lands on line 1.
+  const openProblem = useCallback(
+    (finding) => {
+      openFile(finding.path);
+      jumpToPositionInPane(finding.path, { line: finding.line ?? 1 });
+    },
+    [openFile, jumpToPositionInPane]
+  );
+
+  const problemsPanelNode = useMemo(
+    () => (
+      <ProblemsPanel
+        findings={annotatedFindings}
+        available={!!provider.capabilities.findings}
+        error={findingsError}
+        onOpen={openProblem}
+      />
+    ),
+    [annotatedFindings, provider, findingsError, openProblem]
+  );
+
   const bottomPanels = useMemo(
     () => ({
+      problems: problemsPanelNode,
       search: searchPanelNode,
       history: historyPanelNode,
       console: consolePanelNode,
       ...(terminalPanelNode ? { terminal: terminalPanelNode } : {}),
     }),
-    [searchPanelNode, historyPanelNode, consolePanelNode, terminalPanelNode]
+    [problemsPanelNode, searchPanelNode, historyPanelNode, consolePanelNode, terminalPanelNode]
   );
 
   // ---- autosave + unsaved-edits guards (W2.5) --------------------------
@@ -2238,6 +2356,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
                   registerPane={registerPane}
                   onAddToChat={handleAddRange}
                   onRangeChange={handleRangeChange}
+                  diagnostics={diagnosticsByPath[path]}
                 />
               );
             })}
@@ -2285,6 +2404,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
         resizable={!isMobile}
         onResizeStart={bottomSplitter.onHandleMouseDown}
         panels={bottomPanels}
+        badges={bottomBadges}
       />
 
       <StatusBar
@@ -2296,6 +2416,8 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
         cursor={cursor}
         pendingCount={pendingCount}
         onPendingClick={() => setPendingTrayOpen(true)}
+        problemCounts={provider.capabilities.findings ? problemCounts : undefined}
+        onProblemsClick={() => selectBottomTab("problems")}
         reserveRight={reserveCorner}
       />
 
