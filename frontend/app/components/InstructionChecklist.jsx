@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { Circle, CheckCircle2, Loader2 } from "lucide-react";
+import { Circle, CheckCircle2, Loader2, MessageSquareCode } from "lucide-react";
 
 /**
  * InstructionChecklist — fourth of Blueprint's four sub-views (Blueprint
@@ -22,9 +22,20 @@ import { Circle, CheckCircle2, Loader2 } from "lucide-react";
  * expects the caller to have re-fetched/updated `phases` (same
  * confirm-before-render caution BlueprintView's own wiring already
  * takes -- see the design guide §6 sketch's re-fetch-after-toggle call).
+ *
+ * `onWorkOnStep(phase, step)` (NEW -- W8.4, optional): when given, every
+ * step also gets a "Work on this" button -- BuildTab.jsx's
+ * InstructionsView is what turns a click into "open the relevant file in
+ * the Editor + pre-fill the chat" (this component knows nothing about
+ * either). It's a separate button beside the toggle, not part of it:
+ * clicking a step's text still only checks it off. Like onToggleStep it
+ * may return a promise; the button shows a spinner and ignores clicks
+ * until it settles. Omitted (the default) -> no button, exactly the old
+ * checklist.
  */
-export default function InstructionChecklist({ phases, onToggleStep }) {
+export default function InstructionChecklist({ phases, onToggleStep, onWorkOnStep = null }) {
   const [pendingStepId, setPendingStepId] = useState(null);
+  const [workingStepId, setWorkingStepId] = useState(null); // NEW -- W8.4
 
   const totalSteps = phases.reduce((n, ph) => n + ph.steps.length, 0);
   const doneSteps = phases.reduce((n, ph) => n + ph.steps.filter((s) => s.done).length, 0);
@@ -36,6 +47,19 @@ export default function InstructionChecklist({ phases, onToggleStep }) {
       await onToggleStep(phaseId, step.id, !step.done);
     } finally {
       setPendingStepId(null);
+    }
+  }
+
+  // NEW -- W8.4: independent of pendingStepId on purpose -- toggling a
+  // step and working on one are separate requests and shouldn't block
+  // each other, only a second click on a Work-on-this that's still going.
+  async function handleWorkOn(phase, step) {
+    if (workingStepId || !onWorkOnStep) return;
+    setWorkingStepId(step.id);
+    try {
+      await onWorkOnStep(phase, step);
+    } finally {
+      setWorkingStepId(null);
     }
   }
 
@@ -55,24 +79,43 @@ export default function InstructionChecklist({ phases, onToggleStep }) {
           <h3 className="text-xs font-medium text-[var(--neutral-200)]">{phase.name}</h3>
           {phase.steps.map((step) => {
             const isPending = pendingStepId === step.id;
+            const isWorking = workingStepId === step.id;
             return (
-              <button
-                key={step.id}
-                onClick={() => handleToggle(phase.id, step)}
-                disabled={isPending}
-                className="w-full flex items-start gap-2 text-left disabled:opacity-60"
-              >
-                {isPending ? (
-                  <Loader2 size={14} className="text-[var(--neutral-500)] mt-0.5 shrink-0 animate-spin" />
-                ) : step.done ? (
-                  <CheckCircle2 size={14} className="text-green-400 mt-0.5 shrink-0" />
-                ) : (
-                  <Circle size={14} className="text-[var(--neutral-600)] mt-0.5 shrink-0" />
+              // CHANGED -- W8.4: the row is a flex wrapper now so the
+              // toggle button and "Work on this" can sit side by side
+              // (a <button> inside a <button> isn't valid HTML). The
+              // toggle keeps every class it had; `flex-1 min-w-0`
+              // replaces `w-full` so it shares the row.
+              <div key={step.id} className="flex items-start gap-2">
+                <button
+                  onClick={() => handleToggle(phase.id, step)}
+                  disabled={isPending}
+                  className="flex-1 min-w-0 flex items-start gap-2 text-left disabled:opacity-60"
+                >
+                  {isPending ? (
+                    <Loader2 size={14} className="text-[var(--neutral-500)] mt-0.5 shrink-0 animate-spin" />
+                  ) : step.done ? (
+                    <CheckCircle2 size={14} className="text-green-400 mt-0.5 shrink-0" />
+                  ) : (
+                    <Circle size={14} className="text-[var(--neutral-600)] mt-0.5 shrink-0" />
+                  )}
+                  <span className={`text-xs ${step.done ? "text-[var(--neutral-600)] line-through" : "text-[var(--neutral-300)]"}`}>
+                    {step.title}
+                  </span>
+                </button>
+                {onWorkOnStep && (
+                  <button
+                    onClick={() => handleWorkOn(phase, step)}
+                    disabled={!!workingStepId}
+                    title="Work on this: open the relevant file and start a chat about it"
+                    aria-label={`Work on this step: ${step.title}`}
+                    className="shrink-0 mt-0.5 flex items-center gap-1 text-[11px] text-[var(--neutral-500)] hover:text-[var(--accent)] disabled:opacity-50"
+                  >
+                    {isWorking ? <Loader2 size={12} className="animate-spin" /> : <MessageSquareCode size={12} />}
+                    <span>Work on this</span>
+                  </button>
                 )}
-                <span className={`text-xs ${step.done ? "text-[var(--neutral-600)] line-through" : "text-[var(--neutral-300)]"}`}>
-                  {step.title}
-                </span>
-              </button>
+              </div>
             );
           })}
         </div>

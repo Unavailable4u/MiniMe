@@ -1,0 +1,869 @@
+diff --git a/frontend/app/components/InstructionChecklist.jsx b/frontend/app/components/InstructionChecklist.jsx
+index 1ac5974..1d87782 100644
+--- a/frontend/app/components/InstructionChecklist.jsx
++++ b/frontend/app/components/InstructionChecklist.jsx
+@@ -1,6 +1,6 @@
+ "use client";
+ import { useState } from "react";
+-import { Circle, CheckCircle2, Loader2 } from "lucide-react";
++import { Circle, CheckCircle2, Loader2, MessageSquareCode } from "lucide-react";
+ 
+ /**
+  * InstructionChecklist — fourth of Blueprint's four sub-views (Blueprint
+@@ -22,9 +22,20 @@ import { Circle, CheckCircle2, Loader2 } from "lucide-react";
+  * expects the caller to have re-fetched/updated `phases` (same
+  * confirm-before-render caution BlueprintView's own wiring already
+  * takes -- see the design guide §6 sketch's re-fetch-after-toggle call).
++ *
++ * `onWorkOnStep(phase, step)` (NEW -- W8.4, optional): when given, every
++ * step also gets a "Work on this" button -- BuildTab.jsx's
++ * InstructionsView is what turns a click into "open the relevant file in
++ * the Editor + pre-fill the chat" (this component knows nothing about
++ * either). It's a separate button beside the toggle, not part of it:
++ * clicking a step's text still only checks it off. Like onToggleStep it
++ * may return a promise; the button shows a spinner and ignores clicks
++ * until it settles. Omitted (the default) -> no button, exactly the old
++ * checklist.
+  */
+-export default function InstructionChecklist({ phases, onToggleStep }) {
++export default function InstructionChecklist({ phases, onToggleStep, onWorkOnStep = null }) {
+   const [pendingStepId, setPendingStepId] = useState(null);
++  const [workingStepId, setWorkingStepId] = useState(null); // NEW -- W8.4
+ 
+   const totalSteps = phases.reduce((n, ph) => n + ph.steps.length, 0);
+   const doneSteps = phases.reduce((n, ph) => n + ph.steps.filter((s) => s.done).length, 0);
+@@ -39,6 +50,19 @@ export default function InstructionChecklist({ phases, onToggleStep }) {
+     }
+   }
+ 
++  // NEW -- W8.4: independent of pendingStepId on purpose -- toggling a
++  // step and working on one are separate requests and shouldn't block
++  // each other, only a second click on a Work-on-this that's still going.
++  async function handleWorkOn(phase, step) {
++    if (workingStepId || !onWorkOnStep) return;
++    setWorkingStepId(step.id);
++    try {
++      await onWorkOnStep(phase, step);
++    } finally {
++      setWorkingStepId(null);
++    }
++  }
++
+   if (totalSteps === 0) {
+     return <p className="text-xs text-[var(--neutral-600)]">No assembly steps generated yet.</p>;
+   }
+@@ -55,24 +79,43 @@ export default function InstructionChecklist({ phases, onToggleStep }) {
+           <h3 className="text-xs font-medium text-[var(--neutral-200)]">{phase.name}</h3>
+           {phase.steps.map((step) => {
+             const isPending = pendingStepId === step.id;
++            const isWorking = workingStepId === step.id;
+             return (
+-              <button
+-                key={step.id}
+-                onClick={() => handleToggle(phase.id, step)}
+-                disabled={isPending}
+-                className="w-full flex items-start gap-2 text-left disabled:opacity-60"
+-              >
+-                {isPending ? (
+-                  <Loader2 size={14} className="text-[var(--neutral-500)] mt-0.5 shrink-0 animate-spin" />
+-                ) : step.done ? (
+-                  <CheckCircle2 size={14} className="text-green-400 mt-0.5 shrink-0" />
+-                ) : (
+-                  <Circle size={14} className="text-[var(--neutral-600)] mt-0.5 shrink-0" />
++              // CHANGED -- W8.4: the row is a flex wrapper now so the
++              // toggle button and "Work on this" can sit side by side
++              // (a <button> inside a <button> isn't valid HTML). The
++              // toggle keeps every class it had; `flex-1 min-w-0`
++              // replaces `w-full` so it shares the row.
++              <div key={step.id} className="flex items-start gap-2">
++                <button
++                  onClick={() => handleToggle(phase.id, step)}
++                  disabled={isPending}
++                  className="flex-1 min-w-0 flex items-start gap-2 text-left disabled:opacity-60"
++                >
++                  {isPending ? (
++                    <Loader2 size={14} className="text-[var(--neutral-500)] mt-0.5 shrink-0 animate-spin" />
++                  ) : step.done ? (
++                    <CheckCircle2 size={14} className="text-green-400 mt-0.5 shrink-0" />
++                  ) : (
++                    <Circle size={14} className="text-[var(--neutral-600)] mt-0.5 shrink-0" />
++                  )}
++                  <span className={`text-xs ${step.done ? "text-[var(--neutral-600)] line-through" : "text-[var(--neutral-300)]"}`}>
++                    {step.title}
++                  </span>
++                </button>
++                {onWorkOnStep && (
++                  <button
++                    onClick={() => handleWorkOn(phase, step)}
++                    disabled={!!workingStepId}
++                    title="Work on this: open the relevant file and start a chat about it"
++                    aria-label={`Work on this step: ${step.title}`}
++                    className="shrink-0 mt-0.5 flex items-center gap-1 text-[11px] text-[var(--neutral-500)] hover:text-[var(--accent)] disabled:opacity-50"
++                  >
++                    {isWorking ? <Loader2 size={12} className="animate-spin" /> : <MessageSquareCode size={12} />}
++                    <span>Work on this</span>
++                  </button>
+                 )}
+-                <span className={`text-xs ${step.done ? "text-[var(--neutral-600)] line-through" : "text-[var(--neutral-300)]"}`}>
+-                  {step.title}
+-                </span>
+-              </button>
++              </div>
+             );
+           })}
+         </div>
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index decd287..4dcf8c2 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -368,6 +368,17 @@ function ThinkingElapsed() {
+   return <span className="tabular-nums">{seconds}s</span>;
+ }
+ 
++// W8.4: how a pre-fill request combines with the composer's current
++// draft. An empty draft just takes the text; a draft that already
++// contains it (a second click on the same step) is left alone; anything
++// else keeps what the person typed and appends the starter text after a
++// blank line.
++function mergeDraftPrefill(prev, incoming) {
++  if (!prev || !prev.trim()) return incoming;
++  if (prev.includes(incoming)) return prev;
++  return `${prev.replace(/\s+$/, "")}\n\n${incoming}`;
++}
++
+ // NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a (scope
+ // resolution). `activeContext` is the caller's best guess at "what the
+ // person is currently looking at" -- { type: "topic", id, label } or
+@@ -403,6 +414,11 @@ function ThinkingElapsed() {
+ // what forwards codeContext.js's own pendingChatMode/clearChatMode
+ // under these names. `pendingChatMode === null` (the default, every
+ // non-Build call site) means nothing to apply.
++// NEW — W8.4: `pendingDraft`/`onConsumeDraft`, the same shape again, for
++// an Instructions step's "Work on this" — text to pre-fill the composer
++// with. Merged into the draft rather than replacing it (see
++// mergeDraftPrefill below), never sent on its own. `pendingDraft ===
++// null` (the default, every non-Build call site) means nothing to apply.
+ export default function WorkspaceChatPanel({
+   collapsed = false,
+   onToggleCollapse = null,
+@@ -419,6 +435,8 @@ export default function WorkspaceChatPanel({
+   onReviewProposal = null,
+   pendingChatMode = null,
+   onConsumeChatMode = null,
++  pendingDraft = null,
++  onConsumeDraft = null,
+ }) {
+   const legacy = useSession();
+   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone, API_URL } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8; API_URL NEW — W5.1b, for codeProposals.js's plain fetch() calls
+@@ -660,6 +678,22 @@ export default function WorkspaceChatPanel({
+   // resolveProposal()'s three "keep" callers that needs the same gate.
+   const [pendingProposalResolve, setPendingProposalResolve] = useState(null);
+   const [draft, setDraft] = useState("");
++  // NEW — W8.4: apply a pre-fill request from "Work on this" (see the
++  // prop's comment above). Merged, not replaced — whatever the person
++  // had already typed stays — and the textarea is focused so the next
++  // keystroke edits the starter text. `onConsumeDraft` clears the
++  // request right away so a re-render can't apply it twice. Both
++  // CodeAwareChatPanel instances BuildTab mounts (desktop dock + mobile
++  // overlay) apply it to their own draft; only one is visible.
++  useEffect(() => {
++    if (pendingDraft == null) return;
++    setDraft((prev) => mergeDraftPrefill(prev, pendingDraft));
++    onConsumeDraft?.();
++    // No cleanup on purpose: consuming the request re-runs this effect
++    // (pendingDraft goes back to null), which would cancel the focus
++    // before it fired. A ref that's gone by then is just a no-op.
++    requestAnimationFrame(() => textareaRef.current?.focus());
++  }, [pendingDraft, onConsumeDraft]);
+   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+ 
+   // NEW — Phase 1 (mobile shell): lets mobile/AppShell.jsx's header
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index 506870e..1668031 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -25,6 +25,15 @@ import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggabl
+ // remount the workbench+chat section.
+ import { CodeContextProvider, useCodeContext } from "../../lib/workbench/codeContext";
+ import ContextChips from "../workbench/ContextChips";
++// NEW — W8.4: "Work on this" on an Instructions step. These three are the
++// non-editor pieces it needs: a cloud provider just to list/read the
++// project's files (fileProviders.js is fetch-only — it does NOT pull
++// CodeMirror into this tab's chunk, that stays behind EditorWorkbench's
++// dynamic import), the files-minus-placeholders helper, and the pure
++// step→file/draft/mode decision.
++import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
++import { realFilePaths } from "../../lib/workbench/fileTree";
++import { planWorkOnStep } from "../../lib/workbench/instructionStep";
+ 
+ // NEW — W4.2 (Build Workbench plan). BuildTab itself can't call
+ // useCodeContext() — it's the component CREATING CodeContextProvider
+@@ -55,8 +64,12 @@ import ContextChips from "../workbench/ContextChips";
+ // header). Nothing here decides WHAT mode to request or WHEN — that's
+ // entirely EditorWorkbench.jsx's handleFixWithAI(); this is just the
+ // wire between the two.
++// CHANGED — W8.4: and once more for an Instructions step's "Work on
++// this" — `pendingDraft`/`clearDraft` carry the starter message the
++// composer should be pre-filled with (InstructionsView below asks for
++// it; WorkspaceChatPanel.jsx merges it into its draft).
+ function CodeAwareChatPanel({ onEnterReviewMode, ...props }) {
+-  const { refs, clearRefs, requestReview, pendingChatMode, clearChatMode } = useCodeContext();
++  const { refs, clearRefs, requestReview, pendingChatMode, clearChatMode, pendingDraft, clearDraft } = useCodeContext();
+   const onReviewProposal = useCallback(
+     (proposal) => {
+       onEnterReviewMode?.();
+@@ -73,6 +86,8 @@ function CodeAwareChatPanel({ onEnterReviewMode, ...props }) {
+       onReviewProposal={onReviewProposal}
+       pendingChatMode={pendingChatMode}
+       onConsumeChatMode={clearChatMode}
++      pendingDraft={pendingDraft}
++      onConsumeDraft={clearDraft}
+     />
+   );
+ }
+@@ -363,9 +378,38 @@ function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, ses
+ // straight copy of that logic, scoped to instructions only (Parts/
+ // Wiring/Mech stay in Plan as design specs, see PlanTab.jsx's own
+ // comment on BLUEPRINT_VIEWS).
+-function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep }) {
++// CHANGED — W8.4: every step also gets a "Work on this" button (see
++// InstructionChecklist.jsx). InstructionsView is the one place that can
++// act on it: it renders INSIDE CodeContextProvider (BuildTab's render
++// below), so it can drop a chip into the shared store and queue the
++// jump / chat-mode / draft requests the Editor and chat dock pick up —
++// exactly the channels Explorer's "Add to chat" and the Console's "Fix
++// with AI" already use. What a click does:
++//   1. list the project's files (fresh, at click time — not on mount, so
++//      it can't be stale and costs nothing until it's used);
++//   2. instructionStep.js's planWorkOnStep() picks the relevant file (if
++//      any), the starter message, and Ask vs Edit;
++//   3. file found -> read it, add it as a `file` chip, queue a jump to it,
++//      and switch to the Editor sub-view (`onOpenEditor`);
++//   4. open the chat dock (`onOpenChat`) with the starter message
++//      pre-filled and the mode set. Nothing is sent: the person reads
++//      it, edits it, and presses send themselves.
++// No file found is not an error — a step like "Sand the lid" has none —
++// the chat is still opened with the message, and a line under the
++// header says so. `onOpenEditor`/`onOpenChat` are BuildTab's own plain
++// callbacks (they touch its sub-view and dock state, not code context).
++function InstructionsView({ workspaceId, apiUrl, fetchDeviceSpec, toggleInstructionStep, onOpenEditor, onOpenChat }) {
+   const [spec, setSpec] = useState(null);
+   const [loading, setLoading] = useState(true);
++  const [notice, setNotice] = useState(null); // W8.4
++  const { addRef, requestJump, requestChatMode, requestDraft } = useCodeContext();
++  // W8.4: leaving this sub-view (or switching project) while a click is
++  // still listing files must not then yank the person into the Editor.
++  const aliveRef = useRef(true);
++  useEffect(() => {
++    aliveRef.current = true;
++    return () => { aliveRef.current = false; };
++  }, []);
+ 
+   useEffect(() => {
+     let cancelled = false;
+@@ -388,6 +432,48 @@ function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep
+     }
+   }
+ 
++  async function handleWorkOnStep(phase, step) {
++    setNotice(null);
++    const provider = createCloudFileProvider({ workspaceId, apiUrl });
++    let paths = [];
++    let listError = null;
++    try {
++      paths = realFilePaths(await provider.list());
++    } catch (err) {
++      listError = err?.message || "request failed";
++    }
++    if (!aliveRef.current) return;
++
++    const plan = planWorkOnStep({ step, phaseName: phase?.name, paths });
++    if (plan.path) {
++      // The chip carries the file's text (Ask mode fences snippets into
++      // the message; Edit mode sends the path). A read that fails
++      // still gets the chip + jump: the Editor will say why it can't
++      // open the file, which beats silently dropping the step's file.
++      let snippet = "";
++      try {
++        snippet = (await provider.read(plan.path)).content ?? "";
++      } catch {
++        /* chip without a snippet; see above */
++      }
++      if (!aliveRef.current) return;
++      addRef({ kind: "file", path: plan.path, provider: provider.id, snippet });
++      requestJump({ path: plan.path });
++      onOpenEditor?.();
++    } else {
++      setNotice(
++        listError
++          ? `Couldn't read this project's files (${listError}), so no file was opened. The chat has the step ready.`
++          : paths.length === 0
++            ? "This project has no files yet, so there's nothing to open. The chat has the step ready."
++            : "No file in this project matches that step. The chat has it ready."
++      );
++    }
++    requestChatMode(plan.mode);
++    requestDraft(plan.draft);
++    onOpenChat?.();
++  }
++
+   if (loading) {
+     return (
+       <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
+@@ -406,7 +492,16 @@ function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep
+     );
+   }
+ 
+-  return <InstructionChecklist phases={spec.instructions.phases} onToggleStep={handleToggleStep} />;
++  return (
++    <div className="space-y-2">
++      {notice && <p className="text-[11px] text-[var(--neutral-500)]">{notice}</p>}
++      <InstructionChecklist
++        phases={spec.instructions.phases}
++        onToggleStep={handleToggleStep}
++        onWorkOnStep={handleWorkOnStep}
++      />
++    </div>
++  );
+ }
+ 
+ // Part 7 §7.6 -- deploy action button + status indicator, three separate
+@@ -830,6 +925,14 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
+   // that, so switching projects or leaving/re-entering Editor manually
+   // doesn't keep forcing Local.
+   const [forceLocalSourceOnce, setForceLocalSourceOnce] = useState(false);
++  // NEW — W8.4: the mirror image of the above. "Work on this" picks a
++  // file out of the project's CLOUD files, so the Editor it opens has to
++  // be on the Cloud source even if this project was last left on Local
++  // (a Local provider would be asked for a path it has never heard of).
++  // Same one-shot shape: armed right before the sub-view switch, consumed
++  // by EditorWorkbench on mount, never persisted as the person's own
++  // source preference.
++  const [forceCloudSourceOnce, setForceCloudSourceOnce] = useState(false);
+   // NEW — W2.5: unsaved-edits guard. EditorWorkbench reports whether any
+   // open file has unsaved edits through `onDirtyChange`. It lands in a
+   // ref, not state: it's only ever read inside event handlers, and
+@@ -930,6 +1033,32 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
+     if (chatDockCollapsed) toggleChatDock();
+   }
+ 
++  // NEW — W8.4: InstructionsView's "Work on this" callbacks. Both are
++  // called from inside an async handler (after it has awaited the file
++  // list), so neither may lean on this render's `chatDockCollapsed` /
++  // `buildView` closure being current.
++  // - openChatDock: unlike toggleChatDock it only ever OPENS (a dock the
++  //   person opened themselves in the meantime must not get closed by
++  //   it). On mobile "open" is the full-screen chat overlay — the
++  //   pre-filled message is what they need to see next, and closing the
++  //   overlay reveals the Editor underneath.
++  // - openEditorForStep: arms the Cloud-source override (see
++  //   forceCloudSourceOnce) and goes through requestBuildView like every
++  //   other navigation, so it's guarded the same way (nothing can be
++  //   dirty when called from Instructions — the Editor isn't mounted —
++  //   but the guard is the one door in).
++  function openChatDock() {
++    setChatDockCollapsed((prev) => {
++      if (prev) localStorage.setItem(CHAT_DOCK_KEY, "0");
++      return false;
++    });
++  }
++
++  function openEditorForStep() {
++    setForceCloudSourceOnce(true);
++    requestBuildView("code");
++  }
++
+   // NEW — W2.5: switching project, or leaving the Editor sub-view,
+   // unmounts EditorWorkbench and drops whatever it hadn't saved.
+   // guardUnsaved() runs a navigation straight away when nothing is
+@@ -1442,8 +1571,11 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
+                 apiUrl={API_URL}
+                 reserveCorner={chatDockCollapsed}
+                 onDirtyChange={handleEditorDirty}
+-                initialSourceOverride={forceLocalSourceOnce ? "local" : undefined}
+-                onConsumeInitialSourceOverride={() => setForceLocalSourceOnce(false)}
++                initialSourceOverride={forceLocalSourceOnce ? "local" : forceCloudSourceOnce ? "cloud" : undefined}
++                onConsumeInitialSourceOverride={() => {
++                  setForceLocalSourceOnce(false);
++                  setForceCloudSourceOnce(false); // W8.4
++                }}
+                 // W6.2: "Fix with AI" (Console tab) requests Ask mode
+                 // via codeContext.js regardless of whether the chat dock
+                 // happens to be visible right now -- CodeAwareChatPanel's
+@@ -1493,8 +1625,11 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
+             {buildView === "instructions" ? (
+               <InstructionsView
+                 workspaceId={selected.id}
++                apiUrl={API_URL}
+                 fetchDeviceSpec={fetchDeviceSpec}
+                 toggleInstructionStep={toggleInstructionStep}
++                onOpenEditor={openEditorForStep}
++                onOpenChat={openChatDock}
+               />
+             ) : buildView === "wireframes" ? (
+               // NEW — patch 12 (Plan/Build wireframes split): relocated
+diff --git a/frontend/app/lib/workbench/__tests__/codeContext.test.mjs b/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
+index 48fc66c..4e63e9a 100644
+--- a/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
+@@ -43,7 +43,7 @@ function assert(cond, msg) {
+   }
+ }
+ 
+-const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingUsage: null, usage: null };
++const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingDraft: null, pendingUsage: null, usage: null };
+ 
+ // --- ADD_REF -----------------------------------------------------------
+ 
+@@ -228,6 +228,22 @@ const setChatModeAgain = codeContextReducer(withChatMode, { type: "SET_PENDING_C
+ assertEqual(setChatModeAgain.pendingChatMode, "ask", "SET_PENDING_CHAT_MODE with the same mode still produces a fresh state object");
+ assert(setChatModeAgain !== withChatMode, "...i.e. it is NOT short-circuited to the same object");
+ 
++// --- pending draft (W8.4) ----------------------------------------------------
++
++const withDraft = codeContextReducer(initialState, { type: "SET_PENDING_DRAFT", text: "  Work on this build step: \"Flash the firmware\".  " });
++assertEqual(withDraft.pendingDraft, "Work on this build step: \"Flash the firmware\".", "SET_PENDING_DRAFT records the text, trimmed");
++assertEqual([withDraft.pendingChatMode, withDraft.pendingReview, withDraft.refs.length], [null, null, 0], "...without touching the other pending slots or the chips");
++assert(codeContextReducer(initialState, { type: "SET_PENDING_DRAFT", text: "   " }) === initialState, "SET_PENDING_DRAFT with whitespace-only text is a no-op (same state object)");
++assert(codeContextReducer(initialState, { type: "SET_PENDING_DRAFT", text: "" }) === initialState, "...and so is empty text");
++assert(codeContextReducer(initialState, { type: "SET_PENDING_DRAFT", text: null }) === initialState, "...and a non-string");
++const afterClearDraft = codeContextReducer(withDraft, { type: "CLEAR_PENDING_DRAFT" });
++assertEqual(afterClearDraft.pendingDraft, null, "CLEAR_PENDING_DRAFT resets it");
++assert(codeContextReducer(afterClearDraft, { type: "CLEAR_PENDING_DRAFT" }) === afterClearDraft, "CLEAR_PENDING_DRAFT with nothing pending returns the SAME state object");
++const draftThenMode = codeContextReducer(withDraft, { type: "SET_PENDING_CHAT_MODE", mode: "edit" });
++assertEqual([draftThenMode.pendingDraft === withDraft.pendingDraft, draftThenMode.pendingChatMode], [true, "edit"], "a draft request and a chat-mode request coexist (Work on this sets both)");
++const draftSurvivesClearRefs = codeContextReducer(codeContextReducer(withDraft, { type: "ADD_REF", ref: { kind: "file", path: "a.js", snippet: "x" } }), { type: "CLEAR_REFS" });
++assertEqual(draftSurvivesClearRefs.pendingDraft, withDraft.pendingDraft, "CLEAR_REFS (after a chat send) doesn't discard a draft that is still waiting for the composer");
++
+ // --- contextBudget -----------------------------------------------------------
+ 
+ assertEqual(contextBudget([]).totalChars, 0, "contextBudget of no refs is 0");
+diff --git a/frontend/app/lib/workbench/__tests__/instructionStep.test.mjs b/frontend/app/lib/workbench/__tests__/instructionStep.test.mjs
+new file mode 100644
+index 0000000..1a9ceb9
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/instructionStep.test.mjs
+@@ -0,0 +1,152 @@
++// W8.4 (Build Workbench plan) — tests for lib/workbench/instructionStep.js.
++// Run: node frontend/app/lib/workbench/__tests__/instructionStep.test.mjs
++//
++// instructionStep.js is import-free on purpose (see its header), so it
++// loads with NO `imports` map — an added `import` line would make this
++// test fail loudly.
++import { loadSource } from "./loadSource.mjs";
++
++const { tokenize, isCandidatePath, scorePath, findEntryFile, pickStepFile, stepDraftText, planWorkOnStep } = loadSource("../instructionStep.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++function assert(cond, msg) {
++  if (!cond) {
++    failures++;
++    console.error(`FAIL: ${msg}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// --- tokenize ------------------------------------------------------------------
++assertEqual(tokenize("Flash the firmware to the ESP32"), ["flash", "firmware", "esp32"], "stopwords dropped, digits inside a token kept");
++assertEqual(tokenize("mcu_1"), ["mcu"], "a trailing numeric id part is dropped");
++assertEqual(tokenize("3d_printer"), ["printer"], "tokens under 3 chars are dropped");
++assertEqual(tokenize("sensorReader"), ["sensor", "reader"], "camelCase is split");
++assertEqual(tokenize("sensors Sensor"), ["sensor"], "plural folds to singular and the result is deduped");
++assertEqual(tokenize("address"), ["address"], "a double-s word is not de-pluralised");
++assertEqual(tokenize(""), [], "empty string -> no tokens");
++assertEqual([tokenize(null), tokenize(undefined), tokenize(5)], [[], [], []], "non-strings -> no tokens");
++
++// --- isCandidatePath -----------------------------------------------------------
++assertEqual(
++  ["src/main.py", "firmware/main.ino", "README.md", "a/b/.gitkeep", "node_modules/x/index.js", "package-lock.json", "img/logo.png", "dist/app.js", "static/app.min.js", "parts/case.stl", "", null].map(isCandidatePath),
++  [true, true, true, false, false, false, false, false, false, false, false, false],
++  "source/text files are candidates; placeholders, deps, lockfiles, build output, binaries and minified files are not"
++);
++
++// --- scorePath -----------------------------------------------------------------
++assertEqual(scorePath("src/sensor_reader.py", ["sensor"]), 3, "a hit on the file name scores 3");
++assertEqual(scorePath("sensor/main.py", ["sensor"]), 1, "a hit only on a directory scores 1");
++assertEqual(scorePath("src/sensor_reader.py", ["sensor", "reader"]), 6, "every matching word adds up");
++assertEqual(scorePath("src/main.py", ["sensor"]), 0, "no overlap scores 0");
++assertEqual(scorePath("src/sensor/sensor.py", ["sensor"]), 3, "a word counts once, as a name hit (not name + dir)");
++
++// --- findEntryFile -------------------------------------------------------------
++assertEqual(findEntryFile(["util.py", "src/main.py", "main.py"]), "main.py", "main.* wins, shallowest copy first");
++assertEqual(findEntryFile(["app.js", "index.html"]), "index.html", "index outranks app");
++assertEqual(findEntryFile(["lib.cpp", "blink/blink.ino"]), "blink/blink.ino", "a .ino file counts as the sketch entry");
++assertEqual(findEntryFile(["util.py", "notes.md"]), null, "no entry-like file -> null");
++assertEqual(findEntryFile([]), null, "empty project -> null");
++assertEqual(findEntryFile(["node_modules/x/index.js"]), null, "an excluded path is never an entry file");
++
++// --- pickStepFile --------------------------------------------------------------
++const files = ["src/main.py", "src/sensor_reader.py", "src/display.py", "README.md", "firmware/main.ino"];
++
++assertEqual(
++  pickStepFile({ title: "Wire up the sensor reader", part_ids: [], tool_ids: [] }, files),
++  { path: "src/sensor_reader.py", reason: "name" },
++  "title words matching a file name -> that file, reason 'name'"
++);
++assertEqual(
++  pickStepFile({ title: "Mount the module", part_ids: ["display_1"], tool_ids: [] }, files),
++  { path: "src/display.py", reason: "name" },
++  "a part id can match a file name too"
++);
++assertEqual(
++  pickStepFile({ title: "Flash the firmware", part_ids: ["mcu_1"], tool_ids: [] }, files),
++  { path: "firmware/main.ino", reason: "entry" },
++  "a software step with no name match falls back to the entry file (two main.* tie on rank; alphabetical wins, so firmware/ before src/)"
++);
++assertEqual(
++  pickStepFile({ title: "Sand the lid smooth", part_ids: ["lid_1"], tool_ids: ["sandpaper"] }, files),
++  null,
++  "a purely physical step -> no file (we don't invent one)"
++);
++assertEqual(
++  pickStepFile({ title: "Assemble the case", part_ids: [], tool_ids: [] }, ["src/main.py", "src/display.py"], { phaseName: "Program" }),
++  { path: "src/main.py", reason: "entry" },
++  "the phase name makes a step a software step for the fallback"
++);
++assertEqual(
++  pickStepFile({ title: "Assemble the case", part_ids: [], tool_ids: [] }, ["src/main.py", "src/display.py"]),
++  null,
++  "…without it the same step has no file"
++);
++assertEqual(
++  pickStepFile({ title: "Sand the lid", part_ids: [], tool_ids: [] }, files, { phaseName: "Fabricate" }),
++  null,
++  "…but a physical phase name doesn't"
++);
++assertEqual(
++  pickStepFile({ title: "Wire the sensor", part_ids: [], tool_ids: [] }, ["sensor/readme.md", "src/main.py"]),
++  null,
++  "a directory-only hit (score 1) is not confident enough to pick a file"
++);
++assertEqual(pickStepFile({ title: "Flash the firmware" }, []), null, "empty project -> null");
++assertEqual(pickStepFile({ title: "Flash the firmware" }, ["a/.gitkeep"]), null, "only placeholders -> null");
++assertEqual(pickStepFile({}, files), null, "a step with no title/ids -> null");
++assertEqual(pickStepFile(null, files), null, "a missing step -> null");
++assertEqual(
++  pickStepFile({ title: "Update the display" }, ["b/display.py", "a/display.py"]),
++  { path: "a/display.py", reason: "name" },
++  "equal scores resolve deterministically (shallower, then alphabetical)"
++);
++assertEqual(
++  pickStepFile({ title: "Update the display" }, ["x/y/display.py", "display.py"]),
++  { path: "display.py", reason: "name" },
++  "…a shallower path beats a deeper one"
++);
++
++// --- stepDraftText -------------------------------------------------------------
++assertEqual(
++  stepDraftText({ title: " Flash the firmware ", part_ids: ["mcu_1"], tool_ids: ["usb_cable"] }, "Program"),
++  'Work on this build step (Program phase): "Flash the firmware". Parts: mcu_1. Tools: usb_cable.',
++  "draft names the phase, step, parts and tools"
++);
++assertEqual(stepDraftText({ title: "Sand the lid", part_ids: [], tool_ids: [] }, ""), 'Work on this build step: "Sand the lid".', "no phase / parts / tools -> just the step");
++assertEqual(stepDraftText({ title: "X", part_ids: [null, "", 5, "a"] }, null), 'Work on this build step: "X". Parts: a.', "junk ids are ignored");
++
++// --- planWorkOnStep ------------------------------------------------------------
++const confident = planWorkOnStep({ step: { id: "s1", title: "Wire up the sensor reader", part_ids: [], tool_ids: [] }, phaseName: "Wiring", paths: files });
++assertEqual([confident.path, confident.reason, confident.mode], ["src/sensor_reader.py", "name", "edit"], "a name match opens in Edit mode");
++assert(confident.draft.includes("Wire up the sensor reader") && confident.draft.includes("Wiring phase"), "…with the step and phase in the draft");
++
++const guess = planWorkOnStep({ step: { id: "s2", title: "Flash the firmware", part_ids: [], tool_ids: [] }, phaseName: "Program", paths: ["main.py"] });
++assertEqual([guess.path, guess.reason, guess.mode], ["main.py", "entry", "ask"], "an entry-file guess opens in Ask mode (a wrong guess can't become an edit proposal)");
++
++const none = planWorkOnStep({ step: { id: "s3", title: "Sand the lid", part_ids: [], tool_ids: [] }, phaseName: "Fabricate", paths: files });
++assertEqual([none.path, none.reason, none.mode], [null, null, "ask"], "no file -> Ask mode, no path (Edit mode needs one)");
++assert(none.draft.length > 0, "…but the draft is still produced");
++
++const empty = planWorkOnStep({ step: { id: "s4", title: "Flash the firmware" }, phaseName: "Program", paths: [] });
++assertEqual([empty.path, empty.mode], [null, "ask"], "an empty project -> no path, Ask mode");
++
++// -------------------------------------------------------------------------------
++
++if (failures > 0) {
++  console.error(`\n${failures} test(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll instructionStep.js tests passed.");
++}
+diff --git a/frontend/app/lib/workbench/codeContext.js b/frontend/app/lib/workbench/codeContext.js
+index b243ecb..95b15df 100644
+--- a/frontend/app/lib/workbench/codeContext.js
++++ b/frontend/app/lib/workbench/codeContext.js
+@@ -101,7 +101,7 @@ function refKey(ref) {
+   return `${ref.kind}:${ref.path}:${ref.fromLine ?? ""}:${ref.toLine ?? ""}`;
+ }
+ 
+-const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingUsage: null, usage: null };
++const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingDraft: null, pendingUsage: null, usage: null };
+ 
+ /**
+  * Pure reducer — see editorStore.js's own header for why this shape
+@@ -239,6 +239,26 @@ export function codeContextReducer(state, action) {
+     case "CLEAR_PENDING_CHAT_MODE":
+       return state.pendingChatMode == null ? state : { ...state, pendingChatMode: null };
+ 
++    // W8.4: an Instructions step's "Work on this" (InstructionChecklist
++    // via BuildTab.jsx's InstructionsView) asking the chat composer to
++    // pre-fill its draft. Same one-slot / consumer-clears shape as
++    // pendingChatMode just above, and for the same reason it rides
++    // through the store: the composer's draft is local state inside
++    // WorkspaceChatPanel.jsx, which has no lib/workbench import, so
++    // CodeAwareChatPanel forwards this as a plain prop. The panel
++    // clears it as soon as it has merged the text in (it never
++    // overwrites what the person had already typed — see its effect),
++    // so a request made while the dock is closed simply waits here
++    // until the panel mounts. Empty/whitespace text is ignored.
++    case "SET_PENDING_DRAFT": {
++      const text = typeof action.text === "string" ? action.text.trim() : "";
++      if (!text) return state;
++      return { ...state, pendingDraft: text };
++    }
++
++    case "CLEAR_PENDING_DRAFT":
++      return state.pendingDraft == null ? state : { ...state, pendingDraft: null };
++
+     // W7.1b: "Find usages" on an element chip whose source is a
+     // component definition (ContextChips.jsx). Same one-slot request /
+     // consumer-clears shape as pendingJump above — EditorWorkbench.jsx
+@@ -315,6 +335,9 @@ export function CodeContextProvider({ children }) {
+       // W6.2
+       requestChatMode: (mode) => dispatch({ type: "SET_PENDING_CHAT_MODE", mode }),
+       clearChatMode: () => dispatch({ type: "CLEAR_PENDING_CHAT_MODE" }),
++      // W8.4
++      requestDraft: (text) => dispatch({ type: "SET_PENDING_DRAFT", text }),
++      clearDraft: () => dispatch({ type: "CLEAR_PENDING_DRAFT" }),
+       // W7.1b
+       requestUsageSites: (ref) => dispatch({ type: "REQUEST_USAGE_SITES", ref }),
+       clearPendingUsage: () => dispatch({ type: "CLEAR_PENDING_USAGE" }),
+@@ -330,11 +353,12 @@ export function CodeContextProvider({ children }) {
+       pendingJump: state.pendingJump,
+       pendingReview: state.pendingReview,
+       pendingChatMode: state.pendingChatMode,
++      pendingDraft: state.pendingDraft,
+       pendingUsage: state.pendingUsage,
+       usage: state.usage,
+       ...actions,
+     }),
+-    [state.refs, state.pendingJump, state.pendingReview, state.pendingChatMode, state.pendingUsage, state.usage, actions]
++    [state.refs, state.pendingJump, state.pendingReview, state.pendingChatMode, state.pendingDraft, state.pendingUsage, state.usage, actions]
+   );
+ 
+   return createElement(CodeContextContext.Provider, { value }, children);
+diff --git a/frontend/app/lib/workbench/instructionStep.js b/frontend/app/lib/workbench/instructionStep.js
+new file mode 100644
+index 0000000..0dc2d03
+--- /dev/null
++++ b/frontend/app/lib/workbench/instructionStep.js
+@@ -0,0 +1,201 @@
++// frontend/app/lib/workbench/instructionStep.js — W8.4 (Build Workbench
++// plan). "Instructions ↔ editor": an InstructionChecklist step gets a
++// "Work on this" button that opens the relevant file in the Editor and
++// pre-fills the chat with a chip + a starter message.
++//
++// This file is the deterministic half of that: given a step and the
++// project's file paths, decide WHICH file is relevant, WHAT to put in the
++// composer, and WHICH chat mode to leave it in. No React, no fetch, no
++// imports — same dependency-free shape as fileTree.js / tabUtils.js, so
++// __tests__/instructionStep.test.mjs can load the real file under plain
++// `node`. BuildTab.jsx's InstructionsView does the I/O around it (list
++// the files, read the one picked, add the chip, open the Editor).
++//
++// What a step looks like (agents/hardware_speccer.py's JSON shape):
++//   { id, title, tool_ids: [...], part_ids: [...], done }
++// There is NO file field on it — these are assembly instructions
++// ("3D print the enclosure halves", "Flash the firmware to the ESP32"),
++// written before any code necessarily exists. So "the relevant file" is
++// a best guess, and this module is deliberately honest about how good a
++// guess it is:
++//   - reason "name"  — the step's own words (title, part ids, tool ids)
++//                      hit the file's NAME (`sensor_reader.py` for "Wire
++//                      up the sensor reader"). A confident match.
++//   - reason "entry" — nothing matched by name, but the step is plainly
++//                      about the software ("Flash the firmware"), so the
++//                      project's entry file (main.*, index.*, *.ino …) is
++//                      offered. A guess.
++//   - null           — a purely physical step ("Sand the lid") with no
++//                      file in sight. We don't invent one.
++// The reason decides the chat mode (planWorkOnStep below): a confident
++// name match opens in Edit, a guess opens in Ask, so a wrong guess can't
++// turn into an edit proposal against the wrong file.
++
++// Words that carry no signal for matching a step to a file name.
++const STOPWORDS = new Set([
++  "the", "and", "for", "with", "into", "onto", "from", "this", "that", "then", "your",
++  "all", "any", "use", "using", "make", "sure", "step", "each", "both", "also",
++  "put", "place", "set", "get", "attach", "insert", "connect", "mount", "screw",
++]);
++
++// A step whose own words say "this is about the software", which is when
++// falling back to the project's entry file is a reasonable guess.
++const CODE_WORDS = new Set([
++  "firmware", "code", "flash", "upload", "program", "programming", "sketch",
++  "script", "software", "library", "config", "configure", "configuration",
++  "compile", "calibrate", "calibration", "debug",
++]);
++
++// Entry-file basenames (extension stripped), best first.
++const ENTRY_NAMES = ["main", "index", "app", "firmware", "sketch", "server"];
++
++// Never offered: not something a build step is about, or not text.
++const SKIP_DIRS = /(^|\/)(node_modules|dist|build|\.git|\.next|__pycache__)\//;
++const SKIP_FILES = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock)$/;
++const SKIP_EXT = /\.(png|jpe?g|gif|webp|ico|svg|pdf|zip|gz|woff2?|ttf|otf|bin|stl|3mf|step|map|min\.js|min\.css)$/i;
++
++const MIN_NAME_SCORE = 3; // one hit on the file's own name; a directory hit alone (1) isn't enough
++const NAME_WEIGHT = 3;
++const DIR_WEIGHT = 1;
++
++/**
++ * Lower-case word tokens of `text`: split on anything that isn't a
++ * letter/digit and on camelCase seams, drop pure numbers ("mcu_1" →
++ * "mcu"), stopwords and anything under 3 characters, and fold a plain
++ * trailing "s" ("sensors" → "sensor") so a plural step matches a
++ * singular file name.
++ */
++export function tokenize(text) {
++  if (typeof text !== "string" || !text) return [];
++  const spaced = text.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
++  const out = [];
++  for (const raw of spaced.toLowerCase().split(/[^a-z0-9]+/)) {
++    if (raw.length < 3 || /^\d+$/.test(raw)) continue;
++    const word = raw.length > 3 && raw.endsWith("s") && !raw.endsWith("ss") ? raw.slice(0, -1) : raw;
++    if (STOPWORDS.has(word) || STOPWORDS.has(raw)) continue;
++    if (!out.includes(word)) out.push(word);
++  }
++  return out;
++}
++
++function splitPath(path) {
++  const slash = path.lastIndexOf("/");
++  const dir = slash === -1 ? "" : path.slice(0, slash);
++  const base = slash === -1 ? path : path.slice(slash + 1);
++  const dot = base.lastIndexOf(".");
++  const stem = dot > 0 ? base.slice(0, dot) : base;
++  return { dir, base, stem };
++}
++
++/** Whether `path` is a file a step could plausibly be about. */
++export function isCandidatePath(path) {
++  if (typeof path !== "string" || !path) return false;
++  if (SKIP_DIRS.test(path) || SKIP_FILES.test(path) || SKIP_EXT.test(path)) return false;
++  return splitPath(path).base !== ".gitkeep";
++}
++
++// The words a step is "about": its title plus the ids it references.
++function stepWords(step) {
++  const parts = [step?.title, ...(Array.isArray(step?.part_ids) ? step.part_ids : []), ...(Array.isArray(step?.tool_ids) ? step.tool_ids : [])];
++  return tokenize(parts.filter((p) => typeof p === "string").join(" "));
++}
++
++/** How strongly `path` matches the step's words (0 = not at all). */
++export function scorePath(path, words) {
++  const { dir, stem } = splitPath(path);
++  const nameTokens = tokenize(stem);
++  const dirTokens = tokenize(dir);
++  let score = 0;
++  for (const w of words) {
++    if (nameTokens.includes(w)) score += NAME_WEIGHT;
++    else if (dirTokens.includes(w)) score += DIR_WEIGHT;
++  }
++  return score;
++}
++
++// Shallower paths first, then alphabetical — a deterministic tie-break,
++// so the same project and step always open the same file.
++function byDepthThenName(a, b) {
++  const da = a.split("/").length;
++  const db = b.split("/").length;
++  return da - db || (a < b ? -1 : a > b ? 1 : 0);
++}
++
++/** The project's most entry-like file (main.*, index.*, *.ino …), or null. */
++export function findEntryFile(paths) {
++  const candidates = (paths || []).filter(isCandidatePath);
++  let best = null;
++  let bestRank = Infinity;
++  for (const path of candidates.slice().sort(byDepthThenName)) {
++    const { stem, base } = splitPath(path);
++    const lower = stem.toLowerCase();
++    let rank = ENTRY_NAMES.indexOf(lower);
++    if (rank === -1 && /\.ino$/i.test(base)) rank = ENTRY_NAMES.indexOf("sketch");
++    if (rank !== -1 && rank < bestRank) {
++      best = path;
++      bestRank = rank;
++    }
++  }
++  return best;
++}
++
++/**
++ * The file a step most likely concerns.
++ * @param {{title?: string, part_ids?: string[], tool_ids?: string[]}} step
++ * @param {string[]} paths - the project's file paths
++ * @param {{phaseName?: string}} [opts] - the phase's name only feeds the "is this a software step?" check for the entry-file fallback; it never scores a file
++ * @returns {{path: string, reason: "name" | "entry"} | null}
++ */
++export function pickStepFile(step, paths, { phaseName } = {}) {
++  const candidates = (paths || []).filter(isCandidatePath).sort(byDepthThenName);
++  if (candidates.length === 0) return null;
++
++  const words = stepWords(step);
++  let best = null;
++  let bestScore = 0;
++  for (const path of candidates) {
++    const score = scorePath(path, words);
++    if (score > bestScore) {
++      best = path;
++      bestScore = score;
++    }
++  }
++  if (best && bestScore >= MIN_NAME_SCORE) return { path: best, reason: "name" };
++
++  const isCodeStep = [...words, ...tokenize(phaseName || "")].some((w) => CODE_WORDS.has(w));
++  if (isCodeStep) {
++    const entry = findEntryFile(candidates);
++    if (entry) return { path: entry, reason: "entry" };
++  }
++  return null;
++}
++
++/** The composer's starter text for a step. The person edits it before sending. */
++export function stepDraftText(step, phaseName) {
++  const title = typeof step?.title === "string" ? step.title.trim() : "";
++  const phase = typeof phaseName === "string" && phaseName.trim() ? ` (${phaseName.trim()} phase)` : "";
++  const bits = [`Work on this build step${phase}: "${title}".`];
++  const parts = (Array.isArray(step?.part_ids) ? step.part_ids : []).filter((p) => typeof p === "string" && p);
++  const tools = (Array.isArray(step?.tool_ids) ? step.tool_ids : []).filter((t) => typeof t === "string" && t);
++  if (parts.length) bits.push(`Parts: ${parts.join(", ")}.`);
++  if (tools.length) bits.push(`Tools: ${tools.join(", ")}.`);
++  return bits.join(" ");
++}
++
++/**
++ * Everything "Work on this" needs to decide, in one pure call.
++ * @returns {{path: string|null, reason: "name"|"entry"|null, draft: string, mode: "ask"|"edit"}}
++ *   `mode` is "edit" only for a confident name match (see this file's
++ *   header); everything else — an entry-file guess, or no file at all —
++ *   is "ask", which also never needs a path (Edit mode's proposals
++ *   endpoint 400s on a ref without one).
++ */
++export function planWorkOnStep({ step, phaseName, paths }) {
++  const pick = pickStepFile(step, paths, { phaseName });
++  return {
++    path: pick ? pick.path : null,
++    reason: pick ? pick.reason : null,
++    draft: stepDraftText(step, phaseName),
++    mode: pick && pick.reason === "name" ? "edit" : "ask",
++  };
++}

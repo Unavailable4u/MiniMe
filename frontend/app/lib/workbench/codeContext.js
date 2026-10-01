@@ -101,7 +101,7 @@ function refKey(ref) {
   return `${ref.kind}:${ref.path}:${ref.fromLine ?? ""}:${ref.toLine ?? ""}`;
 }
 
-const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingUsage: null, usage: null };
+const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingDraft: null, pendingUsage: null, usage: null };
 
 /**
  * Pure reducer — see editorStore.js's own header for why this shape
@@ -239,6 +239,26 @@ export function codeContextReducer(state, action) {
     case "CLEAR_PENDING_CHAT_MODE":
       return state.pendingChatMode == null ? state : { ...state, pendingChatMode: null };
 
+    // W8.4: an Instructions step's "Work on this" (InstructionChecklist
+    // via BuildTab.jsx's InstructionsView) asking the chat composer to
+    // pre-fill its draft. Same one-slot / consumer-clears shape as
+    // pendingChatMode just above, and for the same reason it rides
+    // through the store: the composer's draft is local state inside
+    // WorkspaceChatPanel.jsx, which has no lib/workbench import, so
+    // CodeAwareChatPanel forwards this as a plain prop. The panel
+    // clears it as soon as it has merged the text in (it never
+    // overwrites what the person had already typed — see its effect),
+    // so a request made while the dock is closed simply waits here
+    // until the panel mounts. Empty/whitespace text is ignored.
+    case "SET_PENDING_DRAFT": {
+      const text = typeof action.text === "string" ? action.text.trim() : "";
+      if (!text) return state;
+      return { ...state, pendingDraft: text };
+    }
+
+    case "CLEAR_PENDING_DRAFT":
+      return state.pendingDraft == null ? state : { ...state, pendingDraft: null };
+
     // W7.1b: "Find usages" on an element chip whose source is a
     // component definition (ContextChips.jsx). Same one-slot request /
     // consumer-clears shape as pendingJump above — EditorWorkbench.jsx
@@ -315,6 +335,9 @@ export function CodeContextProvider({ children }) {
       // W6.2
       requestChatMode: (mode) => dispatch({ type: "SET_PENDING_CHAT_MODE", mode }),
       clearChatMode: () => dispatch({ type: "CLEAR_PENDING_CHAT_MODE" }),
+      // W8.4
+      requestDraft: (text) => dispatch({ type: "SET_PENDING_DRAFT", text }),
+      clearDraft: () => dispatch({ type: "CLEAR_PENDING_DRAFT" }),
       // W7.1b
       requestUsageSites: (ref) => dispatch({ type: "REQUEST_USAGE_SITES", ref }),
       clearPendingUsage: () => dispatch({ type: "CLEAR_PENDING_USAGE" }),
@@ -330,11 +353,12 @@ export function CodeContextProvider({ children }) {
       pendingJump: state.pendingJump,
       pendingReview: state.pendingReview,
       pendingChatMode: state.pendingChatMode,
+      pendingDraft: state.pendingDraft,
       pendingUsage: state.pendingUsage,
       usage: state.usage,
       ...actions,
     }),
-    [state.refs, state.pendingJump, state.pendingReview, state.pendingChatMode, state.pendingUsage, state.usage, actions]
+    [state.refs, state.pendingJump, state.pendingReview, state.pendingChatMode, state.pendingDraft, state.pendingUsage, state.usage, actions]
   );
 
   return createElement(CodeContextContext.Provider, { value }, children);
