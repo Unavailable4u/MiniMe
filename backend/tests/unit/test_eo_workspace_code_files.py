@@ -307,27 +307,27 @@ def test_write_file_rejects_invalid_path():
 
 
 def test_write_file_infers_language_when_not_provided(monkeypatch):
-    cursor = FakeCursor(fetchone_results=[_file_row(file_path="app.py", language="python")])
+    cursor = FakeCursor(fetchone_results=[None, _file_row(file_path="app.py", language="python")])
     _install_fake_cursor(monkeypatch, cursor)
 
     workspace_code_files.write_file("ws_1", "app.py", "print(1)", "user_1")
 
-    _, params = cursor.executed[0]
+    _, params = cursor.executed[1]  # [0] is the `for update` read, [1] the upsert
     assert params[3] == "python"  # resolved_language param
 
 
 def test_write_file_explicit_language_overrides_the_guess(monkeypatch):
-    cursor = FakeCursor(fetchone_results=[_file_row(file_path="weird.txt", language="python")])
+    cursor = FakeCursor(fetchone_results=[None, _file_row(file_path="weird.txt", language="python")])
     _install_fake_cursor(monkeypatch, cursor)
 
     workspace_code_files.write_file("ws_1", "weird.txt", "print(1)", "user_1", language="python")
 
-    _, params = cursor.executed[0]
+    _, params = cursor.executed[1]  # [0] is the `for update` read, [1] the upsert
     assert params[3] == "python"
 
 
 def test_write_file_writes_audit_and_returns_full_content_shape(monkeypatch):
-    cursor = FakeCursor(fetchone_results=[_file_row()])
+    cursor = FakeCursor(fetchone_results=[None, _file_row()])
     _install_fake_cursor(monkeypatch, cursor)
 
     result = workspace_code_files.write_file("ws_1", "src/app.py", "print(1)", "user_1")
@@ -677,3 +677,115 @@ def test_move_path_up_into_an_ancestor_moves_the_occupying_row_out_first(monkeyp
     landed = [p[1] for q, p in _statements(cursor, "insert into workspace_code_files")]
     assert landed == ["a/c", "a/b/c"]       # the occupant of a/b/c leaves before anything lands on it
     assert len(result) == 2
+
+
+# ---------------------------------------------------------------------
+# Item 4: a path's version numbers must never be reused, even after the
+# live row is deleted (delete_file() keeps history so the file stays
+# restorable). See _NEXT_VERSION_SQL and delete_file()'s docstring.
+# ---------------------------------------------------------------------
+
+def _norm(q):
+    return " ".join(q.split()).lower()
+
+
+def test_write_file_upsert_floors_the_version_above_existing_history(monkeypatch):
+    cursor = FakeCursor(fetchone_results=[None, _file_row(version=4)])
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.write_file("ws_1", "src/app.py", "print(1)", "user_1")
+
+    query, params = cursor.executed[1]
+    assert "greatest(" in _norm(query) and "from workspace_code_file_versions" in _norm(query)
+    # (ws, path, content, language, candidate, ws, path, now, user)
+    assert params[4] == 1 and params[5:7] == ("ws_1", "src/app.py")
+
+
+def test_write_files_upsert_floors_every_rows_version_above_history(monkeypatch):
+    rows = [_file_row(file_path="a.py", version=3), _file_row(file_path="b.py", version=1)]
+    cursor = FakeCursor(fetchall_results=[[], rows])
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.write_files("ws_1", [
+        {"file_path": "a.py", "content": "a"}, {"file_path": "b.py", "content": "b"},
+    ], "user_1")
+
+    upsert_query, flat = next((q, p) for q, p in cursor.executed if _norm(q).startswith("insert into workspace_code_files"))
+    assert _norm(upsert_query).count("greatest(") == 2  # one per row
+    assert len(flat) == 18  # 9 params per row
+
+
+def test_delete_file_snapshots_live_rows_into_history_before_deleting(monkeypatch):
+    cursor = FakeCursor(fetchall_results=[[{"file_path": "src/app.py"}]])
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.delete_file("ws_1", "src/app.py", "user_1")
+
+    kinds = [_norm(q).split(" where")[0][:60] for q, _ in cursor.executed]
+    snapshot = next(i for i, q in enumerate(cursor.executed)
+                    if _norm(q[0]).startswith("insert into workspace_code_file_versions"))
+    delete = next(i for i, q in enumerate(cursor.executed)
+                  if _norm(q[0]).startswith("delete from workspace_code_files "))
+    assert snapshot < delete, kinds
+    assert "on conflict (workspace_id, file_path, version) do nothing" in _norm(cursor.executed[snapshot][0])
+    # and the history of the deleted path is pruned afterwards
+    assert any("row_number()" in _norm(q) for q, _ in cursor.executed[delete + 1:])
+
+
+def test_delete_file_that_matches_nothing_touches_no_history(monkeypatch):
+    cursor = FakeCursor(fetchall_results=[[]])
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.delete_file("ws_1", "nothing/here.py", "user_1")
+
+    assert len(cursor.executed) == 1  # just the discovery SELECT
+
+
+# ---------------------------------------------------------------------
+# move_path leaves a tombstone at the old path (version never reused)
+# ---------------------------------------------------------------------
+
+def _version_inserts(cursor):
+    return [(q, p) for q, p in cursor.executed
+            if _norm(q).startswith("insert into workspace_code_file_versions")
+            and "values (%s, %s, %s, %s, %s, %s, %s)" in _norm(q)]
+
+
+def test_move_path_leaves_a_tombstone_of_the_live_version_at_the_old_path(monkeypatch):
+    old_row = _file_row(file_path="src/old.js", content="live body", version=3)
+    cursor = _GrantCheckingCursor(
+        fetchall_results=[[old_row], []],
+        fetchone_results=[_file_row(file_path="src/new.js", version=4)],
+    )
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
+
+    inserts = _version_inserts(cursor)  # [0] snapshot at new path, [1] tombstone at old path
+    assert [p[1] for _, p in inserts] == ["src/new.js", "src/old.js"]
+    tomb = inserts[1][1]
+    assert tomb[2] == 3 and tomb[3] == "live body" and tomb[6] == "user"
+    # ...and it lands after the old path's history was cleared, not before
+    order = [_norm(q) for q, _ in cursor.executed]
+    delete_idx = next(i for i, q in enumerate(order) if q.startswith("delete from workspace_code_file_versions"))
+    assert order.index(_norm(inserts[1][0])) > delete_idx
+
+
+def test_move_folder_up_shifts_the_second_file_above_the_first_files_tombstone(monkeypatch):
+    # a/b -> a: a/b/c.py (v2) goes to a/c.py, then a/b/b/c.py (v3) lands on
+    # a/b/c.py, whose pre-loop history max was 1 but now holds a tombstone v2.
+    r1 = _file_row(file_path="a/b/c.py", version=2)
+    r2 = _file_row(file_path="a/b/b/c.py", version=3)
+    cursor = _GrantCheckingCursor(
+        fetchall_results=[[r2, r1], [], [{"file_path": "a/b/c.py", "max_version": 1}]],
+        fetchone_results=[_file_row(file_path="a/c.py", version=3),
+                          _file_row(file_path="a/b/c.py", version=6)],
+    )
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.move_path("ws_1", "a/b", "a", "user_1")
+
+    copies = [(q, p) for q, p in cursor.executed if _norm(q).startswith("insert into workspace_code_file_versions")
+              and "select workspace_id" in _norm(q)]
+    shifts = {p[0]: p[1] for _, p in copies}  # new_path -> history_shift
+    assert shifts == {"a/c.py": 0, "a/b/c.py": 2}  # 2 = the tombstone's version, not the stale 1
