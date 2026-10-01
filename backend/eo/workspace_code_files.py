@@ -874,17 +874,40 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
     Unlike a plain overwrite, a move carries the file's identity
     forward rather than treating the new path as a brand-new file:
     every existing row in workspace_code_file_versions for the old
-    path is re-keyed to the new path FIRST, then the content that was
-    live at the old path is snapshotted into history at the new path
-    (source="user" — there's no dedicated "move" source value; this
-    doesn't touch migrations/0009_code_file_versions.sql's CHECK
-    constraint, and a move is a person-initiated write-like action the
-    same way a Save is), and finally the live row is re-inserted under
-    the new path one version higher. End state: `get_file_history()`
-    on the NEW path returns the file's complete history, old versions
-    included, with no gap at the point of the move — same "nothing is
-    ever lost, including this operation itself" posture
-    restore_version() already documents for itself.
+    path is copied to the new path FIRST and the old-path rows then
+    deleted, then the content that was live at the old path is
+    snapshotted into history at the new path (source="user" — there's
+    no dedicated "move" source value; this doesn't touch
+    migrations/0009_code_file_versions.sql's CHECK constraint, and a
+    move is a person-initiated write-like action the same way a Save
+    is), and finally the live row is re-inserted under the new path
+    one version higher. End state: `get_file_history()` on the NEW
+    path returns the file's complete history, old versions included,
+    with no gap at the point of the move — same "nothing is ever lost,
+    including this operation itself" posture restore_version()
+    already documents for itself.
+
+    The history copy is INSERT ... SELECT + DELETE, never an UPDATE of
+    file_path: migration 0009 deliberately REVOKEs UPDATE on
+    workspace_code_file_versions from minime_app ("once a version row
+    is written ... nothing in this codebase should ever rewrite it"),
+    so an `update ... set file_path` is rejected by Postgres with
+    "permission denied" before it touches a single row — which is
+    exactly what made every move/rename return a 500 before this fix.
+    Insert + delete are both granted, and a version row is never
+    mutated, only copied under a new key and removed from the old one,
+    all inside this one transaction.
+
+    A destination path can already have history rows of its own even
+    though no live file is there (delete_file() removes the live row
+    but deliberately keeps history so the file stays restorable). Copying
+    the moved file's versions in unchanged would collide with those on
+    the (workspace_id, file_path, version) primary key, so incoming
+    version numbers are shifted up by the highest version already in
+    history at that destination. Existing history is left alone and
+    version numbers at a path stay strictly increasing; with no
+    leftover history the shift is 0 and numbers are carried over
+    as-is.
 
     Refuses (raises ValueError, which the route layer turns into a
     400) rather than silently overwriting when:
@@ -904,7 +927,9 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
         spec asks for. A destination that collides with another row
         in the SAME batch (only possible if that row is also moving
         away from under `from_path`) is not a real collision and is
-        allowed.
+        allowed; the rows are processed in an order (see the sort
+        below) that guarantees such a row has already moved out of the
+        way by the time another one lands on its old path.
 
     The initial discovery SELECT takes `for update` on every row this
     move will touch, in one statement — same row-locking reasoning
@@ -962,14 +987,54 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
         if real_collisions:
             raise ValueError(f"refusing to overwrite existing path(s): {sorted(real_collisions)}")
 
+        # Highest version already in history at each destination (see
+        # this function's docstring: a deleted file's history outlives
+        # its live row, and incoming versions must land above it).
+        cur.execute(
+            "select file_path, max(version) as max_version "
+            "from workspace_code_file_versions "
+            "where workspace_id = %s and file_path = any(%s) group by file_path",
+            (ws_id, new_paths),
+        )
+        dest_history_max = {r["file_path"]: r["max_version"] for r in cur.fetchall()}
+
+        # Rows are handled one at a time, so a row whose destination is
+        # ANOTHER batch row's current path (allowed above) must come
+        # after that row has moved away, or its insert hits a live
+        # primary-key conflict. That overlap only exists when `to_path`
+        # is an ancestor of `from_path` — moving `a/b` up to `a` when
+        # both `a/b/c` and `a/b/b/c` exist sends `a/b/b/c` -> `a/b/c`
+        # while `a/b/c` -> `a/c`. Every path shrinks by the same amount
+        # there, so shortest-first always moves the occupant of a
+        # destination out before whatever lands on it (without this the
+        # same move succeeds or fails with a UniqueViolation depending
+        # on the rows' physical order). Any other move can't overlap,
+        # so the discovery order is left alone.
+        if from_path.startswith(to_path + "/"):
+            moves.sort(key=lambda m: len(m[0]["file_path"]))
+
         now = _now()
         moved_shapes = []
         for row, new_path in moves:
             old_path = row["file_path"]
+            history_shift = dest_history_max.get(new_path, 0)
+            # Carry the old path's history over: copy under the new key,
+            # then drop the old rows. NEVER `update ... set file_path`
+            # here — minime_app has no UPDATE on this table (migration
+            # 0009), see this function's docstring.
             cur.execute(
-                "update workspace_code_file_versions set file_path = %s "
-                "where workspace_id = %s and file_path = %s",
-                (new_path, ws_id, old_path),
+                """
+                insert into workspace_code_file_versions
+                    (workspace_id, file_path, version, content, updated_at, updated_by, source)
+                select workspace_id, %s, version + %s, content, updated_at, updated_by, source
+                from workspace_code_file_versions
+                where workspace_id = %s and file_path = %s
+                """,
+                (new_path, history_shift, ws_id, old_path),
+            )
+            cur.execute(
+                "delete from workspace_code_file_versions where workspace_id = %s and file_path = %s",
+                (ws_id, old_path),
             )
             cur.execute(
                 """
@@ -977,14 +1042,14 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
                     (workspace_id, file_path, version, content, updated_at, updated_by, source)
                 values (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (ws_id, new_path, row["version"], row["content"],
+                (ws_id, new_path, row["version"] + history_shift, row["content"],
                  row["updated_at"], row["updated_by"], "user"),
             )
             cur.execute(
                 "delete from workspace_code_files where workspace_id = %s and file_path = %s",
                 (ws_id, old_path),
             )
-            new_version = row["version"] + 1
+            new_version = row["version"] + history_shift + 1
             cur.execute(
                 """
                 insert into workspace_code_files

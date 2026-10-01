@@ -79,10 +79,11 @@ def _now():
 
 
 def _file_row(workspace_id="ws_1", file_path="src/app.py", content="print(1)",
-              language="python"):
+              language="python", version=1):
     return {
         "workspace_id": workspace_id, "file_path": file_path, "content": content,
-        "language": language, "updated_at": _now(), "updated_by": "user_1",
+        "language": language, "version": version,
+        "updated_at": _now(), "updated_by": "user_1",
     }
 
 
@@ -523,3 +524,156 @@ def test_move_path_writes_a_single_summary_audit_entry(monkeypatch):
     workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
 
     workspace_code_files.write_audit.assert_called_once()
+
+
+# ---------------------------------------------------------------------
+# move_path: grants, history carry-over, ordering
+#
+# The FakeCursor above never talks to Postgres, so on its own it can't
+# notice a statement the database would reject. Migration 0009 REVOKEs
+# UPDATE on workspace_code_file_versions from minime_app; move_path()
+# used to run `update workspace_code_file_versions set file_path = ...`
+# and returned a 500 on EVERY move/rename in production while every
+# test here stayed green. _GrantCheckingCursor rejects exactly what the
+# migration revokes, so that class of bug fails in unit tests too.
+# ---------------------------------------------------------------------
+
+import re
+
+_REVOKED = [  # (statement regex, what migrations/0009_code_file_versions.sql says)
+    (re.compile(r"^\s*update\s+workspace_code_file_versions\b", re.I | re.S),
+     "permission denied for table workspace_code_file_versions (0009 revokes UPDATE)"),
+]
+
+
+class _GrantCheckingCursor(FakeCursor):
+    def execute(self, query, params=None):
+        for pattern, message in _REVOKED:
+            if pattern.search(query):
+                raise PermissionError(message)
+        super().execute(query, params)
+
+
+def _statements(cursor, needle):
+    return [(q, p) for q, p in cursor.executed if needle in " ".join(q.split()).lower()]
+
+
+def test_grant_checking_cursor_really_rejects_update_on_versions():
+    cur = _GrantCheckingCursor()
+    with pytest.raises(PermissionError):
+        cur.execute("update workspace_code_file_versions set file_path = %s", ("x",))
+    cur.execute("insert into workspace_code_file_versions (a) values (%s)", (1,))  # granted
+
+
+def test_move_path_never_updates_the_versions_table(monkeypatch):
+    old_row = _file_row(file_path="src/old.js", version=3)
+    new_row = _file_row(file_path="src/new.js", version=4)
+    cursor = _GrantCheckingCursor(fetchall_results=[[old_row], []], fetchone_results=[new_row])
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")  # no PermissionError
+
+    assert not _statements(cursor, "update workspace_code_file_versions")
+
+
+def test_move_path_folder_never_updates_the_versions_table(monkeypatch):
+    r1 = _file_row(file_path="src/c/a.js", version=2)
+    r2 = _file_row(file_path="src/c/b.js", version=1)
+    cursor = _GrantCheckingCursor(
+        fetchall_results=[[r1, r2], []],
+        fetchone_results=[dict(r1, file_path="lib/c/a.js", version=3),
+                          dict(r2, file_path="lib/c/b.js", version=2)],
+    )
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.move_path("ws_1", "src/c", "lib/c", "user_1")
+
+    assert not _statements(cursor, "update workspace_code_file_versions")
+
+
+def test_move_path_carries_history_with_insert_select_then_delete(monkeypatch):
+    old_row = _file_row(file_path="src/old.js", version=3)
+    cursor = _GrantCheckingCursor(
+        fetchall_results=[[old_row], []],
+        fetchone_results=[_file_row(file_path="src/new.js", version=4)],
+    )
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
+
+    def norm(q):
+        return " ".join(q.split()).lower()
+
+    copy_idx = [i for i, (q, p) in enumerate(cursor.executed)
+                if norm(q).startswith("insert into workspace_code_file_versions") and "select" in norm(q)]
+    drop_idx = [i for i, (q, p) in enumerate(cursor.executed)
+                if norm(q).startswith("delete from workspace_code_file_versions")
+                and p == ("ws_1", "src/old.js")]
+    assert len(copy_idx) == 1 and len(drop_idx) == 1
+    # (new_path, version shift, ws_id, old_path) — no leftover history => shift 0
+    assert cursor.executed[copy_idx[0]][1] == ("src/new.js", 0, "ws_1", "src/old.js")
+    # copy BEFORE delete, or the old path's history is lost
+    assert copy_idx[0] < drop_idx[0]
+
+
+def test_move_path_snapshots_live_row_then_writes_it_one_version_higher(monkeypatch):
+    old_row = _file_row(file_path="src/old.js", version=3, content="live")
+    cursor = _GrantCheckingCursor(
+        fetchall_results=[[old_row], []],
+        fetchone_results=[_file_row(file_path="src/new.js", version=4)],
+    )
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
+
+    snapshot = [p for q, p in _statements(cursor, "insert into workspace_code_file_versions")
+                if p and len(p) == 7]  # the VALUES (...) snapshot, not the INSERT ... SELECT
+    assert snapshot[0][:4] == ("ws_1", "src/new.js", 3, "live")
+    live_insert = _statements(cursor, "insert into workspace_code_files")[0][1]
+    assert live_insert[1] == "src/new.js" and live_insert[4] == 4
+
+
+def test_move_path_onto_path_with_leftover_history_shifts_incoming_versions(monkeypatch):
+    # delete_file() keeps history, so a destination can have history rows
+    # (v1..v5 here) with no live row. Copying versions in unchanged would
+    # hit the (workspace_id, file_path, version) primary key.
+    old_row = _file_row(file_path="src/old.js", version=3)
+    cursor = _GrantCheckingCursor(
+        fetchall_results=[
+            [old_row],                                          # discovery
+            [],                                                 # no LIVE collision
+            [{"file_path": "src/new.js", "max_version": 5}],    # leftover history max
+        ],
+        fetchone_results=[_file_row(file_path="src/new.js", version=9)],
+    )
+    _install_fake_cursor(monkeypatch, cursor)
+
+    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
+
+    copy = [p for q, p in _statements(cursor, "insert into workspace_code_file_versions")
+            if p and len(p) == 4]
+    assert copy[0][:2] == ("src/new.js", 5)                     # versions shifted up by 5
+    snapshot = [p for q, p in _statements(cursor, "insert into workspace_code_file_versions")
+                if p and len(p) == 7]
+    assert snapshot[0][2] == 3 + 5                              # live row's snapshot above the leftovers
+    assert _statements(cursor, "insert into workspace_code_files")[0][1][4] == 3 + 5 + 1
+
+
+def test_move_path_up_into_an_ancestor_moves_the_occupying_row_out_first(monkeypatch):
+    # Moving a/b -> a sends a/b/b/c -> a/b/c while a/b/c -> a/c. Handled in
+    # discovery order, a/b/b/c (listed first here) would try to land on
+    # a/b/c while it's still live and hit a primary-key violation.
+    deep = _file_row(file_path="a/b/b/c", version=1)
+    shallow = _file_row(file_path="a/b/c", version=1)
+    cursor = _GrantCheckingCursor(
+        fetchall_results=[[deep, shallow], []],
+        fetchone_results=[_file_row(file_path="a/c", version=2),
+                          _file_row(file_path="a/b/c", version=2)],
+    )
+    _install_fake_cursor(monkeypatch, cursor)
+
+    result = workspace_code_files.move_path("ws_1", "a/b", "a", "user_1")
+
+    landed = [p[1] for q, p in _statements(cursor, "insert into workspace_code_files")]
+    assert landed == ["a/c", "a/b/c"]       # the occupant of a/b/c leaves before anything lands on it
+    assert len(result) == 2
