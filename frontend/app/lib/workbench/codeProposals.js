@@ -154,6 +154,30 @@ export async function resolveProposal(apiUrl, workspaceId, proposalId, decisions
 }
 
 /**
+ * POST /api/deploy/{session_id}/propose — W8.5b. Re-runs the deploy
+ * config writer for a chat and, when the plan is usable, files it as a
+ * pending code proposal (api/routes/deploy.py's deploy_propose(); see
+ * deployProposal.js for how the response is read). Returns the route's
+ * body as-is: the plan plus `proposal` / `proposal_skipped`.
+ *
+ * Used by the Build tab's Deploy card ("Propose" / "Re-propose") and by
+ * the pending tray's "Regenerate" on a deploy proposal — the one place
+ * Regenerate must NOT go through createProposal() above, which would
+ * send the instruction to the code_editor agent. A skipped plan is a
+ * normal 200 (check `proposal`), not an error; this throws only on a
+ * real HTTP failure.
+ */
+export async function proposeDeployConfig(apiUrl, sessionId) {
+  const res = await fetch(`${apiUrl}/api/deploy/${encodeURIComponent(sessionId)}/propose`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error(await parseErrorDetail(res));
+  return res.json();
+}
+
+/**
  * relay/emitter.py's CODE_PROPOSAL_READY / CODE_PROPOSAL_RESOLVED, on
  * the same `workspace-${id}` channel fileProviders.js's
  * CloudFileProvider.subscribe() already binds to for
