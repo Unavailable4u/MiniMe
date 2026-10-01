@@ -133,6 +133,25 @@ _MAX_HISTORY_VERSIONS = 30
 # outside this module ever needs to enumerate these).
 _VALID_VERSION_SOURCES = {"user", "pipeline", "proposal", "restore"}
 
+# Item 4: the version a live row gets when it is written, as a SQL
+# expression taking THREE params (candidate_version, ws_id, file_path).
+# It's the larger of the caller's candidate (current version + 1, or 1
+# for a path with no live row) and "one above the highest version
+# already in workspace_code_file_versions for this path". For a file
+# that is being overwritten the two agree (the snapshot just inserted IS
+# the current version), so the normal path is unchanged. They differ
+# only when a live row is CREATED at a path that still has history --
+# delete_file() keeps history so a deleted file stays restorable, and
+# without this floor the re-created file restarted at version 1, then
+# the next write tried to snapshot "version 1" into history on top of
+# the leftover row (primary-key violation -> 500). Done in SQL, inside
+# the INSERT itself, so it is one statement (no extra round trip, which
+# matters to write_files()'s no-N+1 contract) and atomic with the write.
+_NEXT_VERSION_SQL = (
+    "greatest(%s::integer, (select coalesce(max(version), 0) + 1 "
+    "from workspace_code_file_versions where workspace_id = %s and file_path = %s))"
+)
+
 
 class VersionConflictError(Exception):
     """Raised by write_file() when a caller-supplied base_version
@@ -355,6 +374,35 @@ def _prune_history(cur, ws_id: str, file_path: str) -> None:
     )
 
 
+def _prune_history_many(cur, ws_id: str, file_paths: list[str]) -> None:
+    """_prune_history() for several files of one workspace in ONE
+    statement (a window function ranks each file's own versions newest
+    first; anything past _MAX_HISTORY_VERSIONS within its own
+    (workspace_id, file_path) partition is deleted) -- looping
+    _prune_history() would put N round trips back on the paths
+    (write_files(), a folder delete_file()) that exist to avoid them."""
+    if not file_paths:
+        return
+    cur.execute(
+        """
+        delete from workspace_code_file_versions
+        where (workspace_id, file_path, version) in (
+            select workspace_id, file_path, version from (
+                select workspace_id, file_path, version,
+                       row_number() over (
+                           partition by workspace_id, file_path
+                           order by version desc
+                       ) as rn
+                from workspace_code_file_versions
+                where workspace_id = %s and file_path = any(%s)
+            ) ranked
+            where rn > %s
+        )
+        """,
+        (ws_id, file_paths, _MAX_HISTORY_VERSIONS),
+    )
+
+
 def _snapshot_and_upsert(cur, ws_id: str, file_path: str, content: str,
                           resolved_language: str | None, user_id: str,
                           source: str, current_row: dict | None) -> dict:
@@ -395,14 +443,14 @@ def _snapshot_and_upsert(cur, ws_id: str, file_path: str, content: str,
     cur.execute(
         """
         insert into workspace_code_files (workspace_id, file_path, content, language, version, updated_at, updated_by)
-        values (%s, %s, %s, %s, %s, %s, %s)
+        values (%s, %s, %s, %s, """ + _NEXT_VERSION_SQL + """, %s, %s)
         on conflict (workspace_id, file_path)
         do update set content = excluded.content, language = excluded.language,
                       version = excluded.version, updated_at = excluded.updated_at,
                       updated_by = excluded.updated_by
         returning workspace_id, file_path, content, language, version, updated_at, updated_by
         """,
-        (ws_id, file_path, content, resolved_language, new_version, now, user_id),
+        (ws_id, file_path, content, resolved_language, new_version, ws_id, file_path, now, user_id),
     )
     new_row = cur.fetchone()
 
@@ -581,7 +629,8 @@ def write_files(ws_id: str, files: list[dict], user_id: str, source: str = "pipe
                     prior["updated_at"], prior["updated_by"], source,
                 ))
             new_version = (prior["version"] if prior is not None else 0) + 1
-            upsert_params.append((ws_id, file_path, content, resolved_language, new_version, now, user_id))
+            upsert_params.append((ws_id, file_path, content, resolved_language, new_version,
+                                  ws_id, file_path, now, user_id))
 
         if history_params:
             history_placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(history_params))
@@ -595,7 +644,8 @@ def write_files(ws_id: str, files: list[dict], user_id: str, source: str = "pipe
                 flat_history_params,
             )
 
-        upsert_placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(upsert_params))
+        upsert_row = "(%s, %s, %s, %s, " + _NEXT_VERSION_SQL + ", %s, %s)"
+        upsert_placeholders = ", ".join([upsert_row] * len(upsert_params))
         flat_upsert_params = [p for row in upsert_params for p in row]
         cur.execute(
             f"""
@@ -612,32 +662,9 @@ def write_files(ws_id: str, files: list[dict], user_id: str, source: str = "pipe
         rows = cur.fetchall()
 
         if history_params:
-            # One prune statement for the WHOLE batch, not one per
-            # file -- see this function's own docstring. A window
-            # function ranks each touched file's own versions newest
-            # first; anything past _MAX_HISTORY_VERSIONS for its own
-            # (workspace_id, file_path) partition gets deleted, same
-            # end state _prune_history()'s per-file NOT IN/LIMIT query
-            # leaves write_file()'s single-file callers in.
-            touched_paths = [row[1] for row in history_params]
-            cur.execute(
-                """
-                delete from workspace_code_file_versions
-                where (workspace_id, file_path, version) in (
-                    select workspace_id, file_path, version from (
-                        select workspace_id, file_path, version,
-                               row_number() over (
-                                   partition by workspace_id, file_path
-                                   order by version desc
-                               ) as rn
-                        from workspace_code_file_versions
-                        where workspace_id = %s and file_path = any(%s)
-                    ) ranked
-                    where rn > %s
-                )
-                """,
-                (ws_id, touched_paths, _MAX_HISTORY_VERSIONS),
-            )
+            # One prune statement for the WHOLE batch, not one per file
+            # -- see this function's own docstring.
+            _prune_history_many(cur, ws_id, [row[1] for row in history_params])
 
     # Best-effort, same "never let audit logging break the real
     # operation it's attached to" contract write_audit() itself
@@ -708,9 +735,11 @@ def restore_version(ws_id: str, file_path: str, version: int, user_id: str) -> d
     _infer_language()), so a restore keeps the CURRENT row's language
     when there is one, and falls back to re-inferring from file_path
     when the file doesn't currently exist (e.g. restoring something
-    delete_file() removed — that path still works: this module's
-    delete_file() only removes the workspace_code_files row, never the
-    history, on purpose, so a deleted file's past stays restorable)."""
+    delete_file() removed — that path still works: delete_file()
+    snapshots the row it removes and never deletes history, on purpose,
+    so a deleted file's whole past, including its last content, stays
+    restorable, and the restored file continues above the path's
+    existing history — see _NEXT_VERSION_SQL)."""
     _validate_file_path(file_path)
     with db.cursor(user_id=user_id) as cur:
         cur.execute(
@@ -800,16 +829,23 @@ def delete_file(ws_id: str, path: str, user_id: str) -> list[str]:
     empty or never existed. api/routes/code.py's DELETE route relies
     on this to stay a plain 200/204, not a 404, on a repeat call.
 
-    Does NOT snapshot the deleted content into workspace_code_file_versions
-    before removing it — same "delete only touches the live row, never
-    history" posture this function had before W1.2. That's still the
-    right call here: every version PRIOR to the one live at delete time
-    is already in history from its own earlier write (nothing new to
-    capture there), and restore_version() already handles "the file
-    doesn't currently exist" by falling back to
-    workspace_code_file_versions (see that function's own docstring) —
-    so everything except the exact instant-of-deletion content stays
-    recoverable without this function needing to do anything extra.
+    Snapshots what it deletes into workspace_code_file_versions first
+    (source="user", same as any person-initiated write), then removes
+    the live rows, and never touches history otherwise. This used to
+    skip the snapshot on the reasoning that every PRIOR version is
+    already in history, but that left two holes: the content live at
+    the instant of deletion was unrecoverable, and -- worse -- the
+    deleted file's last version number appeared nowhere, so a file
+    re-created at the same path was handed that same number again. A
+    stale editor tab still holding `base_version=N` then matched the
+    brand-new file and its Save silently overwrote it, which is exactly
+    what the version check exists to prevent. With the snapshot, the
+    path's history always contains every version number that ever
+    existed there, and a re-created file continues above it (see
+    _NEXT_VERSION_SQL). `on conflict do nothing` covers rows left in the
+    old, broken shape (a live row AND a history row with the same
+    version, from before that fix): the existing history row wins and
+    the delete still goes through instead of failing.
 
     Returns the list of file_paths actually deleted (empty for a
     no-op), which api/routes/code.py's DELETE route echoes back so the
@@ -827,9 +863,21 @@ def delete_file(ws_id: str, path: str, user_id: str) -> list[str]:
         deleted_paths = [r["file_path"] for r in cur.fetchall()]
         if deleted_paths:
             cur.execute(
+                """
+                insert into workspace_code_file_versions
+                    (workspace_id, file_path, version, content, updated_at, updated_by, source)
+                select workspace_id, file_path, version, content, updated_at, updated_by, 'user'
+                from workspace_code_files
+                where workspace_id = %s and file_path = any(%s)
+                on conflict (workspace_id, file_path, version) do nothing
+                """,
+                (ws_id, deleted_paths),
+            )
+            cur.execute(
                 "delete from workspace_code_files where workspace_id = %s and file_path = any(%s)",
                 (ws_id, deleted_paths),
             )
+            _prune_history_many(cur, ws_id, deleted_paths)
     write_audit(
         user_id, "code_file.delete", "workspace", ws_id,
         {"path": path, "deleted_paths": deleted_paths, "count": len(deleted_paths)},
@@ -875,7 +923,8 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
     forward rather than treating the new path as a brand-new file:
     every existing row in workspace_code_file_versions for the old
     path is copied to the new path FIRST and the old-path rows then
-    deleted, then the content that was live at the old path is
+    deleted (leaving one tombstone row behind, see below), then the
+    content that was live at the old path is
     snapshotted into history at the new path (source="user" — there's
     no dedicated "move" source value; this doesn't touch
     migrations/0009_code_file_versions.sql's CHECK constraint, and a
@@ -897,6 +946,18 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
     Insert + delete are both granted, and a version row is never
     mutated, only copied under a new key and removed from the old one,
     all inside this one transaction.
+
+    The old path keeps ONE history row: a tombstone holding the content
+    and version that were live there when the file moved away
+    (source="user"). Without it the old path's history would be empty,
+    a file later created there would restart at version 1, and a stale
+    editor tab still holding `base_version=N` from before the move
+    could match the brand-new file and have its Save silently
+    overwrite it -- the same hole delete_file() closes by snapshotting
+    what it removes. With the tombstone the old path's highest version
+    stays on record, a re-created file continues above it (see
+    _NEXT_VERSION_SQL), and, as with a delete, the moved-away content
+    stays restorable from that path's history.
 
     A destination path can already have history rows of its own even
     though no live file is there (delete_file() removes the live row
@@ -1045,6 +1106,25 @@ def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[di
                 (ws_id, new_path, row["version"] + history_shift, row["content"],
                  row["updated_at"], row["updated_by"], "user"),
             )
+            # Tombstone: leave the version that was live at the old path
+            # behind so the path's version numbers are never reused (see
+            # this function's docstring). Must come AFTER the delete above.
+            cur.execute(
+                """
+                insert into workspace_code_file_versions
+                    (workspace_id, file_path, version, content, updated_at, updated_by, source)
+                values (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (ws_id, old_path, row["version"], row["content"],
+                 row["updated_at"], row["updated_by"], "user"),
+            )
+            # The old path's history is now exactly that one row. If a
+            # LATER row of this same move lands on this path (the
+            # moving-a-folder-up-over-its-own-namesake case the sort
+            # above exists for), its incoming versions must be shifted
+            # above the tombstone, not above whatever history this path
+            # had when dest_history_max was read before the loop.
+            dest_history_max[old_path] = row["version"]
             cur.execute(
                 "delete from workspace_code_files where workspace_id = %s and file_path = %s",
                 (ws_id, old_path),
