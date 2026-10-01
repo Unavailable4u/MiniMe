@@ -43,7 +43,7 @@ function assert(cond, msg) {
   }
 }
 
-const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingUsage: null, usage: null };
+const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null, pendingChatMode: null, pendingDraft: null, pendingUsage: null, usage: null };
 
 // --- ADD_REF -----------------------------------------------------------
 
@@ -227,6 +227,22 @@ assert(noopClearChatMode === afterClearChatMode, "CLEAR_PENDING_CHAT_MODE with n
 const setChatModeAgain = codeContextReducer(withChatMode, { type: "SET_PENDING_CHAT_MODE", mode: "ask" });
 assertEqual(setChatModeAgain.pendingChatMode, "ask", "SET_PENDING_CHAT_MODE with the same mode still produces a fresh state object");
 assert(setChatModeAgain !== withChatMode, "...i.e. it is NOT short-circuited to the same object");
+
+// --- pending draft (W8.4) ----------------------------------------------------
+
+const withDraft = codeContextReducer(initialState, { type: "SET_PENDING_DRAFT", text: "  Work on this build step: \"Flash the firmware\".  " });
+assertEqual(withDraft.pendingDraft, "Work on this build step: \"Flash the firmware\".", "SET_PENDING_DRAFT records the text, trimmed");
+assertEqual([withDraft.pendingChatMode, withDraft.pendingReview, withDraft.refs.length], [null, null, 0], "...without touching the other pending slots or the chips");
+assert(codeContextReducer(initialState, { type: "SET_PENDING_DRAFT", text: "   " }) === initialState, "SET_PENDING_DRAFT with whitespace-only text is a no-op (same state object)");
+assert(codeContextReducer(initialState, { type: "SET_PENDING_DRAFT", text: "" }) === initialState, "...and so is empty text");
+assert(codeContextReducer(initialState, { type: "SET_PENDING_DRAFT", text: null }) === initialState, "...and a non-string");
+const afterClearDraft = codeContextReducer(withDraft, { type: "CLEAR_PENDING_DRAFT" });
+assertEqual(afterClearDraft.pendingDraft, null, "CLEAR_PENDING_DRAFT resets it");
+assert(codeContextReducer(afterClearDraft, { type: "CLEAR_PENDING_DRAFT" }) === afterClearDraft, "CLEAR_PENDING_DRAFT with nothing pending returns the SAME state object");
+const draftThenMode = codeContextReducer(withDraft, { type: "SET_PENDING_CHAT_MODE", mode: "edit" });
+assertEqual([draftThenMode.pendingDraft === withDraft.pendingDraft, draftThenMode.pendingChatMode], [true, "edit"], "a draft request and a chat-mode request coexist (Work on this sets both)");
+const draftSurvivesClearRefs = codeContextReducer(codeContextReducer(withDraft, { type: "ADD_REF", ref: { kind: "file", path: "a.js", snippet: "x" } }), { type: "CLEAR_REFS" });
+assertEqual(draftSurvivesClearRefs.pendingDraft, withDraft.pendingDraft, "CLEAR_REFS (after a chat send) doesn't discard a draft that is still waiting for the composer");
 
 // --- contextBudget -----------------------------------------------------------
 

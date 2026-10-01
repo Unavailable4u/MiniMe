@@ -25,6 +25,15 @@ import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggabl
 // remount the workbench+chat section.
 import { CodeContextProvider, useCodeContext } from "../../lib/workbench/codeContext";
 import ContextChips from "../workbench/ContextChips";
+// NEW — W8.4: "Work on this" on an Instructions step. These three are the
+// non-editor pieces it needs: a cloud provider just to list/read the
+// project's files (fileProviders.js is fetch-only — it does NOT pull
+// CodeMirror into this tab's chunk, that stays behind EditorWorkbench's
+// dynamic import), the files-minus-placeholders helper, and the pure
+// step→file/draft/mode decision.
+import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
+import { realFilePaths } from "../../lib/workbench/fileTree";
+import { planWorkOnStep } from "../../lib/workbench/instructionStep";
 
 // NEW — W4.2 (Build Workbench plan). BuildTab itself can't call
 // useCodeContext() — it's the component CREATING CodeContextProvider
@@ -55,8 +64,12 @@ import ContextChips from "../workbench/ContextChips";
 // header). Nothing here decides WHAT mode to request or WHEN — that's
 // entirely EditorWorkbench.jsx's handleFixWithAI(); this is just the
 // wire between the two.
+// CHANGED — W8.4: and once more for an Instructions step's "Work on
+// this" — `pendingDraft`/`clearDraft` carry the starter message the
+// composer should be pre-filled with (InstructionsView below asks for
+// it; WorkspaceChatPanel.jsx merges it into its draft).
 function CodeAwareChatPanel({ onEnterReviewMode, ...props }) {
-  const { refs, clearRefs, requestReview, pendingChatMode, clearChatMode } = useCodeContext();
+  const { refs, clearRefs, requestReview, pendingChatMode, clearChatMode, pendingDraft, clearDraft } = useCodeContext();
   const onReviewProposal = useCallback(
     (proposal) => {
       onEnterReviewMode?.();
@@ -73,6 +86,8 @@ function CodeAwareChatPanel({ onEnterReviewMode, ...props }) {
       onReviewProposal={onReviewProposal}
       pendingChatMode={pendingChatMode}
       onConsumeChatMode={clearChatMode}
+      pendingDraft={pendingDraft}
+      onConsumeDraft={clearDraft}
     />
   );
 }
@@ -363,9 +378,38 @@ function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, ses
 // straight copy of that logic, scoped to instructions only (Parts/
 // Wiring/Mech stay in Plan as design specs, see PlanTab.jsx's own
 // comment on BLUEPRINT_VIEWS).
-function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep }) {
+// CHANGED — W8.4: every step also gets a "Work on this" button (see
+// InstructionChecklist.jsx). InstructionsView is the one place that can
+// act on it: it renders INSIDE CodeContextProvider (BuildTab's render
+// below), so it can drop a chip into the shared store and queue the
+// jump / chat-mode / draft requests the Editor and chat dock pick up —
+// exactly the channels Explorer's "Add to chat" and the Console's "Fix
+// with AI" already use. What a click does:
+//   1. list the project's files (fresh, at click time — not on mount, so
+//      it can't be stale and costs nothing until it's used);
+//   2. instructionStep.js's planWorkOnStep() picks the relevant file (if
+//      any), the starter message, and Ask vs Edit;
+//   3. file found -> read it, add it as a `file` chip, queue a jump to it,
+//      and switch to the Editor sub-view (`onOpenEditor`);
+//   4. open the chat dock (`onOpenChat`) with the starter message
+//      pre-filled and the mode set. Nothing is sent: the person reads
+//      it, edits it, and presses send themselves.
+// No file found is not an error — a step like "Sand the lid" has none —
+// the chat is still opened with the message, and a line under the
+// header says so. `onOpenEditor`/`onOpenChat` are BuildTab's own plain
+// callbacks (they touch its sub-view and dock state, not code context).
+function InstructionsView({ workspaceId, apiUrl, fetchDeviceSpec, toggleInstructionStep, onOpenEditor, onOpenChat }) {
   const [spec, setSpec] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [notice, setNotice] = useState(null); // W8.4
+  const { addRef, requestJump, requestChatMode, requestDraft } = useCodeContext();
+  // W8.4: leaving this sub-view (or switching project) while a click is
+  // still listing files must not then yank the person into the Editor.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -388,6 +432,48 @@ function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep 
     }
   }
 
+  async function handleWorkOnStep(phase, step) {
+    setNotice(null);
+    const provider = createCloudFileProvider({ workspaceId, apiUrl });
+    let paths = [];
+    let listError = null;
+    try {
+      paths = realFilePaths(await provider.list());
+    } catch (err) {
+      listError = err?.message || "request failed";
+    }
+    if (!aliveRef.current) return;
+
+    const plan = planWorkOnStep({ step, phaseName: phase?.name, paths });
+    if (plan.path) {
+      // The chip carries the file's text (Ask mode fences snippets into
+      // the message; Edit mode sends the path). A read that fails
+      // still gets the chip + jump: the Editor will say why it can't
+      // open the file, which beats silently dropping the step's file.
+      let snippet = "";
+      try {
+        snippet = (await provider.read(plan.path)).content ?? "";
+      } catch {
+        /* chip without a snippet; see above */
+      }
+      if (!aliveRef.current) return;
+      addRef({ kind: "file", path: plan.path, provider: provider.id, snippet });
+      requestJump({ path: plan.path });
+      onOpenEditor?.();
+    } else {
+      setNotice(
+        listError
+          ? `Couldn't read this project's files (${listError}), so no file was opened. The chat has the step ready.`
+          : paths.length === 0
+            ? "This project has no files yet, so there's nothing to open. The chat has the step ready."
+            : "No file in this project matches that step. The chat has it ready."
+      );
+    }
+    requestChatMode(plan.mode);
+    requestDraft(plan.draft);
+    onOpenChat?.();
+  }
+
   if (loading) {
     return (
       <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
@@ -406,7 +492,16 @@ function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep 
     );
   }
 
-  return <InstructionChecklist phases={spec.instructions.phases} onToggleStep={handleToggleStep} />;
+  return (
+    <div className="space-y-2">
+      {notice && <p className="text-[11px] text-[var(--neutral-500)]">{notice}</p>}
+      <InstructionChecklist
+        phases={spec.instructions.phases}
+        onToggleStep={handleToggleStep}
+        onWorkOnStep={handleWorkOnStep}
+      />
+    </div>
+  );
 }
 
 // Part 7 §7.6 -- deploy action button + status indicator, three separate
@@ -830,6 +925,14 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
   // that, so switching projects or leaving/re-entering Editor manually
   // doesn't keep forcing Local.
   const [forceLocalSourceOnce, setForceLocalSourceOnce] = useState(false);
+  // NEW — W8.4: the mirror image of the above. "Work on this" picks a
+  // file out of the project's CLOUD files, so the Editor it opens has to
+  // be on the Cloud source even if this project was last left on Local
+  // (a Local provider would be asked for a path it has never heard of).
+  // Same one-shot shape: armed right before the sub-view switch, consumed
+  // by EditorWorkbench on mount, never persisted as the person's own
+  // source preference.
+  const [forceCloudSourceOnce, setForceCloudSourceOnce] = useState(false);
   // NEW — W2.5: unsaved-edits guard. EditorWorkbench reports whether any
   // open file has unsaved edits through `onDirtyChange`. It lands in a
   // ref, not state: it's only ever read inside event handlers, and
@@ -928,6 +1031,32 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
   async function openInDock(chatId) {
     await switchChat(chatId);
     if (chatDockCollapsed) toggleChatDock();
+  }
+
+  // NEW — W8.4: InstructionsView's "Work on this" callbacks. Both are
+  // called from inside an async handler (after it has awaited the file
+  // list), so neither may lean on this render's `chatDockCollapsed` /
+  // `buildView` closure being current.
+  // - openChatDock: unlike toggleChatDock it only ever OPENS (a dock the
+  //   person opened themselves in the meantime must not get closed by
+  //   it). On mobile "open" is the full-screen chat overlay — the
+  //   pre-filled message is what they need to see next, and closing the
+  //   overlay reveals the Editor underneath.
+  // - openEditorForStep: arms the Cloud-source override (see
+  //   forceCloudSourceOnce) and goes through requestBuildView like every
+  //   other navigation, so it's guarded the same way (nothing can be
+  //   dirty when called from Instructions — the Editor isn't mounted —
+  //   but the guard is the one door in).
+  function openChatDock() {
+    setChatDockCollapsed((prev) => {
+      if (prev) localStorage.setItem(CHAT_DOCK_KEY, "0");
+      return false;
+    });
+  }
+
+  function openEditorForStep() {
+    setForceCloudSourceOnce(true);
+    requestBuildView("code");
   }
 
   // NEW — W2.5: switching project, or leaving the Editor sub-view,
@@ -1442,8 +1571,11 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
                 apiUrl={API_URL}
                 reserveCorner={chatDockCollapsed}
                 onDirtyChange={handleEditorDirty}
-                initialSourceOverride={forceLocalSourceOnce ? "local" : undefined}
-                onConsumeInitialSourceOverride={() => setForceLocalSourceOnce(false)}
+                initialSourceOverride={forceLocalSourceOnce ? "local" : forceCloudSourceOnce ? "cloud" : undefined}
+                onConsumeInitialSourceOverride={() => {
+                  setForceLocalSourceOnce(false);
+                  setForceCloudSourceOnce(false); // W8.4
+                }}
                 // W6.2: "Fix with AI" (Console tab) requests Ask mode
                 // via codeContext.js regardless of whether the chat dock
                 // happens to be visible right now -- CodeAwareChatPanel's
@@ -1493,8 +1625,11 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
             {buildView === "instructions" ? (
               <InstructionsView
                 workspaceId={selected.id}
+                apiUrl={API_URL}
                 fetchDeviceSpec={fetchDeviceSpec}
                 toggleInstructionStep={toggleInstructionStep}
+                onOpenEditor={openEditorForStep}
+                onOpenChat={openChatDock}
               />
             ) : buildView === "wireframes" ? (
               // NEW — patch 12 (Plan/Build wireframes split): relocated

@@ -368,6 +368,17 @@ function ThinkingElapsed() {
   return <span className="tabular-nums">{seconds}s</span>;
 }
 
+// W8.4: how a pre-fill request combines with the composer's current
+// draft. An empty draft just takes the text; a draft that already
+// contains it (a second click on the same step) is left alone; anything
+// else keeps what the person typed and appends the starter text after a
+// blank line.
+function mergeDraftPrefill(prev, incoming) {
+  if (!prev || !prev.trim()) return incoming;
+  if (prev.includes(incoming)) return prev;
+  return `${prev.replace(/\s+$/, "")}\n\n${incoming}`;
+}
+
 // NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a (scope
 // resolution). `activeContext` is the caller's best guess at "what the
 // person is currently looking at" -- { type: "topic", id, label } or
@@ -403,6 +414,11 @@ function ThinkingElapsed() {
 // what forwards codeContext.js's own pendingChatMode/clearChatMode
 // under these names. `pendingChatMode === null` (the default, every
 // non-Build call site) means nothing to apply.
+// NEW — W8.4: `pendingDraft`/`onConsumeDraft`, the same shape again, for
+// an Instructions step's "Work on this" — text to pre-fill the composer
+// with. Merged into the draft rather than replacing it (see
+// mergeDraftPrefill below), never sent on its own. `pendingDraft ===
+// null` (the default, every non-Build call site) means nothing to apply.
 export default function WorkspaceChatPanel({
   collapsed = false,
   onToggleCollapse = null,
@@ -419,6 +435,8 @@ export default function WorkspaceChatPanel({
   onReviewProposal = null,
   pendingChatMode = null,
   onConsumeChatMode = null,
+  pendingDraft = null,
+  onConsumeDraft = null,
 }) {
   const legacy = useSession();
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone, API_URL } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8; API_URL NEW — W5.1b, for codeProposals.js's plain fetch() calls
@@ -660,6 +678,22 @@ export default function WorkspaceChatPanel({
   // resolveProposal()'s three "keep" callers that needs the same gate.
   const [pendingProposalResolve, setPendingProposalResolve] = useState(null);
   const [draft, setDraft] = useState("");
+  // NEW — W8.4: apply a pre-fill request from "Work on this" (see the
+  // prop's comment above). Merged, not replaced — whatever the person
+  // had already typed stays — and the textarea is focused so the next
+  // keystroke edits the starter text. `onConsumeDraft` clears the
+  // request right away so a re-render can't apply it twice. Both
+  // CodeAwareChatPanel instances BuildTab mounts (desktop dock + mobile
+  // overlay) apply it to their own draft; only one is visible.
+  useEffect(() => {
+    if (pendingDraft == null) return;
+    setDraft((prev) => mergeDraftPrefill(prev, pendingDraft));
+    onConsumeDraft?.();
+    // No cleanup on purpose: consuming the request re-runs this effect
+    // (pendingDraft goes back to null), which would cancel the focus
+    // before it fired. A ref that's gone by then is just a no-op.
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [pendingDraft, onConsumeDraft]);
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
 
   // NEW — Phase 1 (mobile shell): lets mobile/AppShell.jsx's header
