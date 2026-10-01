@@ -34,6 +34,18 @@ import ContextChips from "../workbench/ContextChips";
 import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
 import { realFilePaths } from "../../lib/workbench/fileTree";
 import { planWorkOnStep } from "../../lib/workbench/instructionStep";
+// NEW — W8.5b: the Deploy card files the writer's plan for the same Keep/Undo
+// review as any AI edit. codeProposals.js is fetch/Pusher only (no CodeMirror,
+// so it doesn't pull the editor into this tab's chunk); deployProposal.js is the
+// pure decision logic (what the card shows, how a /propose response reads).
+import { listProposals, proposeDeployConfig, subscribeToProposalEvents } from "../../lib/workbench/codeProposals";
+import {
+  deployCardView,
+  describeProposeResponse,
+  pendingFromProposeResponse,
+  deployProposalSummary,
+  pickPendingDeployProposal,
+} from "../../lib/workbench/deployProposal";
 
 // NEW — W4.2 (Build Workbench plan). BuildTab itself can't call
 // useCodeContext() — it's the component CREATING CodeContextProvider
@@ -504,27 +516,113 @@ function InstructionsView({ workspaceId, apiUrl, fetchDeviceSpec, toggleInstruct
   );
 }
 
-// Part 7 §7.6 -- deploy action button + status indicator, three separate
-// calls matching the three separate-risk backend endpoints from §7.4
-// (propose / write / go-live). "Go Live" is intentionally left
-// unwired for now -- see the accompanying chat message: the backend
-// endpoint currently blocks on a server-terminal y/N prompt
-// (agents/deploy_agent.py's _confirm_deploy()), which a browser fetch()
-// can't answer. Wiring it here today would just hang the request.
-function DeployPanel({ sessionId, apiUrl, deployConfigPlan, lastDeployConfigSummary, onRefresh }) {
-  const [busy, setBusy] = useState(null); // "propose" | "write" | null
+// Part 7 §7.6 -- deploy action button + status indicator.
+// CHANGED — W8.5b: "Propose" no longer ends at a plan you then press
+// "Write Config" on. The backend (W8.5a) files the writer's plan as a
+// PENDING code proposal in this project, and this card's job is to say so
+// and get the person to the review: "Review config" opens the Editor on that
+// proposal's Keep/Undo diff (the same door the chat card's Review button
+// uses), and the file lands in the project's files only on Keep.
+//
+// "Write Config" is gone from this card. It called /write, the old
+// unreviewed write-to-disk path, which the backend still serves but
+// api/routes/deploy.py documents as no longer offered for workspace-backed
+// projects — and every project in this tab is one. The one case that left it
+// the only way to a file (the chat isn't in a project you own, so the
+// proposal is skipped as `no_workspace`) now says so instead of silently
+// writing around the review.
+//
+// "Go Live" is still intentionally unwired -- the backend endpoint blocks on
+// a server-terminal y/N prompt (agents/deploy_agent.py's _confirm_deploy()),
+// which a browser fetch() can't answer. Wiring it here today would just hang
+// the request.
+//
+// What the card knows, and where from:
+//   - the plan: `deployConfigPlan`, the memory-bus plan from the tasks fetch;
+//   - the pending proposal: GET .../code/proposals?status=pending, filtered to
+//     the deploy writer's (deployProposal.js), loaded on mount and re-loaded
+//     on CODE_PROPOSAL_READY/RESOLVED — so a Regenerate from the Editor's
+//     tray, or a Keep, shows up here without a refresh;
+//   - whether the plan's file is already in the project's files (one file
+//     list) — what's true after a Keep, since a resolved proposal isn't in
+//     the pending list;
+//   - why THIS session's last Propose wasn't filed, if it wasn't (`skipped`).
+function DeployPanel({
+  sessionId,
+  workspaceId,
+  apiUrl,
+  deployConfigPlan,
+  lastDeployConfigSummary,
+  onRefresh,
+  onOpenEditor,
+}) {
+  const [busy, setBusy] = useState(null); // "propose" | null
   const [error, setError] = useState(null);
+  const [pending, setPending] = useState(null); // deployProposalSummary() of the pending proposal
+  const [fileExists, setFileExists] = useState(null); // plan's file is in the project: true | false | null (unknown)
+  const [skipped, setSkipped] = useState(null); // `proposal_skipped` from this session's last Propose
+  const { requestReview } = useCodeContext();
 
-  async function call(action) {
-    setBusy(action);
+  const planPath = deployConfigPlan?.config_filename || null;
+
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  // A failed lookup leaves the card on what it last knew (console only):
+  // it's a status line, not worth an error banner over the plan itself.
+  const reload = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const found = pickPendingDeployProposal(await listProposals(apiUrl, workspaceId, { status: "pending" }));
+      if (!aliveRef.current) return;
+      setPending(found ? deployProposalSummary(found) : null);
+      if (found || !planPath) {
+        setFileExists(null);
+        return;
+      }
+      const files = await createCloudFileProvider({ workspaceId, apiUrl }).list();
+      if (!aliveRef.current) return;
+      setFileExists(Object.prototype.hasOwnProperty.call(files || {}, planPath));
+    } catch (err) {
+      console.error("Couldn't load the deploy config's review state:", err);
+    }
+  }, [apiUrl, workspaceId, planPath]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  // Latest reload for the event handlers below without re-subscribing
+  // (Pusher subscribe/unsubscribe) every time the plan's path changes.
+  const reloadRef = useRef(reload);
+  useEffect(() => {
+    reloadRef.current = reload;
+  }, [reload]);
+  useEffect(() => {
+    if (!workspaceId) return undefined;
+    return subscribeToProposalEvents(workspaceId, {
+      onReady: () => reloadRef.current(),
+      onResolved: () => reloadRef.current(),
+    });
+  }, [workspaceId]);
+
+  async function handlePropose() {
+    setBusy("propose");
     setError(null);
     try {
-      const res = await fetch(`${apiUrl}/api/deploy/${sessionId}/${action}`, {
-        method: "POST",
-        headers: await authHeaders({ json: true }),
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const res = await proposeDeployConfig(apiUrl, sessionId);
+      const { skipped: why } = describeProposeResponse(res);
+      setSkipped(why);
+      // A skipped/failed propose leaves any earlier pending proposal in
+      // place (the backend only supersedes it once a NEW one exists), so
+      // only a filed one replaces what the card shows.
+      const filed = pendingFromProposeResponse(res);
+      if (filed) setPending(filed);
       await onRefresh();
     } catch (err) {
       setError(err.message);
@@ -533,32 +631,45 @@ function DeployPanel({ sessionId, apiUrl, deployConfigPlan, lastDeployConfigSumm
     }
   }
 
+  // Same order the chat card's Review uses (BuildTab's CodeAwareChatPanel):
+  // go to the Editor, then ask it to open the proposal — it's mounted by the
+  // time it reads the request (see EditorWorkbench's pendingReview effect).
+  function handleReview() {
+    if (!pending) return;
+    onOpenEditor?.();
+    requestReview(pending.id);
+  }
+
   const hasConfig = Boolean(lastDeployConfigSummary);
   const hasPlan = Boolean(deployConfigPlan);
+  const view = deployCardView({ plan: deployConfigPlan, pending, fileExists, skipped });
 
   return (
     <Card title="Deploy">
       <div className="space-y-2 text-[11px]">
-        {!hasPlan && (
-          <p className="text-cyber-dim">
-            No deploy plan proposed yet for this project.
-          </p>
-        )}
-        {hasPlan && (
+        {view.message && <p className="text-cyber-dim">{view.message}</p>}
+        {(view.platform || view.path) && (
           <div className="text-cyber-text">
-            <p>
-              <span className="text-cyber-dim/70">platform:</span>{" "}
-              {deployConfigPlan.platform}
-            </p>
-            <p>
-              <span className="text-cyber-dim/70">config file:</span>{" "}
-              <span className="font-mono">{deployConfigPlan.config_filename}</span>
-            </p>
-            {deployConfigPlan.reason && (
-              <p className="text-cyber-dim">{deployConfigPlan.reason}</p>
+            {view.platform && (
+              <p>
+                <span className="text-cyber-dim/70">platform:</span> {view.platform}
+              </p>
             )}
+            {view.path && (
+              <p>
+                <span className="text-cyber-dim/70">config file:</span>{" "}
+                <span className="font-mono">{view.path}</span>
+              </p>
+            )}
+            {view.reason && <p className="text-cyber-dim">{view.reason}</p>}
           </div>
         )}
+        {view.kind === "review" && (
+          <p className="text-cyber-cyan">
+            Ready for your review — nothing is added to this project until you press Keep.
+          </p>
+        )}
+        {view.notice && <p className="text-amber-400">{view.notice}</p>}
         {hasConfig && (
           <p className="text-cyber-cyan">
             Config written to disk ({lastDeployConfigSummary.config_filename}) --
@@ -566,23 +677,26 @@ function DeployPanel({ sessionId, apiUrl, deployConfigPlan, lastDeployConfigSumm
           </p>
         )}
         {error && <p className="text-rose-400">{error}</p>}
-        <div className="flex gap-2 pt-1">
+        <div className="flex flex-wrap gap-2 pt-1">
           <button
             type="button"
-            disabled={busy !== null}
-            onClick={() => call("propose")}
+            disabled={busy !== null || !sessionId}
+            onClick={handlePropose}
+            title={view.kind === "review" ? "Generates a new config and replaces the one waiting for review" : undefined}
             className="font-display text-[10px] uppercase tracking-wide border border-cyber-cyan/40 text-cyber-cyan rounded px-2 py-1 disabled:opacity-50"
           >
             {busy === "propose" ? "Proposing..." : hasPlan ? "Re-propose" : "Propose"}
           </button>
-          <button
-            type="button"
-            disabled={busy !== null || !hasPlan}
-            onClick={() => call("write")}
-            className="font-display text-[10px] uppercase tracking-wide border border-cyber-cyan/40 text-cyber-cyan rounded px-2 py-1 disabled:opacity-50"
-          >
-            {busy === "write" ? "Writing..." : "Write Config"}
-          </button>
+          {view.kind === "review" && (
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={handleReview}
+              className="font-display text-[10px] uppercase tracking-wide border border-cyber-cyan/40 text-cyber-cyan rounded px-2 py-1 disabled:opacity-50"
+            >
+              Review config
+            </button>
+          )}
           <button
             type="button"
             disabled
@@ -1679,10 +1793,12 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
                     <div className="grid gap-4 sm:grid-cols-2">
                       <DeployPanel
                         sessionId={resolvedSessionId}
+                        workspaceId={selected?.id}
                         apiUrl={API_URL}
                         deployConfigPlan={data?.deploy_config_plan}
                         lastDeployConfigSummary={data?.last_deploy_config_summary}
                         onRefresh={refresh}
+                        onOpenEditor={openEditorForStep}
                       />
                       <MonitoringWidget
                         sessionId={resolvedSessionId}

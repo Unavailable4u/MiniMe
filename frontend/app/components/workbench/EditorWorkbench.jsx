@@ -96,9 +96,14 @@ import {
   createProposal as createCodeProposal,
   getProposal,
   listProposals,
+  proposeDeployConfig,
   resolveProposal,
   subscribeToProposalEvents,
 } from "../../lib/workbench/codeProposals";
+// W8.5b: a deploy-config proposal's "Regenerate" re-runs the deploy writer
+// (proposeDeployConfig above), not the code_editor agent createCodeProposal
+// reaches — see handleTrayRegenerate below.
+import { isDeployProposal, regenerateDeployOutcome } from "../../lib/workbench/deployProposal";
 import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
 import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
@@ -1572,9 +1577,38 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // received them (eo/code_proposals.py's own _build_files_payload
   // docstring), so this is the same request sendCodeEditProposal made
   // the first time, just replayed from here instead of the composer.
+  //
+  // W8.5b: NOT for a deploy-config proposal. Its instruction is just
+  // "Propose render deploy config (render.yaml)" — replayed through
+  // createCodeProposal that would have the code_editor agent rewrite the
+  // file from that one line, ignoring the deploy writer's own platform
+  // choice. It re-runs the writer instead (POST /api/deploy/{session}/
+  // propose), and — unlike the chat-edit path below — does NOT reject
+  // the old proposal first: the route supersedes earlier deploy
+  // proposals itself, but only once a new one actually exists, so a
+  // regenerate that comes back unusable never costs the person the one
+  // they had.
   const handleTrayRegenerate = useCallback(
     async (proposal) => {
       try {
+        if (isDeployProposal(proposal)) {
+          if (!proposal.session_id) {
+            setNotice("This deploy config can't be regenerated from here — use Re-propose on the Deploy card in Tasks.");
+            return;
+          }
+          const outcome = regenerateDeployOutcome(await proposeDeployConfig(apiUrl, proposal.session_id));
+          if (!outcome.ok) {
+            setNotice(outcome.message);
+            return;
+          }
+          // The route already rejected `proposal`; mirror that locally
+          // now so the tray never shows both while the
+          // CODE_PROPOSAL_RESOLVED event is still on its way (or Pusher
+          // isn't configured at all).
+          proposalStatusUpdate(proposal.id, "rejected");
+          proposalUpsert(await getProposal(apiUrl, workspaceId, outcome.proposalId));
+          return;
+        }
         const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, rejectAllDecisions(proposal));
         proposalUpsert(resolved);
         const fresh = await createCodeProposal(apiUrl, workspaceId, {
@@ -1587,7 +1621,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
         setNotice(err.message || "Couldn't regenerate this edit.");
       }
     },
-    [apiUrl, workspaceId, proposalUpsert]
+    [apiUrl, workspaceId, proposalUpsert, proposalStatusUpdate]
   );
 
   // History's "Restore": lands the server's response the same way a

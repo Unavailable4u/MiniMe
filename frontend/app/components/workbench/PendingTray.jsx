@@ -20,6 +20,7 @@ import { AlertTriangle, Check, ChevronRight, Loader2, RefreshCw, X } from "lucid
 import { fileDiffStats } from "../../lib/workbench/reviewMode";
 import ResponsiveSheet from "../mobile/ResponsiveSheet";
 import { elementLabel } from "../../lib/workbench/elementRef"; // W7.1b
+import { isDeployProposal } from "../../lib/workbench/deployProposal"; // W8.5b
 
 const OP_LABELS = { create: "new", delete: "deleted" }; // mirrors ReviewPanel.jsx's own copy
 
@@ -52,8 +53,18 @@ function ProposalRow({ proposal, onReview, onKeepAll, onReject, onRegenerate }) 
 
   return (
     <li className="space-y-2 rounded-md border border-[var(--neutral-800)] bg-[var(--neutral-900)] p-2.5">
-      <p className="truncate text-sm text-[var(--neutral-200)]" title={proposal.instruction || undefined}>
-        {proposal.summary || proposal.instruction || "AI edit"}
+      <p className="flex items-center gap-1.5 text-sm text-[var(--neutral-200)]">
+        {/* W8.5b: a deploy-config proposal (deploy_config_writer's plan, filed through
+            the same review). Its Regenerate re-runs the deploy writer — see
+            EditorWorkbench.jsx's handleTrayRegenerate. */}
+        {isDeployProposal(proposal) && (
+          <span className="shrink-0 rounded bg-[var(--neutral-700)] px-1 text-[10px] uppercase tracking-wide text-[var(--neutral-300)]">
+            Deploy
+          </span>
+        )}
+        <span className="truncate" title={proposal.instruction || undefined}>
+          {proposal.summary || proposal.instruction || "AI edit"}
+        </span>
       </p>
 
       {proposal.refs?.some((r) => r.kind === "folder") && (

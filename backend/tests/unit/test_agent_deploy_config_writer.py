@@ -101,6 +101,17 @@ class TestRunHappyPath:
         assert plan == VALID_PLAN
         assert read(deploy_config_writer.DEPLOY_CONFIG_PLAN_KEY) == VALID_PLAN
 
+    def test_a_real_plan_does_not_carry_the_fallback_flag(self, fake_bus, mock_llm, fake_dynamic_chain):
+        # W8.5: api/routes/deploy.py skips the Keep/Undo review for any plan
+        # with a truthy `fallback`, so a plan that parsed fine must never
+        # have one — including in what's stored on the bus.
+        mock_llm.set_json_response(VALID_PLAN)
+
+        plan = deploy_config_writer.run_deploy_config_writer()
+
+        assert "fallback" not in plan
+        assert "fallback" not in read(deploy_config_writer.DEPLOY_CONFIG_PLAN_KEY)
+
     def test_strips_fences_before_parsing(self, fake_bus, mock_llm, fake_dynamic_chain):
         mock_llm.set_response("```json\n" + json.dumps(VALID_PLAN) + "\n```")
 
@@ -215,6 +226,19 @@ class TestUnparseableFallback:
         assert plan["platform"] == "render"
         assert plan["config_filename"] == "render.yaml"
         assert "fallback" in plan["reason"]
+
+    def test_fallback_plan_is_flagged_so_it_is_not_filed_for_review(self, fake_bus, mock_llm, fake_dynamic_chain):
+        # W8.5: the flag is how api/routes/deploy.py tells the one-line
+        # placeholder apart from a real proposal. Checked on the returned
+        # plan AND the copy on the bus (what the Tasks-tab Deploy card
+        # reads after a reload), and the legacy keys stay as they were.
+        mock_llm.set_response("this is not json")
+
+        plan = deploy_config_writer.run_deploy_config_writer()
+
+        assert plan["fallback"] is True
+        assert read(deploy_config_writer.DEPLOY_CONFIG_PLAN_KEY)["fallback"] is True
+        assert plan["config_content"].startswith("# fallback:")
 
     def test_fallback_plan_is_still_written_to_bus(self, fake_bus, mock_llm, fake_dynamic_chain):
         mock_llm.set_response("not json")
