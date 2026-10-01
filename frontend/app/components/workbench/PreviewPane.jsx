@@ -4,6 +4,11 @@
 // file's own header) — this is the thing W2.3b left an empty frame
 // for.
 //
+// W7.3: above those sits a two-way source switch — "Project files" (all
+// of the below) or "Dev server URL" (UrlPreview.jsx: a localhost address
+// in an iframe, for Node/Next apps the in-browser providers can't run).
+// The choice and the last URL are remembered per workspace.
+//
 // Four states, one per detectKind() outcome:
 //   - "static": the actual meat of this patch — live-bundles
 //     index.html + its local <link>/<script> files into one srcDoc,
@@ -47,7 +52,7 @@
 // own header for why "allow-scripts" alone, no allow-same-origin, no
 // allow-forms, is enough and deliberately not more).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Crosshair, ExternalLink, Loader2, Monitor, Play, RefreshCw, Smartphone, Tablet } from "lucide-react";
+import { Loader2, Play } from "lucide-react";
 import { useEditorStore } from "../../lib/workbench/editorStore";
 import { detectKind } from "../../lib/preview/detectKind";
 import { bundleStatic } from "../../lib/preview/bundleStatic";
@@ -61,6 +66,10 @@ import { shouldBundleFile, pickReactEntry, parseDependencies, withInjectedImport
 import { buildMmInspectorFileContent } from "../../lib/preview/mmInspectorFile"; // W6.6
 import { SandpackProvider, SandpackPreview, useSandpack } from "@codesandbox/sandpack-react"; // W6.6
 import { usePyodideWorker } from "../../hooks/usePyodideWorker";
+import { DEVICE_PRESETS, DeviceToolbar } from "./DeviceToolbar"; // W7.3: moved out of this file unchanged
+import UrlPreview from "./UrlPreview"; // W7.3
+import { DEFAULT_PREVIEW_PREFS, loadPreviewPrefs, savePreviewPrefs } from "../../lib/preview/previewUrl"; // W7.3
+import { browserStorage } from "../../lib/workbench/layoutPrefs"; // W7.3
 
 // W6.2: a fresh nonce per successful build, NOT per component mount —
 // each rebuild re-injects the bridge into a brand-new srcDoc string, so
@@ -79,12 +88,6 @@ function makeNonce() {
 }
 
 const DEBOUNCE_MS = 400;
-
-const DEVICE_PRESETS = [
-  { id: "mobile", label: "Mobile", Icon: Smartphone, width: 390 },
-  { id: "tablet", label: "Tablet", Icon: Tablet, width: 768 },
-  { id: "desktop", label: "Desktop", Icon: Monitor, width: null }, // null = fill available width
-];
 
 /**
  * Builds the one function bundleStatic() needs — "give me this path's
@@ -130,66 +133,6 @@ function postToFrame(iframeRef, nonce, message) {
   iframeRef.current?.contentWindow?.postMessage({ source: "minime-parent", nonce, ...message }, "*");
 }
 
-function DeviceToolbar({ device, onDeviceChange, onReload, onOpenNewTab, warnings, inspecting, onToggleInspect }) {
-  return (
-    <div className="shrink-0 flex items-center justify-between gap-2 px-2 h-8 border-b border-[var(--neutral-800)]">
-      <div className="flex items-center gap-0.5">
-        {DEVICE_PRESETS.map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => onDeviceChange(id)}
-            title={label}
-            aria-label={label}
-            aria-pressed={device === id}
-            className={`touch-target p-1 rounded ${
-              device === id ? "bg-white/10 text-[var(--neutral-100)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
-            }`}
-          >
-            <Icon size={13} />
-          </button>
-        ))}
-        {onToggleInspect && (
-          <>
-            <span className="mx-1 h-4 w-px bg-[var(--neutral-800)]" />
-            <button
-              type="button"
-              onClick={onToggleInspect}
-              title={inspecting ? "Stop inspecting (Esc)" : "Inspect element"}
-              aria-label="Inspect element"
-              aria-pressed={inspecting}
-              className={`touch-target p-1 rounded ${
-                inspecting ? "bg-[var(--accent)] text-[var(--accent-text)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
-              }`}
-            >
-              <Crosshair size={13} />
-            </button>
-          </>
-        )}
-      </div>
-      <div className="flex items-center gap-1">
-        {warnings?.length > 0 && (
-          <span title={warnings.join("\n")} className="flex items-center gap-1 text-[10px] text-amber-400">
-            <AlertTriangle size={11} />
-            {warnings.length}
-          </span>
-        )}
-        <button type="button" onClick={onReload} title="Reload" aria-label="Reload" className="touch-target p-1 rounded text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
-          <RefreshCw size={13} />
-        </button>
-        <button
-          type="button"
-          onClick={onOpenNewTab}
-          title="Open in new tab"
-          aria-label="Open in new tab"
-          className="touch-target p-1 rounded text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
-        >
-          <ExternalLink size={13} />
-        </button>
-      </div>
-    </div>
-  );
-}
 
 function StaticPreview({ provider, filesMeta, entryPath, cursor, onSelectElement, overlay }) {
   const { state, consoleMessage } = useEditorStore();
@@ -815,6 +758,34 @@ function EmptyState({ title, detail }) {
   );
 }
 
+// W7.3: the source switch at the top of the pane. Plain two-tab strip —
+// the pane's existing bars (device toolbar, ribbon) stay untouched below.
+const SOURCE_TABS = [
+  { id: "files", label: "Project files" },
+  { id: "url", label: "Dev server URL" },
+];
+
+function SourceTabs({ mode, onChange }) {
+  return (
+    <div role="tablist" aria-label="Preview source" className="shrink-0 flex items-center gap-0.5 px-2 h-7 border-b border-[var(--neutral-800)]">
+      {SOURCE_TABS.map(({ id, label }) => (
+        <button
+          key={id}
+          type="button"
+          role="tab"
+          aria-selected={mode === id}
+          onClick={() => onChange(id)}
+          className={`touch-target px-2 py-0.5 rounded text-[11px] ${
+            mode === id ? "bg-white/10 text-[var(--neutral-100)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // W6.7: the strip above the preview while a proposal is under review.
 // Amber on purpose (same colour PreviewPane already uses for "heads up"
 // warnings) — this is a preview of something that hasn't happened yet,
@@ -852,9 +823,36 @@ function ProposalRibbon({ showingProposed, changedCount, onToggle }) {
  * @param {object} props.provider - the active FileProvider (WorkbenchBody's own, same one CodeEditor/Explorer use)
  * @param {{[path: string]: object}|null} props.filesMeta - FileProvider.list()'s result; null until the first load lands
  * @param {{line: number, col: number}|null} [props.cursor] - W6.5: the ACTIVE editor file's caret (CodeEditor's own 1-based report); drives the reverse highlight
+ * @param {string} [props.workspaceId] - W7.3: keys the remembered source/URL; without it the choice isn't persisted
  * @param {(selection: {mm: string, element: object, sourceText?: string}) => void} [props.onSelectElement] - W6.5: a click in the preview's inspect mode, already sanitized by elementRef.js's elementFromMessage(). W6.7: `sourceText` is added when the clicked file is previewing a proposal (its data-mm ranges were computed against THAT text, not the file's buffer)
  */
-function PreviewPane({ provider, filesMeta, cursor, onSelectElement }) {
+function PreviewPane({ provider, filesMeta, cursor, onSelectElement, workspaceId }) {
+  // W7.3: which source the pane shows + the last dev-server URL, per
+  // workspace. `ws` travels WITH the values so a workspace switch can
+  // never write the previous workspace's choice under the new key: until
+  // the new workspace's prefs are loaded, the pane shows the defaults and
+  // the save effect stays quiet.
+  const [prefs, setPrefs] = useState(null); // {ws, mode, url} | null
+  useEffect(() => {
+    if (prefs && prefs.ws === workspaceId) return;
+    setPrefs({ ws: workspaceId, ...loadPreviewPrefs(browserStorage(), workspaceId) });
+  }, [workspaceId, prefs]);
+  useEffect(() => {
+    if (prefs && prefs.ws === workspaceId) savePreviewPrefs(browserStorage(), prefs.ws, prefs);
+  }, [prefs, workspaceId]);
+  const prefsReady = !!prefs && prefs.ws === workspaceId;
+  const sourceMode = prefsReady ? prefs.mode : DEFAULT_PREVIEW_PREFS.mode;
+  const urlValue = prefsReady ? prefs.url : DEFAULT_PREVIEW_PREFS.url;
+  const updatePrefs = useCallback(
+    (patch) =>
+      setPrefs((p) => {
+        const base = p && p.ws === workspaceId ? p : { ws: workspaceId, ...DEFAULT_PREVIEW_PREFS };
+        return { ...base, ...patch };
+      }),
+    [workspaceId]
+  );
+  const handleUrlChange = useCallback((url) => updatePrefs({ url }), [updatePrefs]);
+
   // W6.7: which review (if any) the person has flipped to "Show
   // original" for. Keyed by proposal id rather than a bare boolean so
   // opening a different review starts on the proposed version again,
@@ -905,7 +903,12 @@ function PreviewPane({ provider, filesMeta, cursor, onSelectElement }) {
   }
 
   let body;
-  if (detected.kind === "static") {
+  if (sourceMode === "url") {
+    // Raw onSelectElement, not handleSelectElement: that wrapper only adds
+    // the proposed text of a file under review, and there is no overlay
+    // over a page that lives on someone's dev server.
+    body = <UrlPreview provider={provider} filesMeta={filesMeta} value={urlValue} onValueChange={handleUrlChange} onSelectElement={onSelectElement} />;
+  } else if (detected.kind === "static") {
     body = (
       <StaticPreview
         provider={provider}
@@ -932,7 +935,8 @@ function PreviewPane({ provider, filesMeta, cursor, onSelectElement }) {
   // preset, inspect mode and a Python run's output for no reason.
   return (
     <div className="h-full min-h-0 flex flex-col">
-      {review && (
+      <SourceTabs mode={sourceMode} onChange={(mode) => updatePrefs({ mode })} />
+      {review && sourceMode === "files" && (
         <ProposalRibbon
           showingProposed={!showOriginal}
           changedCount={Object.keys(proposedOverlay || {}).length}

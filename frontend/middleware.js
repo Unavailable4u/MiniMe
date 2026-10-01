@@ -51,7 +51,9 @@ export const config = {
   // Skip static assets and images — no session-relevant work happens on
   // those requests, and running the auth client on every font/icon
   // request would be pure overhead.
+  // mm-inspector.js (W7.3) is the public inspector script people load into
+  // their own dev app — fetched on every reload of it, never session-relevant.
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|mm-inspector\\.js$|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

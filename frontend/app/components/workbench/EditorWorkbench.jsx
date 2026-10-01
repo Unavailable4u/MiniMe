@@ -2163,7 +2163,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
             />
             <div className="shrink min-w-0" style={{ width: previewSplitter.size }}>
               <PreviewColumn onClose={closePreview}>
-                <PreviewPane provider={provider} filesMeta={filesMeta} cursor={cursor} onSelectElement={handleSelectElement} />
+                <PreviewPane provider={provider} filesMeta={filesMeta} cursor={cursor} onSelectElement={handleSelectElement} workspaceId={workspaceId} />
               </PreviewColumn>
             </div>
           </>

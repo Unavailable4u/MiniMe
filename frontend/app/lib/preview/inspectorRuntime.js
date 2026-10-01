@@ -41,6 +41,26 @@
 // editor's cursor, so the preview outlines the element being edited
 // (`mm: null` clears it). The box follows its element on scroll/resize.
 //
+// EXTERNAL MODE (W7.3, `buildInspectorScript(nonce, {external: true})`).
+// The same runtime, served as a static file (app/mm-inspector.js/route.js)
+// for a person's OWN dev app to load in the URL preview's iframe. Three
+// things differ, each because the page is no longer text MiniMe generated:
+//   - no per-build nonce to bake in -> it starts as null and is delivered
+//     by handshake (frame posts `minime:ready`, parent answers
+//     `minime:hello {nonce}`); see urlBridge.js's header;
+//   - a real origin instead of the sandbox's opaque one, so origins ARE
+//     checked: the parent origin comes from the script tag's
+//     `data-mm-origin` (falling back to the script's own src origin),
+//     messages are accepted only from it and posted ONLY to it, never
+//     with targetOrigin "*". Outside an iframe, or with no usable
+//     origin, the script installs nothing;
+//   - the source location can be on `data-mm`, `data-locatorjs` or
+//     `data-locatorjs-id` (see sourceRef.js's header for the three
+//     formats); the select message carries `mm` (a full range) and/or
+//     `locator` (start only) for the parent's adapter to finish.
+// With `external` unset the generated script is byte-for-byte what it was
+// before W7.3 — every external difference below is a ternary on it.
+//
 // Caps (same "cap sizes" discipline consoleBridge.js's own header
 // documents, same numbers where the shape overlaps — an arg/message is
 // an arg/message either bridge is posting):
@@ -50,21 +70,99 @@ export const MAX_TEXT_PREVIEW_LENGTH = 200;
 export const MAX_HTML_PREVIEW_LENGTH = 1024; // plan's own explicit "htmlPreview(≤1KB)"
 export const MAX_ANCESTORS = 10;
 
+// W7.3 external mode: script text, kept ES5 like the rest of the runtime.
+const EXTERNAL_SELECTOR = "[data-mm],[data-locatorjs],[data-locatorjs-id]";
+
+// Runs right after the install guard. Not framed -> nothing to talk to.
+const EXTERNAL_PRELUDE =
+  "if (window.parent === window) return;\n" +
+  "var MM_PARENT_ORIGIN = null;\n" +
+  "try {\n" +
+  "  var mmScript = document.currentScript;\n" +
+  "  var mmSrc = mmScript && mmScript.getAttribute && mmScript.getAttribute('data-mm-origin');\n" +
+  "  if (!mmSrc && mmScript && mmScript.src) mmSrc = mmScript.src;\n" +
+  "  if (mmSrc) {\n" +
+  "    var mmUrl = new URL(mmSrc);\n" +
+  "    if (mmUrl.protocol === 'http:' || mmUrl.protocol === 'https:') MM_PARENT_ORIGIN = mmUrl.origin;\n" +
+  "  }\n" +
+  "} catch (e) {}\n" +
+  "if (!MM_PARENT_ORIGIN) return;\n";
+
+// @locator/babel-jsx's default data-locatorjs-id is "<fullPath>::<n>", an
+// index into window.__LOCATOR_DATA__[fullPath].expressions, whose `loc` is
+// Babel's SourceLocation (1-based line, 0-based column, end exclusive —
+// the data-mm contract's own bases). Resolved HERE because that global
+// lives in the page's own window, which only this script can read.
+const EXTERNAL_HELPERS =
+  "function mmLocatorIdToMm(val) {\n" +
+  "  var i = val.lastIndexOf('::');\n" +
+  "  if (i < 1) return null;\n" +
+  "  var file = val.slice(0, i);\n" +
+  "  var idx = val.slice(i + 2);\n" +
+  "  try {\n" +
+  "    var store = window.__LOCATOR_DATA__;\n" +
+  "    var data = store && store[file];\n" +
+  "    var expr = data && data.expressions && data.expressions[idx];\n" +
+  "    var loc = expr && expr.loc;\n" +
+  "    if (!loc || !loc.start || !loc.end) return null;\n" +
+  "    return file + ':' + loc.start.line + ':' + loc.start.column + ':' + loc.end.line + ':' + loc.end.column;\n" +
+  "  } catch (e) { return null; }\n" +
+  "}\n" +
+  // Which attribute carries the location. data-mm wins; then the Locator
+  // id form (resolvable to a full range); then the path form (start only,
+  // `mm: null` + `locator` for the parent to complete).
+  "function mmRefOf(el) {\n" +
+  "  var v = el.getAttribute('data-mm');\n" +
+  "  if (v) return { attr: 'data-mm', raw: v, mm: v, locator: undefined };\n" +
+  "  v = el.getAttribute('data-locatorjs-id');\n" +
+  "  if (v) {\n" +
+  "    var r = mmLocatorIdToMm(v);\n" +
+  "    if (r) return { attr: 'data-locatorjs-id', raw: v, mm: r, locator: undefined };\n" +
+  "  }\n" +
+  "  v = el.getAttribute('data-locatorjs');\n" +
+  "  if (v) return { attr: 'data-locatorjs', raw: v, mm: null, locator: v };\n" +
+  "  return null;\n" +
+  "}\n" +
+  // JSON.stringify yields a quoted, escaped string that is also a valid
+  // CSS attribute-selector string, so no hand-rolled quote escaping.
+  "function mmCountInstances(attr, raw) {\n" +
+  "  try { return document.querySelectorAll('[' + attr + '=' + JSON.stringify(raw) + ']').length; } catch (e) { return 1; }\n" +
+  "}\n";
+
+// Tells the parent this frame has an inspector, and whether the page
+// carries any source attributes (so the parent can say why a click finds
+// nothing). Sent at install, at load, and once more shortly after — a
+// client-rendered app may not have mounted yet at the first two.
+const EXTERNAL_ANNOUNCE =
+  "function mmAnnounce() {\n" +
+  "  var tagged = false;\n" +
+  "  try { tagged = !!document.querySelector('" + EXTERNAL_SELECTOR + "'); } catch (e) {}\n" +
+  "  mmPost({ type: 'minime:ready', tagged: tagged });\n" +
+  "}\n" +
+  "mmAnnounce();\n" +
+  "window.addEventListener('load', mmAnnounce);\n" +
+  "if (window.setTimeout) window.setTimeout(mmAnnounce, 1500);\n";
+
 /**
  * The runtime script, as a string, with `nonce` baked in via
  * JSON.stringify — same safety note as consoleBridge.js's own
  * buildBridgeScript() (a nonce containing a quote/backslash must not
  * break out of the embedded string literal).
  *
- * @param {string} nonce
+ * @param {string} nonce - ignored in external mode (the nonce arrives by handshake)
+ * @param {{external?: boolean}} [options] - W7.3: `external` builds the variant served to a
+ *   person's own dev app (see the header's EXTERNAL MODE note); omitted, the output is unchanged
  * @returns {string}
  */
-export function buildInspectorScript(nonce) {
+export function buildInspectorScript(nonce, options) {
+  const external = !!(options && options.external === true);
   return (
     "(function(){\n" +
     "if (window.__mmInspectorInstalled__) return;\n" +
+    (external ? EXTERNAL_PRELUDE : "") +
     "window.__mmInspectorInstalled__ = true;\n" +
-    "var MM_NONCE = " + JSON.stringify(String(nonce)) + ";\n" +
+    // External mode has no nonce yet — see the header's EXTERNAL MODE note.
+    "var MM_NONCE = " + (external ? "null" : JSON.stringify(String(nonce))) + ";\n" +
     "var MAX_TEXT = " + MAX_TEXT_PREVIEW_LENGTH + ";\n" +
     "var MAX_HTML = " + MAX_HTML_PREVIEW_LENGTH + ";\n" +
     "var MAX_ANCESTORS = " + MAX_ANCESTORS + ";\n" +
@@ -73,6 +171,7 @@ export function buildInspectorScript(nonce) {
     "var labelEl = null;\n" + // small tag/size readout next to the hover outline
     "var highlightEl = null;\n" + // minime:highlight's own outline -- independent of hover, can be showing at the same time
     "var highlightTarget = null;\n" + // the element highlightEl currently outlines, so scroll/resize can re-place the box
+    (external ? EXTERNAL_HELPERS : "") +
     "function mmTruncate(str, max) {\n" +
     "  if (typeof str !== 'string') return str;\n" +
     "  return str.length > max ? (str.slice(0, max) + '…') : str;\n" +
@@ -81,7 +180,8 @@ export function buildInspectorScript(nonce) {
     "  try {\n" +
     "    var msg = { source: 'minime-preview', nonce: MM_NONCE };\n" +
     "    for (var k in payload) if (Object.prototype.hasOwnProperty.call(payload, k)) msg[k] = payload[k];\n" +
-    "    window.parent.postMessage(msg, '*');\n" +
+    // External mode posts ONLY to the pinned parent origin, never "*".
+    "    window.parent.postMessage(msg, " + (external ? "MM_PARENT_ORIGIN" : "'*'") + ");\n" +
     "  } catch (e) { /* must never break the preview itself */ }\n" +
     "}\n" +
     // A box drawn with `position: fixed` in the FRAME's own viewport
@@ -162,7 +262,7 @@ export function buildInspectorScript(nonce) {
     // all, which callers treat as "nothing to select".
     "function mmResolve(target) {\n" +
     "  if (!target || typeof target.closest !== 'function') return null;\n" +
-    "  var el = target.closest('[data-mm]');\n" +
+    "  var el = target.closest('" + (external ? EXTERNAL_SELECTOR : "[data-mm]") + "');\n" +
     "  if (!el) return null;\n" +
     "  return { el: el, dynamic: el !== target };\n" +
     "}\n" +
@@ -224,14 +324,16 @@ export function buildInspectorScript(nonce) {
     "  var resolved = mmResolve(event.target);\n" +
     "  if (!resolved) return;\n" +
     "  var el = resolved.el;\n" +
-    "  var mm = el.getAttribute('data-mm');\n" +
+    (external ? "  var ref = mmRefOf(el);\n  if (!ref) return;\n" : "  var mm = el.getAttribute('data-mm');\n") +
     "  var rect = el.getBoundingClientRect();\n" +
     "  var cls = el.className && typeof el.className === 'string' ? el.className.trim().split(/\\s+/).filter(Boolean) : [];\n" +
-    "  var instanceCount = 1;\n" +
-    "  try { instanceCount = document.querySelectorAll('[data-mm=\"' + mm.replace(/\"/g, '\\\\\"') + '\"]').length; } catch (e) {}\n" +
+    (external
+      ? "  var instanceCount = mmCountInstances(ref.attr, ref.raw);\n"
+      : "  var instanceCount = 1;\n" +
+        "  try { instanceCount = document.querySelectorAll('[data-mm=\"' + mm.replace(/\"/g, '\\\\\"') + '\"]').length; } catch (e) {}\n") +
     "  mmPost({\n" +
     "    type: 'minime:select',\n" +
-    "    mm: mm,\n" +
+    (external ? "    mm: ref.mm,\n    locator: ref.locator,\n    attr: ref.attr,\n" : "    mm: mm,\n") +
     "    tag: el.tagName.toLowerCase(),\n" +
     "    classes: cls,\n" +
     "    textPreview: mmTruncate((el.textContent || '').replace(/\\s+/g, ' ').trim(), MAX_TEXT),\n" +
@@ -259,9 +361,21 @@ export function buildInspectorScript(nonce) {
     "window.addEventListener('scroll', mmRepositionHighlight, true);\n" +
     "window.addEventListener('resize', mmRepositionHighlight);\n" +
     "window.addEventListener('message', function (event) {\n" +
-    "  if (event.source !== window.parent) return;\n" +
-    "  var data = event.data;\n" +
-    "  if (!data || data.source !== 'minime-parent' || data.nonce !== MM_NONCE) return;\n" +
+    (external
+      ? "  if (event.source !== window.parent || event.origin !== MM_PARENT_ORIGIN) return;\n" +
+        "  var data = event.data;\n" +
+        "  if (!data || data.source !== 'minime-parent') return;\n" +
+        // The handshake: the parent hands over this mount's nonce.
+        "  if (data.type === 'minime:hello') {\n" +
+        "    if (typeof data.nonce === 'string' && data.nonce) MM_NONCE = data.nonce;\n" +
+        "    return;\n" +
+        "  }\n" +
+        // `MM_NONCE === null` is rejected explicitly: a message with
+        // nonce:null would otherwise equal the not-yet-set nonce.
+        "  if (MM_NONCE === null || data.nonce !== MM_NONCE) return;\n"
+      : "  if (event.source !== window.parent) return;\n" +
+        "  var data = event.data;\n" +
+        "  if (!data || data.source !== 'minime-parent' || data.nonce !== MM_NONCE) return;\n") +
     "  if (data.type === 'minime:inspect') {\n" +
     "    mmSetInspecting(!!data.on);\n" +
     "  } else if (data.type === 'minime:highlight') {\n" +
@@ -274,6 +388,7 @@ export function buildInspectorScript(nonce) {
     "    mmPositionBox(highlightEl, target.getBoundingClientRect());\n" +
     "  }\n" +
     "});\n" +
+    (external ? EXTERNAL_ANNOUNCE : "") +
     "})();"
   );
 }
