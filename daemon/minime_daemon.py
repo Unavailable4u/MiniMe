@@ -12,6 +12,11 @@ implements on the backend side, and idles on that socket (reconnecting
 with backoff on drop) until Ctrl+C/SIGTERM. Still no tool-call message
 shape -- that's Part 3.
 
+W7.4 adds an optional preview reverse proxy (daemon/preview_proxy.py),
+started next to the websocket connection when MINIME_PREVIEW_TARGET is
+set in daemon/.env. It's independent of pairing: if it can't bind its
+port the daemon logs why and carries on without it.
+
 Run it:
     cd MiniMe
     pip install -r daemon/requirements.txt
@@ -33,6 +38,7 @@ import sys
 from daemon import connection
 from daemon.config import ConfigError, DaemonConfig, load_config
 from daemon.path_guard import PathGuardError, assert_within_root
+from daemon.preview_proxy import PreviewProxy
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +93,32 @@ def _self_check(config: DaemonConfig) -> None:
         logger.info("self-check PASS: '../..' traversal is rejected")
 
 
+async def _start_preview_proxy(config: DaemonConfig) -> PreviewProxy | None:
+    """W7.4: start the preview proxy if it's configured. A proxy that
+    can't start (usually: port already in use) must not take the daemon
+    down with it -- the daemon's real job is the workspace tools."""
+    if config.preview is None:
+        return None
+    proxy = PreviewProxy(config.preview)
+    try:
+        await proxy.start()
+    except OSError as exc:
+        logger.error(
+            "preview proxy could not listen on 127.0.0.1:%s (%s) -- continuing without it; "
+            "set MINIME_PREVIEW_PORT to a free port",
+            config.preview.port,
+            exc,
+        )
+        return None
+    logger.info(
+        "preview proxy ready: enter %s as the Dev server URL in MiniMe -- it forwards to %s "
+        "and adds the inspector",
+        proxy.url,
+        config.preview.target_origin,
+    )
+    return proxy
+
+
 async def _amain() -> int:
     try:
         config = load_config()
@@ -126,7 +158,12 @@ async def _amain() -> int:
     # NEW — Part 2: replaces Part 1's plain idle-sleep loop. Connects
     # out to the backend, pairs, and reconnects with backoff on drop,
     # until stop_event is set above.
-    await connection.run_forever(config, stop_event)
+    preview_proxy = await _start_preview_proxy(config)
+    try:
+        await connection.run_forever(config, stop_event)
+    finally:
+        if preview_proxy is not None:
+            await preview_proxy.stop()
 
     logger.info("minime_daemon stopped")
     return 0
