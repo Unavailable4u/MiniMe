@@ -27,6 +27,12 @@ unlike GET .../history and POST .../restore above, they don't need any
 particular registration order relative to the generic
 `{file_path:path}` routes.
 
+W8.3a (Build Workbench plan): GET .../code/findings returns the
+scan/test findings eo/code_findings.py stores per file when the
+pipeline writes code (see that module's docstring). Fixed two-segment
+path, so like .../move and .../folders above it doesn't depend on
+registration order relative to the `{file_path:path}` routes.
+
 Same ownership-gate-then-delegate shape every workspace-scoped route in
 this repo already uses (see workspace_data.py's panel-content routes,
 api/routes/tasks.py's get_tasks_for_workspace): confirm the caller can
@@ -41,7 +47,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.deps import require_auth
-from eo import chat_workspace, workspace_code_files
+from eo import chat_workspace, code_findings, workspace_code_files
 from eo.workspace_code_files import VersionConflictError
 
 router = APIRouter()
@@ -95,6 +101,19 @@ def list_code_files(ws_id: str, owner_id: str = Depends(require_auth)):
     10's file-tree view is the intended caller."""
     _require_workspace(ws_id, owner_id)
     return workspace_code_files.list_files(ws_id)
+
+
+@router.get("/api/workspaces/{ws_id}/code/findings", dependencies=[Depends(require_auth)])
+def list_code_findings(ws_id: str, owner_id: str = Depends(require_auth)):
+    """W8.3a: every stored finding for the workspace as `{"findings":
+    [{path, line, severity, message, source, file_version}, ...]}`,
+    ordered by file then line. `line` is null for a file-level finding.
+    `file_version` is the file's version when the finding was made --
+    compare it with the file's current `version` to spot a finding that
+    predates a later edit. Empty list (not a 404) when nothing has been
+    found, same "nothing yet renders blank" convention as GET .../files."""
+    _require_workspace(ws_id, owner_id)
+    return {"findings": code_findings.list_findings(ws_id)}
 
 
 # W1.1: registered BEFORE the generic GET/PUT `{file_path:path}` routes
