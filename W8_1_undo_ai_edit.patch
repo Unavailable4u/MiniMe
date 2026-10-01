@@ -1,0 +1,679 @@
+diff --git a/frontend/app/components/workbench/HistoryPanel.jsx b/frontend/app/components/workbench/HistoryPanel.jsx
+index 18c44d4..eff120f 100644
+--- a/frontend/app/components/workbench/HistoryPanel.jsx
++++ b/frontend/app/components/workbench/HistoryPanel.jsx
+@@ -17,18 +17,46 @@
+ // which is choosing between two things already open in front of you,
+ // picking an old version here replaces the buffer's content outright,
+ // including any unsaved edits sitting in it right now.
+-import { useEffect, useRef, useState } from "react";
++//
++// W8.1: the one-click "Restore to before AI edit" bar at the top, and
++// badges that say what REPLACED each row. A row's `source` is what
++// overwrote that content, not who wrote it (aiUndo.js's header has the
++// full story) — so a row badged "Before AI edit" is the file as it
++// stood before an AI edit landed on it, and that bar is just a
++// shortcut to restoring exactly that row. Unlike picking a row by hand
++// it skips the confirmation when nothing would be lost beyond what
++// the server keeps anyway (see undoNeedsConfirm()). The list also
++// reloads when the open file's version changes, so an AI edit that
++// lands while this panel is open shows up — and becomes undoable —
++// without closing and reopening it.
++import { useEffect, useMemo, useRef, useState } from "react";
+ import { Loader2, RotateCcw } from "lucide-react";
+ import { basename } from "../../lib/workbench/fileTree";
++import {
++  describeLaterChanges,
++  findUndoTarget,
++  undoLabel,
++  undoNeedsConfirm,
++  versionBadge,
++} from "../../lib/workbench/aiUndo";
+ import HistoryCompareView from "./HistoryCompareView";
+ import ConfirmDialog from "../ConfirmDialog";
+ 
+-const SOURCE_LABEL = {
+-  user: "You",
+-  pipeline: "AI pipeline",
+-  proposal: "AI edit",
+-  restore: "Restored",
+-};
++function SourceBadge({ source }) {
++  const badge = versionBadge(source);
++  return (
++    <span
++      title={badge.title}
++      className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
++        badge.ai
++          ? "border-[var(--accent)] text-[var(--accent)]"
++          : "border-[var(--neutral-800)] text-[var(--neutral-500)]"
++      }`}
++    >
++      {badge.label}
++    </span>
++  );
++}
+ 
+ function formatWhen(iso) {
+   if (!iso) return "";
+@@ -56,13 +84,31 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+   const [pendingRestore, setPendingRestore] = useState(null); // an entry awaiting confirmation
+   const [restoring, setRestoring] = useState(false);
+   const [restoreError, setRestoreError] = useState(null);
++  const [pendingUndo, setPendingUndo] = useState(null); // a findUndoTarget() result awaiting confirmation
++  const [notice, setNotice] = useState(null); // one-line "that worked" message after an undo
+   const seqRef = useRef(0);
+ 
++  // Switching file (or provider) starts from a clean slate. Bumping
++  // seqRef also orphans any request still in flight for the previous
++  // file, including when the new one has no history to load at all.
+   useEffect(() => {
++    seqRef.current++;
+     setVersions(null);
+     setError(null);
+     setCompareVersion(null);
+     setRestoreError(null);
++    setPendingUndo(null);
++    setNotice(null);
++    setLoading(false);
++  }, [path, provider]);
++
++  // (Re)load the list when the file or its version changes. The version
++  // is a dependency so the list follows the file: a Restore (see
++  // doRestore) or an AI edit being applied bumps it, and the new row
++  // appears without this panel having to be reopened. This does NOT
++  // clear `versions` first — the old list stays on screen while the
++  // new one loads, instead of flashing to empty on every save.
++  useEffect(() => {
+     // W3.1: Local has no version table (capabilities.history: false) —
+     // don't call provider.history() at all rather than letting it throw
+     // (LocalFileProvider doesn't even implement it) and surface that as
+@@ -73,7 +119,10 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+     provider
+       .history(path)
+       .then((list) => {
+-        if (seq === seqRef.current) setVersions(list);
++        if (seq === seqRef.current) {
++          setVersions(list);
++          setError(null);
++        }
+       })
+       .catch((err) => {
+         if (seq === seqRef.current) setError(err.message || "Couldn't load history.");
+@@ -81,23 +130,46 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+       .finally(() => {
+         if (seq === seqRef.current) setLoading(false);
+       });
+-  }, [path, provider]);
++  }, [path, provider, currentVersion]);
++
++  // The newest AI edit still worth undoing, or null. currentContent is
++  // the SAVED text — see findUndoTarget().
++  const undoTarget = useMemo(
++    () => findUndoTarget(versions, { currentVersion, currentContent }),
++    [versions, currentVersion, currentContent]
++  );
+ 
+-  async function doRestore(entry) {
++  // The notice is a "that worked" acknowledgement, not a status — it
++  // would only go stale (the next save makes "Restored v3" a lie about
++  // what's open), so it clears itself.
++  useEffect(() => {
++    if (!notice) return;
++    const t = setTimeout(() => setNotice(null), 8000);
++    return () => clearTimeout(t);
++  }, [notice]);
++
++  async function doRestore(entry, { undoAi = false } = {}) {
+     if (!path || !provider) return;
+     setRestoring(true);
+     setRestoreError(null);
++    setNotice(null);
+     try {
+       const file = await provider.restore(path, entry.version);
++      // onRestored lands the new version in the editor store, which
++      // changes `currentVersion` and so reloads the list above — the
++      // restore itself is a new row (see restore_version()'s own
++      // docstring: it's an append, not a rewrite).
+       onRestored(path, file);
+       setPendingRestore(null);
++      setPendingUndo(null);
+       setCompareVersion(null);
+-      // The restore itself becomes a new version (see restore_version()'s
+-      // own docstring: it's an append, not a rewrite) — refresh the list
+-      // so it shows up rather than looking like nothing happened.
+-      const seq = ++seqRef.current;
+-      const list = await provider.history(path);
+-      if (seq === seqRef.current) setVersions(list);
++      if (undoAi) {
++        setNotice(
++          `Restored v${entry.version} — the file as it was before the ${
++            entry.source === "pipeline" ? "AI run" : "AI edit"
++          }. The AI's version is still in History.`
++        );
++      }
+     } catch (err) {
+       setRestoreError(err.message || "Restore failed.");
+     } finally {
+@@ -105,6 +177,18 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+     }
+   }
+ 
++  // The one-click path. Goes straight through unless it would reach
++  // further than the click suggests (unsaved edits, or later saves) —
++  // then it asks, in words that name what else is affected.
++  function handleUndoClick() {
++    if (!undoTarget || restoring) return;
++    if (undoNeedsConfirm({ dirty, laterChanges: undoTarget.laterChanges })) {
++      setPendingUndo(undoTarget);
++    } else {
++      doRestore(undoTarget.entry, { undoAi: true });
++    }
++  }
++
+   if (!path) {
+     return (
+       <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
+@@ -137,6 +221,32 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+ 
+       {error && <p className="px-1 pb-2 text-[11px] text-red-400">{error}</p>}
+       {restoreError && <p className="px-1 pb-2 text-[11px] text-red-400">{restoreError}</p>}
++      {notice && (
++        <p role="status" className="px-1 pb-2 text-[11px] text-emerald-400">
++          {notice}
++        </p>
++      )}
++
++      {undoTarget && (
++        <div className="shrink-0 flex items-center gap-2 px-1 pb-2">
++          <button
++            type="button"
++            onClick={handleUndoClick}
++            disabled={restoring}
++            title={`Bring back v${undoTarget.entry.version}, the file as it was before the ${
++              undoTarget.source === "pipeline" ? "AI run" : "AI edit"
++            }. Nothing is deleted — the current version stays in History.`}
++            className="touch-target inline-flex shrink-0 items-center gap-1.5 rounded border border-[var(--accent)] px-2 py-1 text-[11px] font-medium text-[var(--accent)] hover:bg-[var(--neutral-900)] disabled:opacity-50"
++          >
++            <RotateCcw size={11} />
++            {undoLabel(undoTarget.source)}
++          </button>
++          <span className="min-w-0 truncate text-[11px] text-[var(--neutral-600)]">
++            v{undoTarget.entry.version}
++            {undoTarget.laterChanges > 0 ? ` · ${describeLaterChanges(undoTarget.laterChanges)} since` : ""}
++          </span>
++        </div>
++      )}
+ 
+       <div className="flex-1 min-h-0 overflow-auto">
+         <div className="flex items-center gap-2 px-2 py-1 text-[11px] text-[var(--neutral-400)]">
+@@ -158,6 +268,7 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+             className="group flex items-center gap-2 rounded px-2 py-1 text-[11px] hover:bg-[var(--neutral-900)]"
+           >
+             <span className="w-8 shrink-0 text-right text-[var(--neutral-600)]">v{entry.version}</span>
++            <SourceBadge source={entry.source} />
+             <button
+               type="button"
+               onClick={() => setCompareVersion(entry)}
+@@ -165,11 +276,9 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+               className="min-w-0 flex-1 truncate text-left text-[var(--neutral-300)] hover:text-[var(--neutral-100)]"
+             >
+               {formatWhen(entry.updated_at)}
+-              <span className="text-[var(--neutral-600)]">
+-                {" · "}
+-                {SOURCE_LABEL[entry.source] || entry.source || "unknown"}
+-                {entry.updated_by ? ` · ${entry.updated_by}` : ""}
+-              </span>
++              {entry.updated_by ? (
++                <span className="text-[var(--neutral-600)]">{` · ${entry.updated_by}`}</span>
++              ) : null}
+             </button>
+             <button
+               type="button"
+@@ -212,6 +321,30 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+         onConfirm={() => pendingRestore && doRestore(pendingRestore)}
+         onCancel={() => setPendingRestore(null)}
+       />
++
++      <ConfirmDialog
++        open={!!pendingUndo}
++        title={pendingUndo ? `${undoLabel(pendingUndo.source)}?` : ""}
++        tone="info"
++        message={
++          pendingUndo
++            ? `Bring back v${pendingUndo.entry.version} of ${basename(path)}, the file as it was before the ${
++                pendingUndo.source === "pipeline" ? "AI run" : "AI edit"
++              }, as a new version.${
++                describeLaterChanges(pendingUndo.laterChanges)
++                  ? ` That also rolls back ${describeLaterChanges(pendingUndo.laterChanges)} made after it.`
++                  : pendingUndo.laterChanges === null
++                    ? " That may also roll back saves made after it."
++                    : ""
++              }${
++                dirty ? " This also discards your unsaved edits in the editor." : ""
++              } Nothing is deleted — the current version stays in History too.`
++            : ""
++        }
++        confirmLabel={restoring ? "Restoring…" : "Restore"}
++        onConfirm={() => pendingUndo && doRestore(pendingUndo.entry, { undoAi: true })}
++        onCancel={() => setPendingUndo(null)}
++      />
+     </div>
+   );
+ }
+diff --git a/frontend/app/lib/workbench/__tests__/aiUndo.test.mjs b/frontend/app/lib/workbench/__tests__/aiUndo.test.mjs
+new file mode 100644
+index 0000000..91f2022
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/aiUndo.test.mjs
+@@ -0,0 +1,239 @@
++// W8.1 (Build Workbench plan) — tests for aiUndo.js.
++//
++// Loads the REAL lib/workbench/aiUndo.js through loadSource.mjs (no
++// pasted copy). No `imports` are passed on purpose: aiUndo.js must stay
++// dependency-free, and this load fails if someone adds an `import` to it.
++//
++// The fixtures below follow the backend's real semantics: a history
++// row's `source` is what REPLACED that content (see aiUndo.js's header),
++// so `{version: 1, source: "proposal"}` means "v1, before an AI edit
++// turned it into v2".
++//
++// Run: node frontend/app/lib/workbench/__tests__/aiUndo.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const { AI_SOURCES, isAiSource, versionBadge, findUndoTarget, undoNeedsConfirm, undoLabel, describeLaterChanges } =
++  loadSource("../aiUndo.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++const row = (version, source, content) => ({ version, source, content, updated_at: null, updated_by: null });
++
++// --- isAiSource / AI_SOURCES -------------------------------------------
++
++assertEqual(AI_SOURCES, ["proposal", "pipeline"], "AI sources are exactly proposal + pipeline");
++assertEqual(
++  ["user", "proposal", "pipeline", "restore", null, undefined, "other"].map(isAiSource),
++  [false, true, true, false, false, false, false],
++  "only proposal and pipeline count as AI"
++);
++
++// --- versionBadge --------------------------------------------------------
++
++assertEqual(versionBadge("proposal").label, "Before AI edit", "proposal badge reads 'Before AI edit'");
++assertEqual(versionBadge("pipeline").label, "Before AI run", "pipeline badge reads 'Before AI run'");
++assertEqual(versionBadge("user").label, "Before your save", "user badge reads 'Before your save'");
++assertEqual(versionBadge("restore").label, "Before restore", "restore badge reads 'Before restore'");
++assertEqual(
++  ["proposal", "pipeline", "user", "restore"].map((s) => versionBadge(s).ai),
++  [true, true, false, false],
++  "only the AI sources are flagged ai"
++);
++assertEqual(versionBadge(null).label, "Earlier version", "a null source falls back to a neutral badge");
++assertEqual(versionBadge("something-new").label, "Earlier version", "an unknown source falls back to a neutral badge");
++assertEqual(
++  ["user", "proposal", "pipeline", "restore", null].every((s) => versionBadge(s).title.length > 0),
++  true,
++  "every badge has a tooltip"
++);
++
++// --- findUndoTarget: the basic case --------------------------------------
++
++// v1 saved by you; an accepted proposal turned it into v2 (live).
++const basic = [row(1, "proposal", "A")];
++assertEqual(
++  findUndoTarget(basic, { currentVersion: 2, currentContent: "B" }),
++  { entry: row(1, "proposal", "A"), source: "proposal", laterChanges: 0 },
++  "restores the file as it was before the AI edit; the AI edit is the latest change"
++);
++
++assertEqual(findUndoTarget([], { currentVersion: 1, currentContent: "A" }), null, "empty history: nothing to undo");
++assertEqual(
++  findUndoTarget([row(1, "user", "A")], { currentVersion: 2, currentContent: "B" }),
++  null,
++  "history with only your own saves: nothing to undo"
++);
++assertEqual(
++  findUndoTarget([row(1, "restore", "A")], { currentVersion: 2, currentContent: "B" }),
++  null,
++  "a restore is not an AI edit"
++);
++assertEqual(findUndoTarget(null, { currentVersion: 2, currentContent: "B" }), null, "history not loaded yet: null");
++assertEqual(findUndoTarget(undefined, {}), null, "no arguments at all: null");
++
++// --- which AI entry wins ------------------------------------------------
++
++// v1 -[AI]-> v2 -[you]-> v3 -[AI]-> v4 (live). Newest AI edit is the one
++// that replaced v3, regardless of the order the rows arrive in.
++const chain = [row(3, "proposal", "C"), row(2, "user", "B"), row(1, "proposal", "A")];
++assertEqual(
++  findUndoTarget(chain, { currentVersion: 4, currentContent: "D" })?.entry.version,
++  3,
++  "picks the newest AI-replaced snapshot"
++);
++assertEqual(
++  findUndoTarget([...chain].reverse(), { currentVersion: 4, currentContent: "D" })?.entry.version,
++  3,
++  "doesn't depend on the order the server returned the rows in"
++);
++assertEqual(
++  findUndoTarget(
++    [row(5, "user", "E"), row(4, "pipeline", "D"), row(3, "proposal", "C")],
++    { currentVersion: 6, currentContent: "F" }
++  )?.source,
++  "pipeline",
++  "a pipeline run counts too, and wins when it is the newest"
++);
++
++// --- laterChanges ---------------------------------------------------------
++
++// v1 -[AI]-> v2 -[you]-> v3 -[you]-> v4 (live): two saves after the AI edit.
++assertEqual(
++  findUndoTarget([row(3, "user", "C"), row(2, "user", "B"), row(1, "proposal", "A")], {
++    currentVersion: 4,
++    currentContent: "D",
++  })?.laterChanges,
++  2,
++  "counts the saves made after the AI edit"
++);
++assertEqual(
++  findUndoTarget(basic, { currentVersion: undefined, currentContent: "B" })?.laterChanges,
++  null,
++  "unknown current version: laterChanges is null, not a guess"
++);
++assertEqual(
++  findUndoTarget(basic, { currentVersion: 1, currentContent: "B" })?.laterChanges,
++  0,
++  "never negative if the current version looks older than the snapshot (stale prop)"
++);
++
++// --- the button goes away once used, and steps back after that -----------
++
++// Start: v1 -[AI A1]-> v2 -[AI A2]-> v3 (live, content C).
++const twoEdits = [row(2, "proposal", "B"), row(1, "proposal", "A")];
++assertEqual(
++  findUndoTarget(twoEdits, { currentVersion: 3, currentContent: "C" })?.entry.version,
++  2,
++  "two AI edits: first offer undoes the latest one"
++);
++// After undoing A2: restore appends v4 holding B; v3 (C) is snapshotted as "restore".
++const afterUndo = [row(3, "restore", "C"), row(2, "proposal", "B"), row(1, "proposal", "A")];
++const stepBack = findUndoTarget(afterUndo, { currentVersion: 4, currentContent: "B" });
++assertEqual(stepBack?.entry.version, 1, "after using it once, the same click steps back to the AI edit before");
++assertEqual(stepBack?.laterChanges, 2, "…and reports the saves since then (the later AI edit and the restore)");
++
++// After undoing A1 too: restore appends v5 holding A.
++const afterBoth = [row(4, "restore", "B"), ...afterUndo];
++assertEqual(
++  findUndoTarget(afterBoth, { currentVersion: 5, currentContent: "A" }),
++  null,
++  "nothing left to offer once every AI edit has been undone"
++);
++
++// Single AI edit, undone: no no-op offer.
++assertEqual(
++  findUndoTarget([row(2, "restore", "B"), row(1, "proposal", "A")], { currentVersion: 3, currentContent: "A" }),
++  null,
++  "right after the only AI edit is undone the button is gone (current text equals the snapshot)"
++);
++
++// An AI write that changed nothing isn't an edit to undo.
++assertEqual(
++  findUndoTarget([row(1, "proposal", "same")], { currentVersion: 2, currentContent: "same" }),
++  null,
++  "an AI edit that left the text unchanged is skipped"
++);
++
++// You reverted the AI edit by hand (v2 -> v3 holds the old text again):
++// nothing to offer, even after you keep editing past that point.
++assertEqual(
++  findUndoTarget([row(2, "user", "B"), row(1, "proposal", "A")], { currentVersion: 3, currentContent: "A" }),
++  null,
++  "reverted by hand: the live text already equals the pre-AI text"
++);
++assertEqual(
++  findUndoTarget([row(3, "user", "A"), row(2, "user", "B"), row(1, "proposal", "A")], {
++    currentVersion: 4,
++    currentContent: "A2",
++  }),
++  null,
++  "reverted by hand, then edited further: the file was back at the pre-AI text, so the AI edit isn't offered"
++);
++
++// The AI edit before a reverted one is still offered.
++// v1 -[AI]-> v2 -[you]-> v3 -[AI]-> v4 -[restore v3's text]-> v5 (live "C")
++assertEqual(
++  findUndoTarget([row(4, "restore", "D"), row(3, "proposal", "C"), row(2, "user", "B"), row(1, "proposal", "A")], {
++    currentVersion: 5,
++    currentContent: "C",
++  })?.entry.version,
++  1,
++  "undoing the newest of two AI edits leaves the older one available"
++);
++
++// --- safety around missing / odd data ---------------------------------------
++
++assertEqual(
++  findUndoTarget(basic, { currentVersion: 2, currentContent: undefined }),
++  null,
++  "no saved content to compare against: no target"
++);
++assertEqual(findUndoTarget(basic, { currentVersion: 2, currentContent: null }), null, "null saved content: no target");
++assertEqual(
++  findUndoTarget(basic, { currentVersion: 2, currentContent: "" })?.entry.version,
++  1,
++  "an empty saved file is still a string, so it still compares"
++);
++assertEqual(
++  findUndoTarget([{ version: 1, source: "proposal" }, null, { version: "2", source: "proposal", content: "x" }], {
++    currentVersion: 3,
++    currentContent: "B",
++  }),
++  null,
++  "rows with no content, null rows and non-integer versions are ignored rather than crashing"
++);
++
++// --- undoNeedsConfirm ---------------------------------------------------------
++
++assertEqual(undoNeedsConfirm({ dirty: false, laterChanges: 0 }), false, "clean buffer + AI edit is latest: one click, no dialog");
++assertEqual(undoNeedsConfirm({ dirty: true, laterChanges: 0 }), true, "unsaved edits would be discarded: ask");
++assertEqual(undoNeedsConfirm({ dirty: false, laterChanges: 2 }), true, "later saves would be rolled back too: ask");
++assertEqual(undoNeedsConfirm({ dirty: false, laterChanges: null }), true, "unknown later saves: ask");
++assertEqual(undoNeedsConfirm({ laterChanges: 0 }), false, "dirty omitted counts as clean");
++
++// --- labels -------------------------------------------------------------------
++
++assertEqual(undoLabel("proposal"), "Restore to before AI edit", "button label for a proposal");
++assertEqual(undoLabel("pipeline"), "Restore to before AI run", "button label for a pipeline run");
++assertEqual(
++  [null, 0, 1, 2, 12, -3, undefined].map(describeLaterChanges),
++  ["", "", "1 later save", "2 later saves", "12 later saves", "", ""],
++  "describeLaterChanges pluralises and stays empty for none/unknown"
++);
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/workbench/aiUndo.js b/frontend/app/lib/workbench/aiUndo.js
+new file mode 100644
+index 0000000..27f72be
+--- /dev/null
++++ b/frontend/app/lib/workbench/aiUndo.js
+@@ -0,0 +1,165 @@
++// frontend/app/lib/workbench/aiUndo.js — W8.1 (Build Workbench plan).
++// Pure decision logic for "Restore to before AI edit" and for the
++// source badges in the History panel. No imports — see fileTree.js's
++// header; the test loader in __tests__/aiUndo.test.mjs enforces it.
++//
++// THE ONE THING TO KNOW (it is easy to get backwards): in
++// workspace_code_file_versions, a row's `source` is who/what REPLACED
++// that content — not who wrote it. See write_file()'s docstring in
++// backend/eo/workspace_code_files.py ("for the row this write
++// replaces (not for the new row itself)"). So a history entry with
++// source "proposal" is not "an AI edit"; it is the file exactly as it
++// was BEFORE an AI edit landed on top of it. That is precisely what
++// "restore to before the AI edit" wants, so no new backend route or
++// column is needed: the target is already sitting in the history list.
++//
++//   v1 (you saved it)   ── an accepted proposal replaces it ──▶ v2
++//   history row: {version: 1, source: "proposal"}   ← restore THIS
++//
++// (The live version has no history row until something replaces it, so
++// "was the current content written by AI?" is answered by the row for
++// version current-1, not by anything on the live row.)
++
++/** `source` values that mean "an AI write replaced this content". */
++export const AI_SOURCES = ["proposal", "pipeline"];
++
++/**
++ * @param {string|null|undefined} source - a history entry's `source`
++ * @returns {boolean}
++ */
++export function isAiSource(source) {
++  return AI_SOURCES.includes(source);
++}
++
++const VERSION_BADGES = {
++  user: {
++    label: "Before your save",
++    ai: false,
++    title: "This is the file as it was before you saved over it.",
++  },
++  proposal: {
++    label: "Before AI edit",
++    ai: true,
++    title: "This is the file as it was before an AI edit you kept was applied.",
++  },
++  pipeline: {
++    label: "Before AI run",
++    ai: true,
++    title: "This is the file as it was before an AI code-generation run rewrote it.",
++  },
++  restore: {
++    label: "Before restore",
++    ai: false,
++    title: "This is the file as it was before an older version was restored over it.",
++  },
++};
++
++/**
++ * Badge for one history row. Worded as "Before …" on purpose — see the
++ * header: the row's `source` names what replaced it, and "AI edit" on
++ * its own would read as "this version was written by AI", which is the
++ * opposite of what the row holds.
++ *
++ * @param {string|null|undefined} source
++ * @returns {{label: string, ai: boolean, title: string}}
++ */
++export function versionBadge(source) {
++  return (
++    VERSION_BADGES[source] || {
++      label: "Earlier version",
++      ai: false,
++      title: "An earlier saved version of this file.",
++    }
++  );
++}
++
++/**
++ * Which snapshot "Restore to before AI edit" should bring back, or
++ * null when there is nothing to undo.
++ *
++ * Rule: the NEWEST history entry replaced by an AI write
++ * (`isAiSource`) that has not already been undone. "Already undone"
++ * is judged by content, because the history rows don't record which
++ * version a restore came from: an AI edit counts as undone when any
++ * later version of the file — including the live one — holds exactly
++ * the text from before it. That one test covers three cases:
++ *   - the button disappears right after it's used (the restore
++ *     re-creates that text as the live version);
++ *   - a second click steps back to the AI edit before it, instead of
++ *     offering to jump FORWARD to a text that re-applies the first edit
++ *     (v1 -AI-> v2 -AI-> v3, undo twice: v2's pre-AI text is still
++ *     different from the live v1 text, but the file has been there
++ *     since, so it isn't offered again);
++ *   - an AI write that changed nothing, or one you reverted by hand,
++ *     isn't offered as something to undo.
++ * It can only see the versions History still keeps (the newest 30 per
++ * file); rows pruned out of that window are simply not considered.
++ *
++ * `currentContent` must be the SAVED content (what the server has), not
++ * the editor's unsaved text — same reason HistoryPanel's own compare
++ * view uses it. Without a string to compare against we can't tell a
++ * real undo from a no-op, so there is no target.
++ *
++ * @param {{version: number, source?: string|null, content: string}[]} history - any order
++ * @param {{currentVersion?: number|null, currentContent?: string|null}} current
++ * @returns {{entry: object, source: string, laterChanges: number|null}|null}
++ *   `laterChanges` = how many versions were saved AFTER the AI edit
++ *   (so restoring also drops those from the live file); null when the
++ *   current version isn't known.
++ */
++export function findUndoTarget(history, { currentVersion, currentContent } = {}) {
++  if (!Array.isArray(history) || typeof currentContent !== "string") return null;
++
++  const known = history.filter((e) => e && Number.isInteger(e.version) && typeof e.content === "string");
++  // Has the file held `text` at any version after `version`?
++  const returnedToSince = (version, text) =>
++    currentContent === text || known.some((e) => e.version > version && e.content === text);
++
++  let best = null;
++  for (const entry of known) {
++    if (!isAiSource(entry.source)) continue;
++    if (returnedToSince(entry.version, entry.content)) continue;
++    if (best === null || entry.version > best.version) best = entry;
++  }
++  if (best === null) return null;
++
++  // Snapshot N was replaced by the AI write that produced N+1, so
++  // anything from N+2 up to the live version came after it.
++  const laterChanges = Number.isInteger(currentVersion) ? Math.max(0, currentVersion - best.version - 1) : null;
++  return { entry: best, source: best.source, laterChanges };
++}
++
++/**
++ * Whether the one-click undo should stop and ask first. The restore
++ * itself loses nothing on the server (it's an append — the current
++ * version stays in History), so the common case — nothing unsaved,
++ * the AI edit is the latest change — goes straight through. Asking is
++ * for the two cases where the click reaches further than the person
++ * may expect: unsaved editor text is discarded, or later saves are
++ * rolled back along with the AI edit. Unknown (null) counts as "ask".
++ *
++ * @param {{dirty?: boolean, laterChanges: number|null}} args
++ * @returns {boolean}
++ */
++export function undoNeedsConfirm({ dirty, laterChanges }) {
++  return !!dirty || laterChanges !== 0;
++}
++
++/**
++ * @param {string} source - "proposal" | "pipeline"
++ * @returns {string} button text
++ */
++export function undoLabel(source) {
++  return source === "pipeline" ? "Restore to before AI run" : "Restore to before AI edit";
++}
++
++/**
++ * "" for none/unknown, else "1 later save" / "3 later saves".
++ *
++ * @param {number|null} n
++ * @returns {string}
++ */
++export function describeLaterChanges(n) {
++  if (!Number.isInteger(n) || n <= 0) return "";
++  return n === 1 ? "1 later save" : `${n} later saves`;
++}
