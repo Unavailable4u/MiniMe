@@ -36,6 +36,14 @@ still refuses a raw `kind: "folder"` ref outright, which after this
 change only happens if some future caller reaches it directly, not via
 create_proposal() — see its own docstring.
 
+W8.5: agents/deploy_config_writer.py's plan now enters this same
+store through create_deploy_config_proposal() (below) — the deploy
+config file becomes an ordinary pending proposal, reviewed with the
+identical Keep/Undo flow, and resolve_proposal() stays the only thing
+that ever writes it. No new table, status, route or event: the
+proposal is tagged `model_meta.generator == "deploy_config_writer"`
+and that tag is all that tells it apart from a chat edit.
+
 Same FakeCursor-isolatable, `eo.db`-only-touches-Postgres shape every
 other Postgres-backed store module in this package already takes (see
 eo/workspace_code_files.py, eo/chat_store.py) — nothing here imports
@@ -648,6 +656,139 @@ def create_proposal(ws_id: str, instruction: str, refs: list[dict],
         payload={"workspace_id": ws_id, "proposal_id": proposal_id, "status": status},
     )
     return _row_to_proposal(row)
+
+
+# ---------------------------------------------------------------------------
+# W8.5 — deploy config through the same review
+# ---------------------------------------------------------------------------
+# agents/deploy_config_writer.py already DECIDES the host and the config
+# file's full content (and emits DEPLOY_CONFIG_PROPOSED); what it never
+# had was a human-in-the-loop write — agents/deploy_agent.py's
+# write_deploy_config() just writes the file. This section turns that
+# plan into a pending proposal instead, so the file only lands (in
+# workspace_code_files, history snapshot and all) when someone presses
+# Keep. Deliberately NOT a second LLM call: the plan IS the edit, so the
+# generator below is a pure function of it, and create_proposal() does
+# everything else (snapshot, store, audit, CODE_PROPOSAL_READY) exactly
+# as it does for a chat edit.
+
+# What marks a proposal as a deploy-config one: the frontend uses it to
+# send "Regenerate" back to the deploy writer (not the code_editor
+# agent, which would just have an LLM rewrite the file), and
+# _reject_superseded_deploy_proposals() below uses it to find the
+# earlier proposal a re-propose replaces.
+DEPLOY_CONFIG_GENERATOR = "deploy_config_writer"
+
+# `reason` is model-written free text; a stored copy only needs to be
+# long enough to show in a card, not unbounded jsonb.
+_DEPLOY_REASON_MAX_CHARS = 500
+
+
+def _deploy_plan_file(plan: dict) -> tuple[str, str]:
+    """(config_filename, config_content) out of a deploy_config_writer
+    plan, or ValueError. The path's own SHAPE (no `..`, not absolute,
+    allowed characters) is checked later by workspace_code_files.get_file()
+    inside create_proposal(), same as every other proposal path — only
+    presence and type are checked here."""
+    if not isinstance(plan, dict):
+        raise ValueError("deploy plan must be a dict")
+    path = plan.get("config_filename")
+    content = plan.get("config_content")
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("deploy plan has no config_filename")
+    if not isinstance(content, str):
+        raise ValueError("deploy plan has no config_content")
+    return path, content
+
+
+def _deploy_generate_edit(plan: dict):
+    """Returns a `generate_edit` (the four-argument contract every
+    generator here implements) that hands back `plan`'s file as-is.
+    `create` when nothing is saved at that path yet, `replace` when a
+    file already is — the same op split _stub_generate_edit() makes, so
+    the review UI draws it as a new file or as a diff accordingly."""
+    path, content = _deploy_plan_file(plan)
+    platform = str(plan.get("platform") or "deploy")[:60]
+    reason = plan.get("reason")
+    reason = reason[:_DEPLOY_REASON_MAX_CHARS] if isinstance(reason, str) else None
+
+    def generate(ws_id, instruction, refs, current_files):
+        op = "create" if current_files[path]["version"] == 0 else "replace"
+        verb = "Add" if op == "create" else "Update"
+        return {
+            "summary": f"{verb} {platform} deploy config ({path})",
+            "files": [{"path": path, "op": op, "content": content}],
+            "model_meta": {
+                "generator": DEPLOY_CONFIG_GENERATOR,
+                "platform": platform,
+                "config_filename": path,
+                "reason": reason,
+            },
+        }
+
+    return generate
+
+
+def _reject_superseded_deploy_proposals(ws_id: str, keep_id: str, user_id: str) -> None:
+    """A re-propose replaces the earlier deploy proposal — the same
+    "each call overwrites the prior proposal" semantics
+    api/routes/deploy.py's propose route already documents for the
+    memory-bus plan. Every OTHER pending deploy-config proposal in this
+    workspace is rejected through the normal resolve_proposal() path (no
+    decisions -> every file undone -> status 'rejected', audited, and
+    CODE_PROPOSAL_RESOLVED emitted, so open trays drop it live).
+
+    Matched on the generator tag alone, not on path: the writer picks
+    exactly ONE platform per plan, so a re-propose that switches host
+    (render.yaml -> fly.toml) must retire the render.yaml proposal too.
+    A pending proposal from a chat edit that happens to touch the same
+    file is left alone — that one belongs to whoever asked for it, and
+    resolve_proposal()'s base_version check already makes whichever Keep
+    comes second a clean 'stale'."""
+    for old in list_proposals(ws_id, status="pending"):
+        if old["id"] == keep_id:
+            continue
+        if (old.get("model_meta") or {}).get("generator") != DEPLOY_CONFIG_GENERATOR:
+            continue
+        try:
+            resolve_proposal(ws_id, old["id"], [], user_id)
+        except (FileNotFoundError, ValueError):
+            # Resolved or deleted by someone else between the list and
+            # here — nothing left to supersede.
+            continue
+
+
+def create_deploy_config_proposal(ws_id: str, plan: dict, session_id: str | None,
+                                   user_id: str) -> dict:
+    """Stores `plan` (agents/deploy_config_writer.py's output) as a
+    pending proposal and returns it — see this section's header. Writes
+    nothing to workspace_code_files: Keep (resolve_proposal()) is still
+    the only path that does.
+
+    Raises ValueError for a plan with no usable file (missing
+    filename/content, or a path workspace_code_files rejects) — a plan
+    problem, not a store problem, so the caller decides what to do with
+    it (the deploy route reports it alongside the plan instead of
+    failing the whole propose call).
+
+    Earlier PENDING deploy-config proposals in the workspace are
+    rejected once the new one exists (see
+    _reject_superseded_deploy_proposals()) — after, not before, so a
+    failure creating the new one never costs the person the old one."""
+    _deploy_plan_file(plan)  # fail fast, before any DB work
+    path = plan["config_filename"]
+    platform = str(plan.get("platform") or "deploy")[:60]
+    proposal = create_proposal(
+        ws_id,
+        f"Propose {platform} deploy config ({path})",
+        [{"kind": "file", "path": path, "provider": "cloud"}],
+        session_id,
+        user_id,
+        generate_edit=_deploy_generate_edit(plan),
+    )
+    if proposal["status"] == "pending":
+        _reject_superseded_deploy_proposals(ws_id, proposal["id"], user_id)
+    return proposal
 
 
 def list_proposals(ws_id: str, status: str | None = None) -> list[dict]:

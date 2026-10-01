@@ -30,6 +30,15 @@ real endpoints, since it needs a user-supplied API key and an explicit
 URL (agents/deploy_agent.py's trigger_live_deploy() has no real
 deployed URL to read automatically yet -- see that module's
 docstring).
+
+W8.5 (Build Workbench plan): propose now ALSO files the plan as a
+pending code proposal (eo/code_proposals.py's
+create_deploy_config_proposal()) when the session belongs to a
+workspace, so the config file is reviewed with the same Keep/Undo flow
+as any AI edit and lands in the workspace's files only on Keep. The
+memory-bus plan and the DEPLOY_CONFIG_PROPOSED event are unchanged.
+/write below is the old unreviewed write-to-disk path and is left as it
+was; the Build tab no longer offers it for workspace-backed projects.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -38,6 +47,7 @@ from pydantic import BaseModel
 from agents import deploy_agent as deploy_agent_module
 from agents import deploy_config_writer as deploy_config_writer_agent
 from api.deps import require_auth
+from eo import chat_workspace, code_proposals
 from eo.errors import MissingDependencyError
 from memory.bus import set_app_slug
 
@@ -57,13 +67,50 @@ class UptimeRobotRegisterRequest(BaseModel):
     friendly_name: str | None = None
 
 
-@router.post("/api/deploy/{session_id}/propose", dependencies=[Depends(require_auth)])
-def deploy_propose(session_id: str, req: DeployActionRequest = DeployActionRequest()):
+@router.post("/api/deploy/{session_id}/propose")
+def deploy_propose(session_id: str, req: DeployActionRequest = DeployActionRequest(),
+                   owner_id: str = Depends(require_auth)):
     """Runs deploy_config_writer.py -- proposes a platform + config file
-    content, does NOT write anything to disk yet. Safe to call more than
-    once; each call overwrites the prior proposal."""
+    content, does NOT write anything yet. Safe to call more than once;
+    each call overwrites the prior proposal.
+
+    W8.5: the response is the plan exactly as before, plus a `proposal`
+    key -- `{id, workspace_id, status, path}` when the plan was filed
+    for review in this session's workspace, else `null` (with
+    `proposal_skipped` saying why: `no_workspace`, `fallback_plan`, or
+    the plan problem itself). Never a failure of the propose call: the
+    plan is already saved and returned either way, and a project that
+    isn't in a workspace has nowhere to review a file, which is the
+    case /write below still serves."""
     set_app_slug(session_id)
-    return deploy_config_writer_agent.run_deploy_config_writer(session_id=session_id)
+    plan = deploy_config_writer_agent.run_deploy_config_writer(session_id=session_id)
+    return {**plan, **_file_plan_for_review(plan, session_id, owner_id)}
+
+
+def _file_plan_for_review(plan: dict, session_id: str, owner_id: str) -> dict:
+    """The `proposal` / `proposal_skipped` keys deploy_propose() adds."""
+    if plan.get("fallback"):
+        # The writer's own "output wasn't valid JSON" placeholder (a
+        # one-line comment file) -- reviewing it would invite Keeping a
+        # non-config as the project's deploy config.
+        return {"proposal": None, "proposal_skipped": "fallback_plan"}
+    workspace = chat_workspace.workspace_for_chat(session_id, owner_id)
+    if not workspace:
+        return {"proposal": None, "proposal_skipped": "no_workspace"}
+    try:
+        proposal = code_proposals.create_deploy_config_proposal(
+            workspace["id"], plan, session_id, owner_id
+        )
+    except ValueError as exc:
+        return {"proposal": None, "proposal_skipped": str(exc)}
+    return {
+        "proposal": {
+            "id": proposal["id"],
+            "workspace_id": workspace["id"],
+            "status": proposal["status"],
+            "path": plan["config_filename"],
+        },
+    }
 
 
 @router.post("/api/deploy/{session_id}/write", dependencies=[Depends(require_auth)])

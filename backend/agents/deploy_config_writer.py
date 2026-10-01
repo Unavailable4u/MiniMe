@@ -159,11 +159,18 @@ def run_deploy_config_writer(session_id: str = None, tier: int = None,
         # deploy_agent.py still needs something valid to write, even if
         # the model's output didn't parse. Render.yaml is the most
         # general-purpose of the four options, so it's the safest guess.
+        # W8.5: `fallback: True` is how api/routes/deploy.py tells this
+        # placeholder apart from a real proposal -- it is NOT routed
+        # into the Keep/Undo review (a one-line comment file the person
+        # could mistakenly Keep as their deploy config). The other keys
+        # are unchanged, so deploy_agent.write_deploy_config() and the
+        # Tasks-tab Deploy card read it exactly as before.
         plan = {
             "platform": "render",
             "config_filename": "render.yaml",
             "config_content": "# fallback: deploy config writer output was not valid JSON\n",
             "reason": "fallback: could not parse a real proposal",
+            "fallback": True,
         }
 
     write(DEPLOY_CONFIG_PLAN_KEY, plan)
