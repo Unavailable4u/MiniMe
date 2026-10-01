@@ -56,6 +56,17 @@ class CodeProposalCreateRequest(BaseModel):
     session_id: str | None = None
 
 
+# W8.6: the wireframe is sent as text, not as a ref — it is not a
+# workspace file (the Wireframes sub-tab keeps it in panel_content), so
+# there is no path for a ref to point at. `html` is sanitized and capped
+# by eo/code_proposals.py's _wireframe_source(), not here, same "the eo
+# layer owns its own ValueErrors" split as the models above.
+class WireframeProposalRequest(BaseModel):
+    html: str
+    screen_label: str | None = None
+    session_id: str | None = None
+
+
 class ProposalFileDecision(BaseModel):
     path: str
     # Validated against eo/code_proposals.py's own _VALID_DECISIONS
@@ -93,6 +104,31 @@ def create_code_proposal(
     try:
         return code_proposals.create_proposal(
             ws_id, req.instruction, req.refs, req.session_id, owner_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/api/workspaces/{ws_id}/code/proposals/from-wireframe",
+    dependencies=[Depends(require_auth)],
+)
+def create_wireframe_code_proposal(
+    ws_id: str, req: WireframeProposalRequest, owner_id: str = Depends(require_auth)
+):
+    """W8.6 — "Turn this wireframe into code". Files the wireframe's HTML
+    as a PENDING proposal for index.html and returns the stored proposal
+    (same body as POST .../code/proposals), so the caller can open it in
+    the Editor's Keep/Undo review. No LLM call, so unlike the chat-edit
+    route above this returns immediately; nothing is written to the
+    project's files until the proposal is resolved with Keep.
+
+    Unusable html (empty, no markup, over the size cap) is a 400 — the
+    request is at fault and there is no proposal worth storing."""
+    _require_workspace(ws_id, owner_id)
+    try:
+        return code_proposals.create_wireframe_proposal(
+            ws_id, req.html, req.screen_label, req.session_id, owner_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
