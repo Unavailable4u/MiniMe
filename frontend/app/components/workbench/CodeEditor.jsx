@@ -60,6 +60,16 @@
 //     each external update (see detectIndentUnit() in editorUtils.js).
 //     A fixed unit would make auto-indent insert 2 spaces into a
 //     4-space Python file.
+//   - Diagnostics (W8.3b): `diagnostics` is a plain list of {line,
+//     severity, message, source?} — what the Problems panel is built
+//     from — drawn as @codemirror/lint underlines via setDiagnostics().
+//     No linter() runs here: the findings come from the server's test
+//     and scan run, so this only DISPLAYS them (setDiagnostics also
+//     turns the lint extension on by itself, and the lint state maps
+//     the marks through later edits, so they follow the text as it is
+//     typed). Lines are resolved against the document as it is when they
+//     are applied — see the effect in useCodeMirror() for the ordering
+//     that makes that the NEW text after an external update.
 
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { MessageSquareCode, Sparkles } from "lucide-react";
@@ -90,6 +100,7 @@ import { languages } from "@codemirror/language-data";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
+import { setDiagnostics } from "@codemirror/lint";
 import {
   Chunk,
   acceptChunk,
@@ -110,6 +121,7 @@ import {
 } from "../../lib/workbench/editorUtils";
 import { chunkLineStats } from "../../lib/workbench/reviewMode";
 import { pulseExtension } from "../../lib/workbench/pulse"; // W6.5
+import { toLintDiagnostics } from "../../lib/workbench/problems"; // W8.3b
 
 // Tags a transaction as coming from THIS component's own `value`-prop
 // effect (an external update), not from the person typing — read back
@@ -449,6 +461,7 @@ function useCodeMirror({
   onRangeChange,
   review,
   onReviewChange,
+  diagnostics,
 }) {
   const viewRef = useRef(null);
   const onChangeRef = useRef(onChange);
@@ -469,6 +482,11 @@ function useCodeMirror({
   const readOnlyCompartmentRef = useRef(null);
   const indentCompartmentRef = useRef(null);
   const loadTokenRef = useRef(0);
+  // W8.3b: the JSON of the diagnostics list currently drawn in THIS view
+  // ("" = none). Lets the effect below skip a re-render that hands over
+  // an equal list in a new array, instead of re-dispatching it. Reset
+  // whenever a view is created (mount effect) — see the note there.
+  const appliedDiagnosticsRef = useRef("");
 
   onChangeRef.current = onChange;
   onSaveRef.current = onSave;
@@ -492,6 +510,11 @@ function useCodeMirror({
     languageCompartmentRef.current = languageCompartment;
     readOnlyCompartmentRef.current = readOnlyCompartment;
     indentCompartmentRef.current = indentCompartment;
+    // W8.3b: a brand-new view has no diagnostics drawn. Without this a
+    // remount (React StrictMode runs this effect, its cleanup, then this
+    // effect again in development) would leave the ref saying "already
+    // applied" for a view that never got them.
+    appliedDiagnosticsRef.current = "";
 
     // W5.3: `review` is set once by the caller (ReviewPanel.jsx's own
     // ReviewEditor memoizes it on `original`, which never changes for a
@@ -629,6 +652,27 @@ function useCodeMirror({
     });
   }, [value]);
 
+  // W8.3b: draw `diagnostics` as @codemirror/lint underlines. Declared
+  // AFTER the external-value effect above on purpose: when a reload
+  // changes the text and the findings in the same render, effects run in
+  // order, so the new text is already in place when each finding's line
+  // is turned into a document range. A line the document no longer has
+  // is skipped (toLintDiagnostics()), never clamped onto another one.
+  //
+  // Equal lists are skipped via their JSON (a findings reload that found
+  // nothing new still hands over a fresh array), and an empty list when
+  // nothing was ever drawn dispatches nothing — so an editor with no
+  // findings never even switches the lint extension on.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const list = Array.isArray(diagnostics) ? diagnostics : [];
+    const key = list.length ? JSON.stringify(list) : "";
+    if (key === appliedDiagnosticsRef.current) return;
+    appliedDiagnosticsRef.current = key;
+    view.dispatch(setDiagnostics(view.state, toLintDiagnostics(view.state.doc, list)));
+  }, [diagnostics]);
+
   useEffect(() => {
     const view = viewRef.current;
     if (!view || !readOnlyCompartmentRef.current) return;
@@ -709,6 +753,11 @@ function useCodeMirror({
  *   a hunk's own Keep/Undo, or keepAll()/undoAll() below) — the shape
  *   ReviewPanel.jsx forwards straight into editorStore.js's
  *   REVIEW_FILE_UPDATE. Ignored when `review` isn't set.
+ * @param {{line: number, severity: "error"|"warning"|"info", message: string, source?: string}[]} [props.diagnostics] -
+ *   W8.3b: problems to underline, 1-based `line`s of the text in `value`
+ *   (problems.js's editorDiagnostics() builds this and decides which
+ *   findings belong to the text being shown). Replaces the previous list
+ *   each time it changes; omit or pass [] for none.
  */
 function CodeEditor(
   {
@@ -724,6 +773,7 @@ function CodeEditor(
     onRangeChange,
     review,
     onReviewChange,
+    diagnostics,
   },
   ref
 ) {
@@ -745,6 +795,7 @@ function CodeEditor(
     onRangeChange,
     review,
     onReviewChange,
+    diagnostics,
   });
 
   useImperativeHandle(

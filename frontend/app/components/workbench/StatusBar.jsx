@@ -10,8 +10,14 @@
 // provider just passes a different `providerId` ("Local folder" vs
 // "Project files") and, as of W3.1 part 2, its own "awaiting-
 // confirmation" save state alongside the ones Cloud already used.
+//
+// W8.3b: the problem counts (errors / warnings, plus info when there is
+// any) sit next to "Pending changes". Omitting `problemCounts` leaves
+// the slot out entirely — that is how a file source with no findings
+// (a local folder) opts out instead of showing a permanent "0 0".
 import { memo } from "react";
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, Info, Loader2, XCircle } from "lucide-react";
+import { summarizeProblems } from "../../lib/workbench/problems";
 
 const PROVIDER_LABELS = {
   cloud: "Project files",
@@ -47,6 +53,48 @@ function PendingChanges({ count, onClick }) {
   );
 }
 
+// The problem counts (W8.3b). A count turns red / amber only while it is
+// non-zero, so a clean project reads as quiet grey. Always a button when
+// there is somewhere to go (`onClick`), same as PendingChanges above.
+function ProblemCounts({ counts, onClick }) {
+  const { error = 0, warning = 0, info = 0 } = counts;
+  const title = summarizeProblems(counts);
+  const content = (
+    <>
+      <span className={`flex items-center gap-0.5 ${error > 0 ? "text-red-400" : ""}`}>
+        <XCircle size={10} aria-hidden="true" /> {error}
+      </span>
+      <span className={`flex items-center gap-0.5 ${warning > 0 ? "text-amber-300" : ""}`}>
+        <AlertTriangle size={10} aria-hidden="true" /> {warning}
+      </span>
+      {info > 0 && (
+        <span className="flex items-center gap-0.5">
+          <Info size={10} aria-hidden="true" /> {info}
+        </span>
+      )}
+    </>
+  );
+  const className = "flex items-center gap-2";
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        title={title}
+        aria-label={`Problems: ${title}`}
+        className={`${className} hover:text-[var(--neutral-200)]`}
+      >
+        {content}
+      </button>
+    );
+  }
+  return (
+    <span title={title} aria-label={`Problems: ${title}`} className={className}>
+      {content}
+    </span>
+  );
+}
+
 /**
  * @param {object} props
  * @param {string} props.providerId - FileProvider.id ("cloud" | "local")
@@ -57,6 +105,8 @@ function PendingChanges({ count, onClick }) {
  * @param {{line: number, col: number}|null} [props.cursor]
  * @param {number} [props.pendingCount=0] - proposals waiting for review
  * @param {() => void} [props.onPendingClick] - opens the review tray (W5.4); without it the chip is inert
+ * @param {{error: number, warning: number, info: number}} [props.problemCounts] - W8.3b: the findings that still apply; omitted = no problems slot at all
+ * @param {() => void} [props.onProblemsClick] - opens the Problems tab (W8.3b); without it the counts are inert
  * @param {boolean} [props.reserveRight] - keep the bar's right end clear for the app's floating "open chat" bubble
  */
 function StatusBar({
@@ -68,6 +118,8 @@ function StatusBar({
   cursor,
   pendingCount = 0,
   onPendingClick,
+  problemCounts,
+  onProblemsClick,
   reserveRight = false,
 }) {
   return (
@@ -107,6 +159,8 @@ function StatusBar({
           {saveState === "dirty" && <span className="text-amber-300">Unsaved changes</span>}
           {saveState === "saved" && <span>{version ? `Saved · v${version}` : "Saved"}</span>}
         </span>
+
+        {problemCounts && <ProblemCounts counts={problemCounts} onClick={onProblemsClick} />}
 
         <PendingChanges count={pendingCount} onClick={onPendingClick} />
       </div>

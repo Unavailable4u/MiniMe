@@ -11,7 +11,7 @@
 //   id                          — "cloud" | "local"; for display/logging,
 //                                  never branched on by a caller
 //   capabilities                — { write, writeNeedsConfirm, history,
-//                                    search, terminal, watch }
+//                                    search, terminal, watch, findings }
 //   list()                      — Promise<{[path]: meta}>, content-free
 //   read(path)                  — Promise<file>, content included
 //   write(path, content, opts?) — Promise<file>; opts.baseVersion is
@@ -27,6 +27,13 @@
 //                                  announces the chat run's
 //                                  write-back, see aiUpdates.js);
 //                                  returns an unsubscribe function
+//   findings()                  — W8.3b: Promise<object[]>, the scan/test
+//                                  findings behind the Problems panel,
+//                                  exactly as the server stores them
+//                                  (problems.js's normalizeFindings()
+//                                  cleans them up). Always callable;
+//                                  resolves [] where
+//                                  capabilities.findings is false.
 //
 // `history(path)` / `restore(path, version)` are included too, even
 // though W2.2's own CodeView doesn't call them yet — they're straight
@@ -105,6 +112,9 @@ export function createCloudFileProvider({ workspaceId, apiUrl }) {
       search: false, // W2.6
       terminal: false, // local-only, see W3.1
       watch: true,
+      // W8.3b: the pipeline stores its test/scan findings per cloud file
+      // (eo/code_findings.py); a local folder never goes through it.
+      findings: true,
     },
 
     async list() {
@@ -185,6 +195,29 @@ export function createCloudFileProvider({ workspaceId, apiUrl }) {
       });
       if (!res.ok) throw new Error(await parseErrorDetail(res));
       return res.json();
+    },
+
+    /**
+     * W8.3b: GET .../code/findings (api/routes/code.py) — `{findings:
+     * [{path, line, severity, message, source, file_version}]}`, empty
+     * when nothing has been found. Resolves to the bare array and leaves
+     * cleaning it up (bad rows, sorting, staleness) to problems.js, the
+     * same split list()/buildFileTree() already has.
+     *
+     * No subscription of its own, on purpose: the backend stores a run's
+     * findings BEFORE it emits code_file_updated, so refetching from the
+     * one subscribe() callback below is enough. A second subscription
+     * would cost more than it adds — pusher-js hands every
+     * pusher.subscribe(name) the SAME channel object, and the cleanup
+     * below calls pusher.unsubscribe(name), which removes that channel
+     * outright. Whichever subscriber was torn down first would take the
+     * other's events with it.
+     */
+    async findings() {
+      const res = await fetch(`${base}/findings`, { headers: await authHeaders() });
+      if (!res.ok) throw new Error(await parseErrorDetail(res));
+      const body = await res.json();
+      return Array.isArray(body?.findings) ? body.findings : [];
     },
 
     /**
@@ -294,6 +327,7 @@ export function createLocalFileProvider({ workspaceId, apiUrl }) {
       search: false, // unused: Project Search (W2.6) works over any provider's read(), regardless of this flag — see projectSearch.js's own header
       terminal: true,
       watch: false, // no push channel for changes made outside this tab
+      findings: false, // W8.3b: test/scan findings are stored for cloud files only
     },
 
     /** Cheap poll target — see api/routes/local_workspace.py's own docstring. Not part of the base FileProvider contract; hooks/useDaemonStatus.js is the intended caller. */
@@ -395,6 +429,10 @@ export function createLocalFileProvider({ workspaceId, apiUrl }) {
     },
     async deny(actionId) {
       return apiPost("/deny", { action_id: actionId });
+    },
+
+    async findings() {
+      return []; // capabilities.findings is false — nothing stores findings for a local folder
     },
 
     subscribe() {

@@ -3,7 +3,9 @@
 // Workbench plan). The panel under the editor row: Problems · Console ·
 // Terminal · History. It was the CONTAINER only at first — each tab's
 // content filled in by its own later step, most already landed:
-//   Problems  → W8.x (lint / diagnostics), still empty for now
+//   Problems  → W8.3b (pipeline test/scan findings) — see
+//               EditorWorkbench.jsx's `bottomPanels.problems`
+//               (ProblemsPanel.jsx)
 //   Console   → W6.2 (preview bridge) — see EditorWorkbench.jsx's own
 //               `bottomPanels.console` (ConsolePanel.jsx)
 //   Terminal  → W3.1 (local daemon)
@@ -21,11 +23,14 @@
 //
 // W2.6: `panels[tabId]` — when the caller has real content for a tab
 // (ProjectSearchPanel for "search", HistoryPanel for "history"), it's
-// rendered in place of that tab's EMPTY_STATES entry. Problems/Console/
-// Terminal have no entry yet and keep showing their placeholder until
-// their own later step fills them in the same way. EditorWorkbench
+// rendered in place of that tab's EMPTY_STATES entry. EditorWorkbench
 // memoizes each node itself (its own header explains why) so passing
 // this object doesn't defeat the memo() below.
+//
+// W8.3b: `badges[tabId]` puts a small count beside a tab's label — the
+// Problems tab's total, toned by its worst severity. It's on the strip
+// itself (not the panel body) so it shows while the panel is collapsed
+// or another tab is open, which is when it's actually useful.
 import { memo, useId } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { BOTTOM_TABS } from "../../lib/workbench/layoutPrefs";
@@ -51,6 +56,14 @@ const EMPTY_STATES = {
   },
 };
 
+// Count pill beside a tab label (W8.3b). Same red / amber / neutral
+// reading as ProblemsPanel's row icons.
+const BADGE_TONES = {
+  error: "bg-red-500/20 text-red-300",
+  warning: "bg-amber-400/20 text-amber-200",
+  info: "bg-[var(--neutral-800)] text-[var(--neutral-300)]",
+};
+
 /**
  * @param {object} props
  * @param {boolean} props.open - false = only the tab strip shows
@@ -62,6 +75,7 @@ const EMPTY_STATES = {
  * @param {boolean} [props.resizable=true] - false on the single-pane (phone) layout, where the handle is mouse-only
  * @param {(e: import("react").MouseEvent) => void} [props.onResizeStart] - useSplitter's onHandleMouseDown
  * @param {Record<string, import("react").ReactNode>} [props.panels] - real tab content, keyed by tab id (W2.6)
+ * @param {Record<string, {count: number, tone?: "error"|"warning"|"info", title?: string}>} [props.badges] - W8.3b: a count to show beside a tab's label, keyed by tab id; nothing is drawn for a missing entry or a count of 0
  */
 function BottomPanel({
   open,
@@ -73,6 +87,7 @@ function BottomPanel({
   resizable = true,
   onResizeStart,
   panels,
+  badges,
 }) {
   const uid = useId();
   const bodyId = `${uid}-body`;
@@ -124,6 +139,8 @@ function BottomPanel({
             // Nothing is "selected" while collapsed — there's no panel
             // showing for the tab to be the label of.
             const selected = open && tab.id === activeTab;
+            const badge = badges?.[tab.id];
+            const showBadge = !!badge && badge.count > 0;
             return (
               <button
                 key={tab.id}
@@ -133,13 +150,23 @@ function BottomPanel({
                 aria-selected={selected}
                 aria-controls={open ? bodyId : undefined}
                 onClick={() => onSelectTab(tab.id)}
-                className={`shrink-0 px-3 text-[11px] uppercase tracking-wide select-none ${
+                title={showBadge ? badge.title : undefined}
+                className={`shrink-0 flex items-center gap-1.5 px-3 text-[11px] uppercase tracking-wide select-none ${
                   selected
                     ? "text-[var(--neutral-100)] shadow-[inset_0_-2px_0_var(--accent)]"
                     : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
                 }`}
               >
                 {tab.label}
+                {showBadge && (
+                  <span
+                    className={`rounded-full px-1.5 text-[10px] leading-4 normal-case tracking-normal ${
+                      BADGE_TONES[badge.tone] || BADGE_TONES.info
+                    }`}
+                  >
+                    {badge.count > 99 ? "99+" : badge.count}
+                  </span>
+                )}
               </button>
             );
           })}
