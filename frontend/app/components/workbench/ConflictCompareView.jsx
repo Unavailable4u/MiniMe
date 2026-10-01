@@ -18,6 +18,11 @@
 // as a convenience) — so neither side is editable and neither needs
 // revertControls.
 //
+// W8.2 reuses this for "AI updated N files" (AiUpdateToast.jsx): the
+// same two-finished-documents diff, with the labels and buttons
+// overridable. Every added prop is optional and defaults to the
+// save-conflict wording above, so the W2.5 flow renders unchanged.
+//
 // A fresh MergeView per time this opens (mount = build it, close/
 // unmount = destroy it) rather than a controlled instance kept in sync
 // across re-opens: this shows two static snapshots, not something the
@@ -58,8 +63,12 @@ function readOnlySide(doc, languageExtension) {
  * @param {string} [props.theirsUpdatedBy]
  * @param {string} props.mine - the content this save attempt actually sent
  * @param {() => void} props.onClose
- * @param {() => void} props.onReloadTheirs - "Reload theirs": discard `mine`, load `theirs`
- * @param {() => void} props.onKeepMine - "Keep mine": the next Save will overwrite `theirs`
+ * @param {() => void} [props.onReloadTheirs] - "Reload theirs": discard `mine`, load `theirs`. Omit (with onKeepMine) for a view-only compare: the footer actions are hidden.
+ * @param {() => void} [props.onKeepMine] - "Keep mine": the next Save will overwrite `theirs`
+ * @param {string} [props.theirsLabel] - W8.2: heading over the left side (default: the server's current version, with its version/author)
+ * @param {string} [props.mineLabel] - W8.2: heading over the right side (default: "Your unsaved edits")
+ * @param {string} [props.reloadLabel] - W8.2: text of the onReloadTheirs button (default "Reload theirs")
+ * @param {string} [props.keepLabel] - W8.2: text of the onKeepMine button (default "Keep mine")
  */
 export default function ConflictCompareView({
   open,
@@ -71,6 +80,10 @@ export default function ConflictCompareView({
   onClose,
   onReloadTheirs,
   onKeepMine,
+  theirsLabel,
+  mineLabel,
+  reloadLabel = "Reload theirs",
+  keepLabel = "Keep mine",
 }) {
   const containerRef = useRef(null);
 
@@ -129,33 +142,43 @@ export default function ConflictCompareView({
           below). */}
       <div className="shrink-0 grid grid-cols-2 text-[11px] text-[var(--neutral-500)] border-b border-[var(--neutral-800)]">
         <div className="px-3 py-1.5 border-r border-[var(--neutral-800)] truncate">
-          Server&apos;s current version{theirsVersion != null ? ` · v${theirsVersion}` : ""}
-          {theirsUpdatedBy ? ` · ${theirsUpdatedBy}` : ""}
+          {theirsLabel ?? (
+            <>
+              Server&apos;s current version{theirsVersion != null ? ` · v${theirsVersion}` : ""}
+              {theirsUpdatedBy ? ` · ${theirsUpdatedBy}` : ""}
+            </>
+          )}
         </div>
-        <div className="px-3 py-1.5 truncate">Your unsaved edits</div>
+        <div className="px-3 py-1.5 truncate">{mineLabel ?? "Your unsaved edits"}</div>
       </div>
 
       <div ref={containerRef} className="h-[55vh]" />
 
-      <div className="shrink-0 flex items-center justify-end gap-3 px-4 py-3 border-t border-[var(--neutral-800)] text-xs">
-        <button type="button" onClick={onClose} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
-          Cancel
-        </button>
-        <button
-          type="button"
-          onClick={onReloadTheirs}
-          className="rounded-lg border border-[var(--neutral-700)] px-3 py-1.5 font-medium hover:bg-[var(--neutral-800)]"
-        >
-          Reload theirs
-        </button>
-        <button
-          type="button"
-          onClick={onKeepMine}
-          className="rounded-lg bg-[var(--accent)] text-[var(--accent-text)] px-3 py-1.5 font-medium"
-        >
-          Keep mine
-        </button>
-      </div>
+      {(onReloadTheirs || onKeepMine) && (
+        <div className="shrink-0 flex items-center justify-end gap-3 px-4 py-3 border-t border-[var(--neutral-800)] text-xs">
+          <button type="button" onClick={onClose} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+            Cancel
+          </button>
+          {onReloadTheirs && (
+            <button
+              type="button"
+              onClick={onReloadTheirs}
+              className="rounded-lg border border-[var(--neutral-700)] px-3 py-1.5 font-medium hover:bg-[var(--neutral-800)]"
+            >
+              {reloadLabel}
+            </button>
+          )}
+          {onKeepMine && (
+            <button
+              type="button"
+              onClick={onKeepMine}
+              className="rounded-lg bg-[var(--accent)] text-[var(--accent-text)] px-3 py-1.5 font-medium"
+            >
+              {keepLabel}
+            </button>
+          )}
+        </div>
+      )}
     </ResponsiveSheet>
   );
 }

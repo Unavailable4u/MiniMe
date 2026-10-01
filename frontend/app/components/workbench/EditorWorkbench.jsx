@@ -111,10 +111,18 @@ import {
   buildDecisions,
   deletedPathsToKeep,
   dirtyOverlap,
+  fileDiffStats,
   keepAllDecisions,
   rejectAllDecisions,
   unreviewableReason,
 } from "../../lib/workbench/reviewMode";
+import {
+  buildAiUpdateEntries,
+  isPipelineWrite,
+  mergeAiUpdates,
+  planAiUpdateBaselines,
+  visibleAiUpdates,
+} from "../../lib/workbench/aiUpdates"; // W8.2
 import { useProjectSearch } from "../../hooks/useProjectSearch";
 import {
   BOTTOM_PANEL_DEFAULT_HEIGHT,
@@ -135,6 +143,7 @@ import { encodeTabFlags, planAutosave, planBufferSync } from "../../lib/workbenc
 import ConfirmDialog from "../ConfirmDialog";
 import PendingActionBar from "../PendingActionBar";
 import TerminalPanel from "../TerminalPanel";
+import AiUpdateToast from "./AiUpdateToast"; // W8.2
 import BottomPanel from "./BottomPanel";
 import CodeEditor from "./CodeEditor";
 import ConflictCompareView from "./ConflictCompareView";
@@ -335,6 +344,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // `saving`/`saveErrors` already live at.
   const [conflicts, setConflicts] = useState({});
   const [compareConflict, setCompareConflict] = useState(null); // path shown in ConflictCompareView, or null
+  // W8.2: what the "AI updated N files" toast lists (aiUpdates.js has the
+  // entry shape and why only the live buffer — not this — decides
+  // whether a row says "reloaded" or "your edits kept"), and which
+  // path's diff is open in the second ConflictCompareView below.
+  const [aiUpdates, setAiUpdates] = useState([]);
+  const [aiCompare, setAiCompare] = useState(null);
   // W3.1 part 2: {path: contentThatWasProposed} — a write_file proposal
   // is outstanding for this path and nothing has been typed since. Kept
   // as content rather than a plain boolean/Set so a further keystroke
@@ -578,6 +593,52 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   const refreshRef = useRef(refreshFromServer);
   refreshRef.current = refreshFromServer;
 
+  // W8.2: turn one pipeline write into toast entries. `baselines` were
+  // captured when the event arrived, BEFORE the refresh replaced any
+  // clean buffer (afterwards the old text is gone). The server's text
+  // is read fresh here rather than taken from the refresh: that path
+  // deliberately doesn't read dirty files at all (it only flags them
+  // stale), and a diff against your edits needs the other side. At most
+  // MAX_AI_UPDATE_FILES reads, only for files that are actually open.
+  // A failed read just leaves that file out of the toast — the
+  // reload / stale-flag handling above it already ran regardless.
+  const announceAiUpdate = useCallback(
+    async (baselines) => {
+      if (!baselines.length) return;
+      const fetched = {};
+      await Promise.all(
+        baselines.map(async (b) => {
+          try {
+            fetched[b.path] = await provider.read(b.path);
+          } catch {
+            fetched[b.path] = null;
+          }
+        })
+      );
+      const entries = buildAiUpdateEntries(baselines, fetched);
+      if (entries.length) setAiUpdates((prev) => mergeAiUpdates(prev, entries));
+    },
+    [provider]
+  );
+  const announceRef = useRef(announceAiUpdate);
+  announceRef.current = announceAiUpdate;
+
+  // Declared up here, not with the other toast actions below: the
+  // save-conflict handlers further up list it in their dependency
+  // arrays, which are evaluated at render time (a later `const` would
+  // be in its temporal dead zone).
+  const dropAiUpdate = useCallback((path) => {
+    setAiUpdates((prev) => (prev.some((e) => e.path === path) ? prev.filter((e) => e.path !== path) : prev));
+    setAiCompare((prev) => (prev === path ? null : prev));
+  }, []);
+
+  // A different provider is a different set of files — nothing in the
+  // toast or its compare view refers to the new one.
+  useEffect(() => {
+    setAiUpdates([]);
+    setAiCompare(null);
+  }, [provider]);
+
   useEffect(() => {
     loadFileList();
   }, [loadFileList]);
@@ -592,8 +653,20 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // is what drives it).
   useEffect(
     () =>
-      provider.subscribe(({ filePaths }) => {
-        refreshRef.current();
+      provider.subscribe(({ filePaths, agent }) => {
+        // W8.2: only the chat run's write-back is announced (see
+        // aiUpdates.js on why a kept proposal isn't). The baselines
+        // must be read synchronously, before refreshRef's reload.
+        const baselines = isPipelineWrite(agent)
+          ? planAiUpdateBaselines({
+              paths: filePaths || [],
+              tabs: stateRef.current.tabs,
+              buffers: stateRef.current.buffers,
+            })
+          : [];
+        Promise.resolve(refreshRef.current())
+          .catch(() => {})
+          .then(() => announceRef.current(baselines));
         if (filePaths?.length) proposalFilesChanged(filePaths);
       }),
     [provider, proposalFilesChanged]
@@ -963,8 +1036,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
         return rest;
       });
       setCompareConflict((prev) => (prev === path ? null : prev));
+      dropAiUpdate(path); // W8.2: same explicit decision, made from the conflict bar instead
     },
-    [conflicts, saveSuccess]
+    [conflicts, saveSuccess, dropAiUpdate]
   );
 
   // "Keep mine" on the stale banner: hide it, and remember which server
@@ -973,7 +1047,25 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   function keepMine(path) {
     dismissedRef.current[path] = filesMetaRef.current?.[path]?.version ?? 0;
     clearStale(path);
+    dropAiUpdate(path); // W8.2: an explicit decision about this file — its toast row is settled
   }
+
+  // ---- W8.2: "AI updated N files" toast actions --------------------------
+
+  // "Use AI's": the same explicit "discard mine" the stale banner's
+  // Reload does — reloadFile's force path, never the automatic one.
+  const takeAiVersion = useCallback(
+    async (path) => {
+      await reloadFile(path, { force: true });
+      dropAiUpdate(path);
+    },
+    [reloadFile, dropAiUpdate]
+  );
+
+  const dismissAllAiUpdates = useCallback(() => {
+    setAiUpdates([]);
+    setAiCompare(null);
+  }, []);
 
   // ---- ZIP (moved here from the old CodeView; shown in the explorer header) ----
 
@@ -1652,6 +1744,19 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   const conflict = activePath ? conflicts[activePath] : null;
   const compare = compareConflict ? conflicts[compareConflict] : null;
 
+  // W8.2: the toast's rows, read against the buffers as they are NOW
+  // (see describeAiUpdate()). Line stats only when there's something to
+  // show, so this costs nothing on the normal keystroke path.
+  const aiUpdateItems = useMemo(
+    () =>
+      visibleAiUpdates(aiUpdates, buffers).map((item) => ({
+        ...item,
+        ...fileDiffStats(item.base, item.theirs),
+      })),
+    [aiUpdates, buffers]
+  );
+  const aiCompareItem = aiCompare ? aiUpdateItems.find((i) => i.path === aiCompare) : null;
+
   // ---- bottom panel content (W2.6) --------------------------------------
   // Each node is memoized on its OWN inputs so handing them down as a
   // `panels` object doesn't defeat BottomPanel's memo() (see that file's
@@ -1896,7 +2001,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
     <div
       ref={containerRef}
       onKeyDown={handleWorkbenchKeyDown}
-      className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
+      className="relative flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
     >
       {/* W3.1: a proposed local action (a terminal command, or — as of
           part 2 — a proposed write from Save) awaiting Confirm/Deny.
@@ -2280,6 +2385,38 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
         onClose={() => setCompareConflict(null)}
         onReloadTheirs={() => reloadConflictTheirs(compareConflict)}
         onKeepMine={() => keepMineOnConflict(compareConflict)}
+      />
+
+      {/* W8.2: "AI updated N files" — a chat run rewrote files that are
+          open. Anchored to the workbench root (made `relative` above). */}
+      <AiUpdateToast
+        items={aiUpdateItems}
+        onOpen={openFile}
+        onCompare={setAiCompare}
+        onTakeTheirs={takeAiVersion}
+        onKeepMine={keepMine}
+        onDismissOne={dropAiUpdate}
+        onDismissAll={dismissAllAiUpdates}
+      />
+
+      {/* W8.2: the toast's Compare. The same read-only side-by-side view
+          the save-conflict bar uses, with this flow's wording. Left is
+          always the AI's version. Right is yours when your edits were
+          kept (and the footer offers the two decisions), or what you
+          had before the run when the file was simply reloaded (view
+          only — History's "Restore to before AI edit" is the way back). */}
+      <ConflictCompareView
+        open={!!aiCompareItem}
+        path={aiCompareItem?.path}
+        theirs={aiCompareItem?.theirs}
+        mine={aiCompareItem?.base}
+        theirsLabel={`AI's version${aiCompareItem?.version != null ? ` · v${aiCompareItem.version}` : ""}`}
+        mineLabel={aiCompareItem?.state === "kept-yours" ? "Your unsaved edits" : "Before the AI run"}
+        reloadLabel="Use AI's"
+        keepLabel="Keep mine"
+        onClose={() => setAiCompare(null)}
+        onReloadTheirs={aiCompareItem?.state === "kept-yours" ? () => takeAiVersion(aiCompareItem.path) : undefined}
+        onKeepMine={aiCompareItem?.state === "kept-yours" ? () => keepMine(aiCompareItem.path) : undefined}
       />
 
       {/* W2.6: Cmd/Ctrl-P. */}

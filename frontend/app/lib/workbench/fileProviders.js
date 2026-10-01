@@ -21,8 +21,11 @@
 //   remove(path)                — Promise<{deleted_paths}>
 //   move(fromPath, toPath)      — Promise<file[]>
 //   mkdir(path)                 — Promise<file>
-//   subscribe(onChange)         — onChange({filePaths}) on every
-//                                  code_file_updated for this workspace;
+//   subscribe(onChange)         — onChange({filePaths, agent}) on every
+//                                  code_file_updated for this workspace
+//                                  (`agent` says who wrote: W8.2 only
+//                                  announces the chat run's
+//                                  write-back, see aiUpdates.js);
 //                                  returns an unsubscribe function
 //
 // `history(path)` / `restore(path, version)` are included too, even
@@ -63,6 +66,7 @@
 "use client";
 import { authHeaders } from "../../context/SessionContext";
 import { getPusherClient } from "../pusherClient";
+import { extractFileUpdate } from "./aiUpdates";
 
 /**
  * Thrown by write() when a `baseVersion` was supplied and the server's
@@ -201,12 +205,10 @@ export function createCloudFileProvider({ workspaceId, apiUrl }) {
       const channel = pusher.subscribe(channelName);
       const handler = (eventType, data) => {
         if (eventType !== "code_file_updated") return;
-        const filePaths = data?.file_paths?.length
-          ? data.file_paths
-          : data?.file_path
-          ? [data.file_path]
-          : [];
-        onChange({ filePaths });
+        // The message is the whole envelope — the paths are under
+        // `payload` (see aiUpdates.js's header). Reading `data.file_paths`
+        // directly, as this used to, always came back empty.
+        onChange(extractFileUpdate(data));
       };
       channel.bind_global(handler);
 
