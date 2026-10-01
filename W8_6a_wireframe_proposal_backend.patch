@@ -1,0 +1,658 @@
+diff --git a/backend/api/routes/code_edit.py b/backend/api/routes/code_edit.py
+index c9b8bd2..39f7e89 100644
+--- a/backend/api/routes/code_edit.py
++++ b/backend/api/routes/code_edit.py
+@@ -56,6 +56,17 @@ class CodeProposalCreateRequest(BaseModel):
+     session_id: str | None = None
+ 
+ 
++# W8.6: the wireframe is sent as text, not as a ref — it is not a
++# workspace file (the Wireframes sub-tab keeps it in panel_content), so
++# there is no path for a ref to point at. `html` is sanitized and capped
++# by eo/code_proposals.py's _wireframe_source(), not here, same "the eo
++# layer owns its own ValueErrors" split as the models above.
++class WireframeProposalRequest(BaseModel):
++    html: str
++    screen_label: str | None = None
++    session_id: str | None = None
++
++
+ class ProposalFileDecision(BaseModel):
+     path: str
+     # Validated against eo/code_proposals.py's own _VALID_DECISIONS
+@@ -98,6 +109,31 @@ def create_code_proposal(
+         raise HTTPException(status_code=400, detail=str(e))
+ 
+ 
++@router.post(
++    "/api/workspaces/{ws_id}/code/proposals/from-wireframe",
++    dependencies=[Depends(require_auth)],
++)
++def create_wireframe_code_proposal(
++    ws_id: str, req: WireframeProposalRequest, owner_id: str = Depends(require_auth)
++):
++    """W8.6 — "Turn this wireframe into code". Files the wireframe's HTML
++    as a PENDING proposal for index.html and returns the stored proposal
++    (same body as POST .../code/proposals), so the caller can open it in
++    the Editor's Keep/Undo review. No LLM call, so unlike the chat-edit
++    route above this returns immediately; nothing is written to the
++    project's files until the proposal is resolved with Keep.
++
++    Unusable html (empty, no markup, over the size cap) is a 400 — the
++    request is at fault and there is no proposal worth storing."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        return code_proposals.create_wireframe_proposal(
++            ws_id, req.html, req.screen_label, req.session_id, owner_id,
++        )
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++
++
+ @router.get("/api/workspaces/{ws_id}/code/proposals", dependencies=[Depends(require_auth)])
+ def list_code_proposals(
+     ws_id: str, status: str | None = None, owner_id: str = Depends(require_auth)
+diff --git a/backend/eo/code_proposals.py b/backend/eo/code_proposals.py
+index 00f8374..e5ea388 100644
+--- a/backend/eo/code_proposals.py
++++ b/backend/eo/code_proposals.py
+@@ -44,6 +44,15 @@ that ever writes it. No new table, status, route or event: the
+ proposal is tagged `model_meta.generator == "deploy_config_writer"`
+ and that tag is all that tells it apart from a chat edit.
+ 
++W8.6: a wireframe (the Build tab's Wireframes sub-tab) now enters this
++same store through create_wireframe_proposal() (below) — its HTML
++becomes a pending proposal for `index.html`, reviewed with the identical
++Keep/Undo flow. Like the deploy plan it is NOT a second LLM call: the
++wireframe already IS a self-contained HTML document, so the edit is a
++pure function of it. Tagged `model_meta.generator == "wireframe_to_code"`;
++no new table, status, event or migration (api/routes/code_edit.py adds
++the one route).
++
+ Same FakeCursor-isolatable, `eo.db`-only-touches-Postgres shape every
+ other Postgres-backed store module in this package already takes (see
+ eo/workspace_code_files.py, eo/chat_store.py) — nothing here imports
+@@ -729,14 +738,33 @@ def _deploy_generate_edit(plan: dict):
+     return generate
+ 
+ 
++def _reject_superseded_by_generator(ws_id: str, keep_id: str, user_id: str,
++                                    generator: str) -> None:
++    """Rejects every pending proposal in the workspace tagged with
++    `generator` except `keep_id`, through the normal resolve_proposal()
++    path (no decisions -> every file undone -> status 'rejected',
++    audited, CODE_PROPOSAL_RESOLVED emitted, so open trays drop it
++    live). W8.5 wrote this for the deploy writer; W8.6 reuses it for
++    wireframes — a generated proposal is superseded by the next one
++    from the same generator, and by nothing else."""
++    for old in list_proposals(ws_id, status="pending"):
++        if old["id"] == keep_id:
++            continue
++        if (old.get("model_meta") or {}).get("generator") != generator:
++            continue
++        try:
++            resolve_proposal(ws_id, old["id"], [], user_id)
++        except (FileNotFoundError, ValueError):
++            # Resolved or deleted by someone else between the list and
++            # here — nothing left to supersede.
++            continue
++
++
+ def _reject_superseded_deploy_proposals(ws_id: str, keep_id: str, user_id: str) -> None:
+     """A re-propose replaces the earlier deploy proposal — the same
+     "each call overwrites the prior proposal" semantics
+     api/routes/deploy.py's propose route already documents for the
+-    memory-bus plan. Every OTHER pending deploy-config proposal in this
+-    workspace is rejected through the normal resolve_proposal() path (no
+-    decisions -> every file undone -> status 'rejected', audited, and
+-    CODE_PROPOSAL_RESOLVED emitted, so open trays drop it live).
++    memory-bus plan. See _reject_superseded_by_generator() for how.
+ 
+     Matched on the generator tag alone, not on path: the writer picks
+     exactly ONE platform per plan, so a re-propose that switches host
+@@ -745,17 +773,7 @@ def _reject_superseded_deploy_proposals(ws_id: str, keep_id: str, user_id: str)
+     file is left alone — that one belongs to whoever asked for it, and
+     resolve_proposal()'s base_version check already makes whichever Keep
+     comes second a clean 'stale'."""
+-    for old in list_proposals(ws_id, status="pending"):
+-        if old["id"] == keep_id:
+-            continue
+-        if (old.get("model_meta") or {}).get("generator") != DEPLOY_CONFIG_GENERATOR:
+-            continue
+-        try:
+-            resolve_proposal(ws_id, old["id"], [], user_id)
+-        except (FileNotFoundError, ValueError):
+-            # Resolved or deleted by someone else between the list and
+-            # here — nothing left to supersede.
+-            continue
++    _reject_superseded_by_generator(ws_id, keep_id, user_id, DEPLOY_CONFIG_GENERATOR)
+ 
+ 
+ def create_deploy_config_proposal(ws_id: str, plan: dict, session_id: str | None,
+@@ -791,6 +809,136 @@ def create_deploy_config_proposal(ws_id: str, plan: dict, session_id: str | None
+     return proposal
+ 
+ 
++# ---------------------------------------------------------------------------
++# W8.6 — a wireframe becomes index.html through the same review
++# ---------------------------------------------------------------------------
++# wireframe_sketcher's output is already one self-contained HTML document
++# (inline CSS/JS, no external assets — see that role's brief), which is
++# exactly what a static project's index.html is, and what the Build
++# workbench's static preview (W6.1) runs. So "turn this wireframe into
++# code" does not need a model: the proposal's edit is the wireframe's own
++# HTML, filed PENDING at index.html so it only lands (history snapshot
++# and all) when someone presses Keep. Replacing an index.html that
++# already exists is allowed — it is a normal diff in the review, which is
++# the safety net — and flagged on the proposal (`replaces_existing`) so
++# the UI can say so before anyone opens it.
++#
++# Chat edits to the result then go through the ordinary code_editor
++# flow; this module only seeds the file.
++
++WIREFRAME_CODE_GENERATOR = "wireframe_to_code"
++WIREFRAME_TARGET_PATH = "index.html"
++
++# The wireframe arrives in a request body and is stored (twice: original
++# + proposed) in a jsonb row, so it is capped. A real wireframe is a few
++# KB; this only stops a runaway paste.
++_WIREFRAME_MAX_CHARS = 400_000
++_WIREFRAME_LABEL_MAX_CHARS = 80
++_WIREFRAME_DEFAULT_LABEL = "Wireframe"
++
++# wireframe_sketcher's brief asks for ONE ```html fenced block. The
++# frontend unfences before it sends, but a caller that didn't must not
++# end up with backticks as the first line of index.html.
++_WIREFRAME_FENCE_RE = re.compile(r"\A\s*```[A-Za-z0-9_-]*[ \t]*\r?\n(.*?)\r?\n?```\s*\Z", re.S)
++
++# Plan §7.3: instrumented code is NEVER persisted — `data-mm` exists only
++# in the in-memory preview copy (lib/preview/instrument.js). The frontend
++# sends the original text, so this should never match; it is the
++# backstop that keeps the preview's own bookkeeping out of a saved file
++# if a caller ever sends the instrumented copy by mistake.
++_DATA_MM_ATTR_RE = re.compile(r"""\s+data-mm\s*=\s*(?:"[^"]*"|'[^']*')""", re.I)
++
++
++def _wireframe_source(html) -> str:
++    """The text that becomes index.html: unfenced, `data-mm`-free,
++    newline-terminated. ValueError for anything that isn't a usable
++    document — a request problem, so create_wireframe_proposal() raises
++    it before any row exists (the route turns it into a 400)."""
++    if not isinstance(html, str):
++        raise ValueError("wireframe html must be a string")
++    text = html.strip()
++    fenced = _WIREFRAME_FENCE_RE.match(text)
++    if fenced:
++        text = fenced.group(1).strip()
++    text = _DATA_MM_ATTR_RE.sub("", text)
++    if not text:
++        raise ValueError("wireframe html is empty")
++    if "<" not in text:
++        raise ValueError("wireframe html has no markup")
++    if len(text) > _WIREFRAME_MAX_CHARS:
++        raise ValueError(f"wireframe html exceeds {_WIREFRAME_MAX_CHARS} characters")
++    return text + "\n"
++
++
++def _wireframe_label(label) -> str:
++    """A one-line display name for the card / tray / summary. Whitespace
++    (newlines included) is collapsed and the length capped, because this
++    is client text that ends up in a stored summary and an audit-adjacent
++    instruction string."""
++    if not isinstance(label, str):
++        return _WIREFRAME_DEFAULT_LABEL
++    cleaned = " ".join(label.split())[:_WIREFRAME_LABEL_MAX_CHARS].strip()
++    return cleaned or _WIREFRAME_DEFAULT_LABEL
++
++
++def _wireframe_generate_edit(source: str, label: str):
++    """Returns a `generate_edit` (the four-argument contract every
++    generator here implements) that hands back `source` as
++    WIREFRAME_TARGET_PATH. `create` when nothing is saved there yet,
++    `replace` when something is — the same split _deploy_generate_edit()
++    makes, so the review draws a new file or a diff accordingly."""
++    path = WIREFRAME_TARGET_PATH
++
++    def generate(ws_id, instruction, refs, current_files):
++        replaces = current_files[path]["version"] != 0
++        verb = "Replace" if replaces else "Add"
++        return {
++            "summary": f"{verb} {path} from wireframe: {label}",
++            "files": [{"path": path, "op": "replace" if replaces else "create",
++                       "content": source}],
++            "model_meta": {
++                "generator": WIREFRAME_CODE_GENERATOR,
++                "screen_label": label,
++                "target_path": path,
++                "replaces_existing": replaces,
++            },
++        }
++
++    return generate
++
++
++def create_wireframe_proposal(ws_id: str, html, screen_label, session_id: str | None,
++                              user_id: str) -> dict:
++    """Stores `html` (a wireframe) as a pending proposal for
++    WIREFRAME_TARGET_PATH and returns it — see this section's header.
++    Writes nothing to workspace_code_files: Keep (resolve_proposal()) is
++    still the only path that does.
++
++    Raises ValueError for unusable html (not a string, empty, no markup,
++    over the size cap) before any DB work, same fail-fast shape as
++    create_deploy_config_proposal().
++
++    Earlier PENDING wireframe proposals in the workspace are rejected
++    once the new one exists (see _reject_superseded_by_generator()) —
++    after, not before, so a failure creating the new one never costs the
++    person the old one. A proposal from a chat edit that also touches
++    index.html is left alone: resolve_proposal()'s base_version check
++    already makes whichever Keep comes second a clean 'stale'."""
++    source = _wireframe_source(html)
++    label = _wireframe_label(screen_label)
++    proposal = create_proposal(
++        ws_id,
++        f'Turn the wireframe "{label}" into {WIREFRAME_TARGET_PATH}',
++        [{"kind": "file", "path": WIREFRAME_TARGET_PATH, "provider": "cloud"}],
++        session_id,
++        user_id,
++        generate_edit=_wireframe_generate_edit(source, label),
++    )
++    if proposal["status"] == "pending":
++        _reject_superseded_by_generator(ws_id, proposal["id"], user_id, WIREFRAME_CODE_GENERATOR)
++    return proposal
++
++
+ def list_proposals(ws_id: str, status: str | None = None) -> list[dict]:
+     """GET .../code/proposals[?status=pending] — most recent first.
+     W5.4's pending tray ("the tray is the source of truth... populated
+diff --git a/backend/tests/unit/test_api_routes_code_edit_wireframe.py b/backend/tests/unit/test_api_routes_code_edit_wireframe.py
+new file mode 100644
+index 0000000..7562b48
+--- /dev/null
++++ b/backend/tests/unit/test_api_routes_code_edit_wireframe.py
+@@ -0,0 +1,123 @@
++"""
++tests/unit/test_api_routes_code_edit_wireframe.py — W8.6.
++
++Route-level coverage for api/routes/code_edit.py's
++POST /api/workspaces/{ws_id}/code/proposals/from-wireframe — the half of
++W8.6 that tests/unit/test_eo_code_proposals_wireframe.py (the store) can't
++reach: what the HTTP surface does with a request.
++
++Mounts just this one router on a throwaway FastAPI app and overrides
++require_auth (same pattern as test_api_routes_deploy_propose.py). The two
++collaborators the route calls are faked at the names the route module
++itself holds (`code_edit.chat_workspace`, `code_edit.code_proposals`), so
++nothing here touches Postgres.
++
++What matters most, worst-silent-failure first:
++
++  1. Ownership: an unknown / someone else's workspace is a 404 BEFORE the
++     proposal store is touched.
++  2. The route is authenticated — and files the proposal under the
++     authenticated caller's id, not anything from the body.
++  3. A usable wireframe returns the stored proposal as-is (the shape
++     POST .../code/proposals returns), so the same card/tray code reads it.
++  4. Unusable html is a 400 with the store's own message, not a 500 and
++     not a stored row.
++"""
++import pytest
++from fastapi import FastAPI
++from starlette.testclient import TestClient
++
++import api.routes.code_edit as code_edit
++from api.deps import require_auth
++
++OWNER_ID = "owner_1"
++WS = "ws_1"
++URL = f"/api/workspaces/{WS}/code/proposals/from-wireframe"
++HTML = "<!doctype html><html><body><button>Go</button></body></html>"
++
++
++@pytest.fixture
++def calls():
++    return {"workspace": [], "create": []}
++
++
++@pytest.fixture
++def wired(monkeypatch, calls):
++    state = {
++        "workspace_missing": False,
++        "create": lambda *a: {"id": "prop_1", "status": "pending", "files": []},
++    }
++
++    def fake_get_workspace(ws_id, owner_id):
++        calls["workspace"].append((ws_id, owner_id))
++        if state["workspace_missing"]:
++            raise FileNotFoundError(ws_id)
++        return {"id": ws_id}
++
++    def fake_create(ws_id, html, screen_label, session_id, user_id):
++        calls["create"].append((ws_id, html, screen_label, session_id, user_id))
++        return state["create"](ws_id, html, screen_label, session_id, user_id)
++
++    monkeypatch.setattr(code_edit.chat_workspace, "get_workspace", fake_get_workspace)
++    monkeypatch.setattr(code_edit.code_proposals, "create_wireframe_proposal", fake_create)
++    return state
++
++
++@pytest.fixture
++def client():
++    app = FastAPI()
++    app.include_router(code_edit.router)
++    app.dependency_overrides[require_auth] = lambda: OWNER_ID
++    return TestClient(app)
++
++
++class TestFiled:
++    def test_returns_the_stored_proposal_as_is(self, client, wired):
++        wired["create"] = lambda *a: {"id": "prop_9", "status": "pending", "files": [{"path": "index.html"}]}
++        resp = client.post(URL, json={"html": HTML})
++        assert resp.status_code == 200
++        assert resp.json() == {"id": "prop_9", "status": "pending", "files": [{"path": "index.html"}]}
++
++    def test_passes_the_body_fields_through_and_files_under_the_callers_id(self, client, wired, calls):
++        client.post(URL, json={"html": HTML, "screen_label": "Login", "session_id": "chat_7"})
++        assert calls["create"] == [(WS, HTML, "Login", "chat_7", OWNER_ID)]
++
++    def test_label_and_session_are_optional(self, client, wired, calls):
++        assert client.post(URL, json={"html": HTML}).status_code == 200
++        assert calls["create"] == [(WS, HTML, None, None, OWNER_ID)]
++
++    def test_a_failed_generation_row_is_still_a_200(self, client, wired):
++        # create_proposal() stores status='failed' rows rather than raising;
++        # the route must not turn that into an error.
++        wired["create"] = lambda *a: {"id": "prop_2", "status": "failed", "files": []}
++        resp = client.post(URL, json={"html": HTML})
++        assert resp.status_code == 200
++        assert resp.json()["status"] == "failed"
++
++
++class TestRejected:
++    def test_unknown_workspace_is_a_404_before_the_store_is_touched(self, client, wired, calls):
++        wired["workspace_missing"] = True
++        resp = client.post(URL, json={"html": HTML})
++        assert resp.status_code == 404
++        assert calls["workspace"] == [(WS, OWNER_ID)]  # scoped to the caller
++        assert calls["create"] == []
++
++    def test_unusable_html_is_a_400_with_the_stores_message(self, client, wired):
++        def boom(*a):
++            raise ValueError("wireframe html is empty")
++        wired["create"] = boom
++        resp = client.post(URL, json={"html": "   "})
++        assert resp.status_code == 400
++        assert resp.json()["detail"] == "wireframe html is empty"
++
++    def test_missing_html_is_a_422(self, client, wired, calls):
++        assert client.post(URL, json={"screen_label": "x"}).status_code == 422
++        assert calls["create"] == []
++
++    def test_the_route_is_authenticated(self, wired, calls):
++        app = FastAPI()
++        app.include_router(code_edit.router)  # no dependency override
++        resp = TestClient(app).post(URL, json={"html": HTML})
++        assert resp.status_code in (401, 403)
++        assert calls["create"] == []
+diff --git a/backend/tests/unit/test_eo_code_proposals_wireframe.py b/backend/tests/unit/test_eo_code_proposals_wireframe.py
+new file mode 100644
+index 0000000..3d7cce9
+--- /dev/null
++++ b/backend/tests/unit/test_eo_code_proposals_wireframe.py
+@@ -0,0 +1,255 @@
++"""
++tests/unit/test_eo_code_proposals_wireframe.py — W8.6.
++
++Covers eo/code_proposals.py's create_wireframe_proposal(): a wireframe's
++HTML becoming an ordinary pending proposal for index.html, and then
++behaving like every other proposal.
++
++What matters most, worst-silent-failure first:
++
++  1. Creating the proposal writes NOTHING to workspace_code_files — only
++     resolve_proposal()'s Keep does. (The whole point of routing it
++     through the review.)
++  2. The preview's own bookkeeping never reaches a saved file: a stray
++     `data-mm` attribute is stripped, and a ```html fence is removed, so
++     index.html is the wireframe and nothing else (plan §7.3).
++  3. Unusable html raises ValueError BEFORE any row is stored.
++  4. Overwriting an existing index.html is a `replace` against what was
++     saved, flagged `replaces_existing` for the UI — and Keep on it is
++     a normal base_version-checked write.
++  5. A re-send supersedes the earlier pending WIREFRAME proposal and
++     nothing else (not a chat edit, not a deploy config).
++  6. The proposal is tagged model_meta.generator == "wireframe_to_code"
++     and its event payload is ids/status only (Pusher's 10,240-byte cap).
++
++Isolation: the same in-memory workspace_code_proposals stand-in and fake
++workspace file store test_eo_code_proposals_deploy.py builds (its `store`
++fixture), so create/list/resolve all run for real.
++"""
++import pytest
++
++from eo import code_proposals
++from relay.emitter import EventType
++from tests.unit.test_eo_code_proposals_deploy import FLY_PLAN, store  # noqa: F401  (fixture)
++
++WS = "ws_1"
++USER = "user_1"
++SESSION = "chat_1"
++
++HTML = (
++    "<!doctype html>\n<html><head><title>Login</title></head>\n"
++    "<body><button class=\"btn\">Sign in</button></body></html>"
++)
++
++
++def _propose(html=HTML, label="Login screen", session=SESSION):
++    return code_proposals.create_wireframe_proposal(WS, html, label, session, USER)
++
++
++# ---------------------------------------------------------------------------
++# 1. The wireframe becomes a pending proposal for index.html; nothing is written
++# ---------------------------------------------------------------------------
++class TestCreate:
++    def test_new_project_gets_a_pending_create_with_the_wireframe(self, store):
++        proposal = _propose()
++        assert proposal["status"] == "pending"
++        assert proposal["session_id"] == SESSION
++        assert proposal["summary"] == "Add index.html from wireframe: Login screen"
++        [f] = proposal["files"]
++        assert f["path"] == "index.html"
++        assert f["op"] == "create"
++        assert f["base_version"] == 0
++        assert f["original"] == ""
++        assert f["proposed"] == HTML + "\n"
++
++    def test_creating_writes_nothing_to_the_workspace_files(self, store):
++        _propose()
++        assert store.writes == []
++        assert store.deletes == []
++
++    def test_existing_index_html_is_a_replace_against_what_was_saved(self, store):
++        store.files["index.html"] = {"version": 4, "content": "<p>real app</p>\n"}
++        proposal = _propose()
++        [f] = proposal["files"]
++        assert f["op"] == "replace"
++        assert f["base_version"] == 4
++        assert f["original"] == "<p>real app</p>\n"
++        assert f["proposed"] == HTML + "\n"
++        assert proposal["summary"] == "Replace index.html from wireframe: Login screen"
++        assert proposal["model_meta"]["replaces_existing"] is True
++
++    def test_tagged_so_the_ui_can_tell_it_from_a_chat_edit(self, store):
++        meta = _propose()["model_meta"]
++        assert meta["generator"] == code_proposals.WIREFRAME_CODE_GENERATOR == "wireframe_to_code"
++        assert meta["screen_label"] == "Login screen"
++        assert meta["target_path"] == "index.html"
++        assert meta["replaces_existing"] is False
++
++    def test_stored_ref_is_index_html(self, store):
++        [ref] = _propose()["refs"]
++        assert ref["kind"] == "file"
++        assert ref["path"] == "index.html"
++
++    def test_instruction_names_the_wireframe(self, store):
++        assert _propose()["instruction"] == 'Turn the wireframe "Login screen" into index.html'
++
++    def test_session_id_is_optional(self, store):
++        assert _propose(session=None)["session_id"] is None
++
++    def test_ready_event_and_audit_follow_the_normal_proposal_flow(self, store):
++        proposal = _propose()
++        assert store.audits == [("code_proposal.create",
++                                 {"proposal_id": proposal["id"], "status": "pending",
++                                  "file_count": 1})]
++        [(event, payload)] = store.events
++        assert event == EventType.CODE_PROPOSAL_READY
++        # ids/status only — never file content (Pusher's byte cap)
++        assert payload == {"workspace_id": WS, "proposal_id": proposal["id"], "status": "pending"}
++
++
++# ---------------------------------------------------------------------------
++# 2. What ends up in the file: the wireframe, and only the wireframe
++# ---------------------------------------------------------------------------
++class TestSource:
++    def test_fenced_html_block_is_unfenced(self, store):
++        assert _propose("```html\n" + HTML + "\n```")["files"][0]["proposed"] == HTML + "\n"
++
++    def test_fence_with_no_language_is_unfenced_too(self, store):
++        assert _propose("```\n<p>x</p>\n```\n")["files"][0]["proposed"] == "<p>x</p>\n"
++
++    def test_a_fence_inside_the_document_is_left_alone(self, store):
++        # Only a fence wrapping the WHOLE text is the model's output wrapper.
++        html = "<pre>```js\nlet a = 1;\n```</pre>"
++        assert _propose(html)["files"][0]["proposed"] == html + "\n"
++
++    @pytest.mark.parametrize("html, expected", [
++        ('<div data-mm="wireframe.html:3:0:3:20">hi</div>', "<div>hi</div>"),
++        ("<div data-mm='wireframe.html:3:0:3:20' class=\"a\">hi</div>", '<div class="a">hi</div>'),
++        ('<div class="a"\n     data-mm="index.html:1:0:1:9">hi</div>', '<div class="a">hi</div>'),
++        ('<p DATA-MM="x:1:0:1:5">a</p><p data-mm="x:2:0:2:5">b</p>', "<p>a</p><p>b</p>"),
++    ])
++    def test_preview_source_attributes_never_reach_a_saved_file(self, store, html, expected):
++        assert _propose(html)["files"][0]["proposed"] == expected + "\n"
++
++    def test_similarly_named_attributes_are_kept(self, store):
++        html = '<div data-mmx="1" data-mm-extra="2">hi</div>'
++        assert _propose(html)["files"][0]["proposed"] == html + "\n"
++
++    def test_text_that_already_ends_in_a_newline_gets_exactly_one(self, store):
++        assert _propose("<p>x</p>\n\n\n")["files"][0]["proposed"] == "<p>x</p>\n"
++
++
++# ---------------------------------------------------------------------------
++# 3. Bad input fails before any row exists
++# ---------------------------------------------------------------------------
++class TestBadInput:
++    @pytest.mark.parametrize("html", [
++        "", "   \n\t ", "```html\n\n```", "just words, no markup", None, 42, ["<p>x</p>"],
++    ])
++    def test_unusable_html_raises_and_stores_nothing(self, store, html):
++        with pytest.raises(ValueError):
++            _propose(html)
++        assert store.db.rows == []
++        assert store.events == []
++        assert store.audits == []
++
++    def test_oversize_html_raises_and_stores_nothing(self, store):
++        too_big = "<p>" + "x" * code_proposals._WIREFRAME_MAX_CHARS + "</p>"
++        with pytest.raises(ValueError, match="exceeds"):
++            _propose(too_big)
++        assert store.db.rows == []
++
++    def test_html_exactly_at_the_cap_is_accepted(self, store):
++        body = "x" * (code_proposals._WIREFRAME_MAX_CHARS - len("<p></p>"))
++        assert _propose(f"<p>{body}</p>")["status"] == "pending"
++
++
++class TestLabel:
++    @pytest.mark.parametrize("label, expected", [
++        (None, "Wireframe"),
++        ("", "Wireframe"),
++        ("   ", "Wireframe"),
++        (7, "Wireframe"),
++        ("  Login \n screen\t ", "Login screen"),
++        ("x" * 500, "x" * 80),
++    ])
++    def test_label_is_one_clean_capped_line(self, store, label, expected):
++        proposal = _propose(label=label)
++        assert proposal["model_meta"]["screen_label"] == expected
++        assert "\n" not in proposal["summary"]
++        assert "\n" not in proposal["instruction"]
++
++
++# ---------------------------------------------------------------------------
++# 4. Keep is a normal, version-checked write
++# ---------------------------------------------------------------------------
++class TestResolve:
++    def test_keep_writes_index_html_as_a_proposal_snapshot(self, store):
++        proposal = _propose()
++        code_proposals.resolve_proposal(
++            WS, proposal["id"], [{"path": "index.html", "decision": "keep"}], USER)
++        assert store.writes == [{
++            "path": "index.html", "content": HTML + "\n", "base_version": 0, "source": "proposal",
++        }]
++
++    def test_undo_writes_nothing(self, store):
++        proposal = _propose()
++        code_proposals.resolve_proposal(
++            WS, proposal["id"], [{"path": "index.html", "decision": "undo"}], USER)
++        assert store.writes == []
++
++    def test_keep_after_index_html_changed_underneath_is_stale(self, store):
++        store.files["index.html"] = {"version": 1, "content": "old\n"}
++        proposal = _propose()
++        store.files["index.html"] = {"version": 2, "content": "someone else's edit\n"}
++        with pytest.raises(code_proposals.ProposalStaleError):
++            code_proposals.resolve_proposal(
++                WS, proposal["id"], [{"path": "index.html", "decision": "keep"}], USER)
++        assert store.writes == []
++
++
++# ---------------------------------------------------------------------------
++# 5. A re-send supersedes the earlier wireframe proposal, and only that one
++# ---------------------------------------------------------------------------
++class TestSupersede:
++    def test_second_send_rejects_the_first(self, store):
++        first = _propose(label="v1")
++        second = _propose(label="v2")
++        rows = {r["id"]: r for r in store.db.rows}
++        assert rows[first["id"]]["status"] == "rejected"
++        assert rows[first["id"]]["resolved_at"] is not None
++        assert rows[second["id"]]["status"] == "pending"
++        assert store.writes == []
++
++    def test_a_chat_edit_proposal_is_left_alone(self, store):
++        chat = code_proposals.create_proposal(
++            WS, "make it blue", [{"kind": "file", "path": "index.html", "provider": "cloud"}],
++            SESSION, USER,
++            generate_edit=lambda ws, instr, refs, cur: {
++                "summary": "blue", "files": [{"path": "index.html", "op": "create", "content": "<b>"}]},
++        )
++        wireframe = _propose()
++        rows = {r["id"]: r for r in store.db.rows}
++        assert rows[chat["id"]]["status"] == "pending"
++        assert rows[wireframe["id"]]["status"] == "pending"
++
++    def test_a_deploy_config_proposal_is_left_alone(self, store):
++        deploy = code_proposals.create_deploy_config_proposal(WS, FLY_PLAN, SESSION, USER)
++        wireframe = _propose()
++        rows = {r["id"]: r for r in store.db.rows}
++        assert rows[deploy["id"]]["status"] == "pending"
++        assert rows[wireframe["id"]]["status"] == "pending"
++
++    def test_a_deploy_re_propose_does_not_reject_a_wireframe_proposal(self, store):
++        wireframe = _propose()
++        code_proposals.create_deploy_config_proposal(WS, FLY_PLAN, SESSION, USER)
++        code_proposals.create_deploy_config_proposal(WS, FLY_PLAN, SESSION, USER)
++        rows = {r["id"]: r for r in store.db.rows}
++        assert rows[wireframe["id"]]["status"] == "pending"
++
++    def test_a_bad_resend_never_costs_the_person_the_earlier_proposal(self, store):
++        first = _propose()
++        with pytest.raises(ValueError):
++            _propose("")
++        rows = {r["id"]: r for r in store.db.rows}
++        assert rows[first["id"]]["status"] == "pending"

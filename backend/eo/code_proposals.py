@@ -44,6 +44,15 @@ that ever writes it. No new table, status, route or event: the
 proposal is tagged `model_meta.generator == "deploy_config_writer"`
 and that tag is all that tells it apart from a chat edit.
 
+W8.6: a wireframe (the Build tab's Wireframes sub-tab) now enters this
+same store through create_wireframe_proposal() (below) — its HTML
+becomes a pending proposal for `index.html`, reviewed with the identical
+Keep/Undo flow. Like the deploy plan it is NOT a second LLM call: the
+wireframe already IS a self-contained HTML document, so the edit is a
+pure function of it. Tagged `model_meta.generator == "wireframe_to_code"`;
+no new table, status, event or migration (api/routes/code_edit.py adds
+the one route).
+
 Same FakeCursor-isolatable, `eo.db`-only-touches-Postgres shape every
 other Postgres-backed store module in this package already takes (see
 eo/workspace_code_files.py, eo/chat_store.py) — nothing here imports
@@ -729,14 +738,33 @@ def _deploy_generate_edit(plan: dict):
     return generate
 
 
+def _reject_superseded_by_generator(ws_id: str, keep_id: str, user_id: str,
+                                    generator: str) -> None:
+    """Rejects every pending proposal in the workspace tagged with
+    `generator` except `keep_id`, through the normal resolve_proposal()
+    path (no decisions -> every file undone -> status 'rejected',
+    audited, CODE_PROPOSAL_RESOLVED emitted, so open trays drop it
+    live). W8.5 wrote this for the deploy writer; W8.6 reuses it for
+    wireframes — a generated proposal is superseded by the next one
+    from the same generator, and by nothing else."""
+    for old in list_proposals(ws_id, status="pending"):
+        if old["id"] == keep_id:
+            continue
+        if (old.get("model_meta") or {}).get("generator") != generator:
+            continue
+        try:
+            resolve_proposal(ws_id, old["id"], [], user_id)
+        except (FileNotFoundError, ValueError):
+            # Resolved or deleted by someone else between the list and
+            # here — nothing left to supersede.
+            continue
+
+
 def _reject_superseded_deploy_proposals(ws_id: str, keep_id: str, user_id: str) -> None:
     """A re-propose replaces the earlier deploy proposal — the same
     "each call overwrites the prior proposal" semantics
     api/routes/deploy.py's propose route already documents for the
-    memory-bus plan. Every OTHER pending deploy-config proposal in this
-    workspace is rejected through the normal resolve_proposal() path (no
-    decisions -> every file undone -> status 'rejected', audited, and
-    CODE_PROPOSAL_RESOLVED emitted, so open trays drop it live).
+    memory-bus plan. See _reject_superseded_by_generator() for how.
 
     Matched on the generator tag alone, not on path: the writer picks
     exactly ONE platform per plan, so a re-propose that switches host
@@ -745,17 +773,7 @@ def _reject_superseded_deploy_proposals(ws_id: str, keep_id: str, user_id: str) 
     file is left alone — that one belongs to whoever asked for it, and
     resolve_proposal()'s base_version check already makes whichever Keep
     comes second a clean 'stale'."""
-    for old in list_proposals(ws_id, status="pending"):
-        if old["id"] == keep_id:
-            continue
-        if (old.get("model_meta") or {}).get("generator") != DEPLOY_CONFIG_GENERATOR:
-            continue
-        try:
-            resolve_proposal(ws_id, old["id"], [], user_id)
-        except (FileNotFoundError, ValueError):
-            # Resolved or deleted by someone else between the list and
-            # here — nothing left to supersede.
-            continue
+    _reject_superseded_by_generator(ws_id, keep_id, user_id, DEPLOY_CONFIG_GENERATOR)
 
 
 def create_deploy_config_proposal(ws_id: str, plan: dict, session_id: str | None,
@@ -788,6 +806,136 @@ def create_deploy_config_proposal(ws_id: str, plan: dict, session_id: str | None
     )
     if proposal["status"] == "pending":
         _reject_superseded_deploy_proposals(ws_id, proposal["id"], user_id)
+    return proposal
+
+
+# ---------------------------------------------------------------------------
+# W8.6 — a wireframe becomes index.html through the same review
+# ---------------------------------------------------------------------------
+# wireframe_sketcher's output is already one self-contained HTML document
+# (inline CSS/JS, no external assets — see that role's brief), which is
+# exactly what a static project's index.html is, and what the Build
+# workbench's static preview (W6.1) runs. So "turn this wireframe into
+# code" does not need a model: the proposal's edit is the wireframe's own
+# HTML, filed PENDING at index.html so it only lands (history snapshot
+# and all) when someone presses Keep. Replacing an index.html that
+# already exists is allowed — it is a normal diff in the review, which is
+# the safety net — and flagged on the proposal (`replaces_existing`) so
+# the UI can say so before anyone opens it.
+#
+# Chat edits to the result then go through the ordinary code_editor
+# flow; this module only seeds the file.
+
+WIREFRAME_CODE_GENERATOR = "wireframe_to_code"
+WIREFRAME_TARGET_PATH = "index.html"
+
+# The wireframe arrives in a request body and is stored (twice: original
+# + proposed) in a jsonb row, so it is capped. A real wireframe is a few
+# KB; this only stops a runaway paste.
+_WIREFRAME_MAX_CHARS = 400_000
+_WIREFRAME_LABEL_MAX_CHARS = 80
+_WIREFRAME_DEFAULT_LABEL = "Wireframe"
+
+# wireframe_sketcher's brief asks for ONE ```html fenced block. The
+# frontend unfences before it sends, but a caller that didn't must not
+# end up with backticks as the first line of index.html.
+_WIREFRAME_FENCE_RE = re.compile(r"\A\s*```[A-Za-z0-9_-]*[ \t]*\r?\n(.*?)\r?\n?```\s*\Z", re.S)
+
+# Plan §7.3: instrumented code is NEVER persisted — `data-mm` exists only
+# in the in-memory preview copy (lib/preview/instrument.js). The frontend
+# sends the original text, so this should never match; it is the
+# backstop that keeps the preview's own bookkeeping out of a saved file
+# if a caller ever sends the instrumented copy by mistake.
+_DATA_MM_ATTR_RE = re.compile(r"""\s+data-mm\s*=\s*(?:"[^"]*"|'[^']*')""", re.I)
+
+
+def _wireframe_source(html) -> str:
+    """The text that becomes index.html: unfenced, `data-mm`-free,
+    newline-terminated. ValueError for anything that isn't a usable
+    document — a request problem, so create_wireframe_proposal() raises
+    it before any row exists (the route turns it into a 400)."""
+    if not isinstance(html, str):
+        raise ValueError("wireframe html must be a string")
+    text = html.strip()
+    fenced = _WIREFRAME_FENCE_RE.match(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    text = _DATA_MM_ATTR_RE.sub("", text)
+    if not text:
+        raise ValueError("wireframe html is empty")
+    if "<" not in text:
+        raise ValueError("wireframe html has no markup")
+    if len(text) > _WIREFRAME_MAX_CHARS:
+        raise ValueError(f"wireframe html exceeds {_WIREFRAME_MAX_CHARS} characters")
+    return text + "\n"
+
+
+def _wireframe_label(label) -> str:
+    """A one-line display name for the card / tray / summary. Whitespace
+    (newlines included) is collapsed and the length capped, because this
+    is client text that ends up in a stored summary and an audit-adjacent
+    instruction string."""
+    if not isinstance(label, str):
+        return _WIREFRAME_DEFAULT_LABEL
+    cleaned = " ".join(label.split())[:_WIREFRAME_LABEL_MAX_CHARS].strip()
+    return cleaned or _WIREFRAME_DEFAULT_LABEL
+
+
+def _wireframe_generate_edit(source: str, label: str):
+    """Returns a `generate_edit` (the four-argument contract every
+    generator here implements) that hands back `source` as
+    WIREFRAME_TARGET_PATH. `create` when nothing is saved there yet,
+    `replace` when something is — the same split _deploy_generate_edit()
+    makes, so the review draws a new file or a diff accordingly."""
+    path = WIREFRAME_TARGET_PATH
+
+    def generate(ws_id, instruction, refs, current_files):
+        replaces = current_files[path]["version"] != 0
+        verb = "Replace" if replaces else "Add"
+        return {
+            "summary": f"{verb} {path} from wireframe: {label}",
+            "files": [{"path": path, "op": "replace" if replaces else "create",
+                       "content": source}],
+            "model_meta": {
+                "generator": WIREFRAME_CODE_GENERATOR,
+                "screen_label": label,
+                "target_path": path,
+                "replaces_existing": replaces,
+            },
+        }
+
+    return generate
+
+
+def create_wireframe_proposal(ws_id: str, html, screen_label, session_id: str | None,
+                              user_id: str) -> dict:
+    """Stores `html` (a wireframe) as a pending proposal for
+    WIREFRAME_TARGET_PATH and returns it — see this section's header.
+    Writes nothing to workspace_code_files: Keep (resolve_proposal()) is
+    still the only path that does.
+
+    Raises ValueError for unusable html (not a string, empty, no markup,
+    over the size cap) before any DB work, same fail-fast shape as
+    create_deploy_config_proposal().
+
+    Earlier PENDING wireframe proposals in the workspace are rejected
+    once the new one exists (see _reject_superseded_by_generator()) —
+    after, not before, so a failure creating the new one never costs the
+    person the old one. A proposal from a chat edit that also touches
+    index.html is left alone: resolve_proposal()'s base_version check
+    already makes whichever Keep comes second a clean 'stale'."""
+    source = _wireframe_source(html)
+    label = _wireframe_label(screen_label)
+    proposal = create_proposal(
+        ws_id,
+        f'Turn the wireframe "{label}" into {WIREFRAME_TARGET_PATH}',
+        [{"kind": "file", "path": WIREFRAME_TARGET_PATH, "provider": "cloud"}],
+        session_id,
+        user_id,
+        generate_edit=_wireframe_generate_edit(source, label),
+    )
+    if proposal["status"] == "pending":
+        _reject_superseded_by_generator(ws_id, proposal["id"], user_id, WIREFRAME_CODE_GENERATOR)
     return proposal
 
 
