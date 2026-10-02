@@ -53,7 +53,10 @@ export const config = {
   // request would be pure overhead.
   // mm-inspector.js (W7.3) is the public inspector script people load into
   // their own dev app — fetched on every reload of it, never session-relevant.
+  // pyodide/ and workers/ are the self-hosted Python runtime (~13 MB across a
+  // few files) and its worker script: static, never session-relevant, and not
+  // worth a Supabase round-trip each.
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|mm-inspector\\.js$|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|mm-inspector\\.js$|pyodide/|workers/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
