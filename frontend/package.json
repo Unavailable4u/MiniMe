@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package && node scripts/vendor-pyodide.mjs"
   },
   "dependencies": {
     "@babel/parser": "^7.29.9",
@@ -36,6 +36,7 @@
     "parse5": "^8.0.1",
     "prettier": "^3.9.8",
     "pusher-js": "^8.5.0",
+    "pyodide": "314.0.2",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-force-graph-2d": "^1.29.1",
