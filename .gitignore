@@ -40,3 +40,4 @@ backend/data
 /data/
 
 backend/.env.bak-*
+graphify-out/

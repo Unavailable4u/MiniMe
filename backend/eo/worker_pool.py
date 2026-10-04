@@ -17,20 +17,27 @@ these with its own role_tag, instead of a copy-pasted second
 implementation that could drift out of sync with this one.
 """
 
+import importlib
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.quota_sentinel import get_quota_snapshot
-from eo.registry import AGENT_CAPABILITIES
 from relay.emitter import emit_event  # NEW — CO4 patch 3
+
+AGENT_CAPABILITIES = None
 
 
 def _eligible_pool(role_tag: str) -> list:
     """Every account tagged for this role — base AND reserve accounts
     alike. Mode plays no part in who's ELIGIBLE; only in how many of
     them get used at once (see _select_workers(), below)."""
-    return [key for key, info in AGENT_CAPABILITIES.items() if role_tag in info.get("natural_roles", [])]
+    capabilities = AGENT_CAPABILITIES
+    if capabilities is None:
+        # Import dynamically on purpose to avoid the registry -> agents -> worker_pool cycle; tests monkeypatch AGENT_CAPABILITIES.
+        capabilities = importlib.import_module("eo.registry").AGENT_CAPABILITIES
+
+    return [key for key, info in capabilities.items() if role_tag in info.get("natural_roles", [])]
 
 
 def _select_workers(role_tag: str, worker_count: int, key_override=None,
