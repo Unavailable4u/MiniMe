@@ -1,0 +1,12 @@
+# Dependency metadata creates low-value graph nodes.
+**/package.json
+**/package-lock.json
+**/npm-shrinkwrap.json
+**/yarn.lock
+**/pnpm-lock.yaml
+**/bun.lockb
+**/*.lock
+
+# Generated or installed dependencies are not source architecture.
+**/node_modules/
+**/venv/
