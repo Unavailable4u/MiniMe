@@ -26,7 +26,6 @@ and the supersede path is exercised end to end rather than mocked.
 workspace_code_files is faked at get_file()/write_file() (get_file keeps
 the real _validate_file_path so a traversal path still fails loud).
 """
-from datetime import UTC, datetime
 
 import pytest
 

@@ -19,7 +19,6 @@ Prints the created chat_ids and batch_id at the end — feed the first
 one into k6's CHAT_ID env var for the pagination/cache scenarios.
 """
 import argparse
-import sys
 
 import requests
 

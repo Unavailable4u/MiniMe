@@ -31,7 +31,6 @@ which of the two possible sources of truth (dock workspace id vs. the
 task_runner-derived slug) this route should resolve against, and
 that's a design call, not a one-line fix.
 """
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI

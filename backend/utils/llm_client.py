@@ -94,6 +94,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from datetime import UTC, date, datetime
 
@@ -2440,8 +2441,6 @@ _MAX_LEDGER_WAIT_BUDGET_SECONDS = 45.0
 # shape CO3's pause_requested already uses, just written to an
 # in-process global instead of the bus (no need for cross-process
 # visibility here -- this process is the one shutting itself down).
-import threading
-
 _SHUTDOWN_REQUESTED = threading.Event()
 
 

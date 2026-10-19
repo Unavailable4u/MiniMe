@@ -48,7 +48,7 @@ from eo import (
     user_profile,  # NEW — Patch B3, silent per-account personalization
     workspace_facts,  # NEW — Part 0 §0.3, tier-3 memory
 )
-from memory.bus import incr, read, write, write_many  # incr — NEW, perf audit follow-up (#3): store/skip stats; write_many — NEW, follow-up (#3c): batched pipelined writes
+from memory.bus import incr, read, write_many  # incr — NEW, perf audit follow-up (#3): store/skip stats; write_many — NEW, follow-up (#3c): batched pipelined writes
 
 MAX_STORED_TURNS = 20      # hard cap on raw storage growth per session
 FULL_CONTEXT_TURNS = 6     # how many recent turns generation agents see

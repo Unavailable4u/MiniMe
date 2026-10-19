@@ -14,3 +14,10 @@ target-version = "py311"
 # unblock CI now; broadening this again should ship together with the
 # actual cleanup, not ahead of it.
 select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# This module borrows the `store` fixture from test_eo_code_proposals_deploy
+# (imported, not moved), so every test taking `store` as an argument looks
+# like a redefinition of an unused import to F811. That is how pytest
+# fixture injection works, not a real shadowing bug.
+"tests/unit/test_eo_code_proposals_wireframe.py" = ["F811"]

@@ -25,8 +25,6 @@ every test, same "clean shared module state between tests" discipline
 test_eo_local_workspace.py's `_clean_module_state` fixture documents
 for that module's own `_connections`/`_pending` dicts.
 """
-import asyncio
-import json
 import sys
 import textwrap
 

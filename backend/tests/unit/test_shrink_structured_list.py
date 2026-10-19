@@ -18,7 +18,6 @@ shrink functions directly -- no network, no generate_text() -- confirming:
 """
 import json
 
-import pytest
 
 from utils.llm_client import (
     DROPPABLE_CONTEXT_MARKER,
