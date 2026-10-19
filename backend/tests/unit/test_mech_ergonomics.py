@@ -16,7 +16,6 @@ for its sibling Phase E test module), so no mock_llm/fake_bus fixtures
 needed.
 """
 import eo.mech_enclosure as me
-from eo.enclosure_spec import ENCLOSURE_SPEC
 from eo.mech_ergonomics import ERGONOMIC_PRESETS
 
 _HANDHELD = {"enclosure_mode": "full", "mobility_type": "handheld"}

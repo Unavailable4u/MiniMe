@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
-      - run: pip install ruff
+      - run: pip install ruff==0.17.1
       - run: ruff check .
   daemon-test:
     # Was untested by CI entirely -- daemon/tests/ (test_config.py,
@@ -57,10 +57,9 @@ jobs:
     # timeout-minutes added for consistency with promptfoo's job below
     # (a hung/runaway step here would otherwise only stop at the
     # runner-wide default, same gap that job's own comment flagged).
-    # continue-on-error deliberately NOT added, unlike frontend-lint and
-    # promptfoo: both of those are non-blocking for a stated reason
-    # specific to them (a pre-existing lint backlog; external LLM-call
-    # flakiness that can't distinguish a real regression from
+    # continue-on-error deliberately NOT added, unlike promptfoo: that
+    # job is non-blocking for a stated reason specific to it (external
+    # LLM-call flakiness that can't distinguish a real regression from
     # infra/grading misconfiguration). daemon/tests is a small,
     # deterministic unit-test suite same as the `test` job above -- a
     # failure here means the code is actually broken, so it should keep
@@ -85,19 +84,18 @@ jobs:
     # .eslintrc.json (next/core-web-vitals) so `next lint` now runs
     # non-interactively here exactly as it would locally.
     #
-    # continue-on-error: true, same pattern as the promptfoo job below --
-    # wiring lint in surfaced a real, pre-existing backlog of
-    # react/no-unescaped-entities errors (raw apostrophes/quotes in JSX
-    # text) across a couple dozen components, not introduced by this
-    # change. Blocking the build on those today would turn every unrelated
-    # PR red for a pre-existing issue; this still runs and reports on
-    # every push so the backlog is visible and trackable, without being a
-    # hard gate until that cleanup lands separately.
+    # Blocking, like `test`/`lint`/`daemon-test`. This job used to carry
+    # continue-on-error: true because wiring lint in surfaced a backlog of
+    # react/no-unescaped-entities errors across a couple dozen
+    # components; that backlog has since been cleared (`next lint` now
+    # reports 0 errors). What remains is warnings only
+    # (react-hooks/exhaustive-deps, @next/next/no-img-element), and
+    # `next lint` exits 0 on warnings, so those stay visible in the log
+    # without failing the build. A new lint *error* now fails CI.
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -107,6 +105,34 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: CI=true npm run lint
+  frontend-test:
+    # Was entirely unwired: frontend/ has ~38 node:test files
+    # (app/{components,hooks,lib/preview,lib/workbench}/__tests__/
+    # *.test.mjs) but package.json had no "test" script and no job here
+    # ran them, so a frontend regression could only be caught by hand.
+    # They need no browser or build step -- `node --test` runs them
+    # directly (see package.json's "test" script for the glob).
+    #
+    # Same install as frontend-lint (plain `npm ci`, postinstall
+    # included: patch-package + vendor-pyodide only copy local files, no
+    # network) and the same pinned Node/actions. Deliberately blocking
+    # (no continue-on-error), same reasoning as daemon-test: a small,
+    # deterministic unit-test suite, so a failure means the code is
+    # actually broken.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.0"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
   secrets-scan:
     runs-on: ubuntu-latest
     steps:

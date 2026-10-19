@@ -17,7 +17,6 @@ Two kinds of coverage:
      the real repo tree, so these tests don't depend on (or risk
      mutating) anything actually checked in.
 """
-import os
 
 import pytest
 

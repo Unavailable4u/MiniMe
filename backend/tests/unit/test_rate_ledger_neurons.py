@@ -218,7 +218,6 @@ def test_release_reservation_trues_up_to_real_usage_when_available():
 
 def test_release_reservation_is_idempotent_against_double_release():
     ok, wait, reservation_id = rate_ledger.reserve(PROVIDER, KEY_ID, MODEL, 1000, max_output_tokens=500)
-    booked = rate_ledger.daily_neurons_used(PROVIDER, KEY_ID)
 
     rate_ledger.release_reservation(reservation_id, dispatched=False)
     assert rate_ledger.daily_neurons_used(PROVIDER, KEY_ID) == pytest.approx(0.0)

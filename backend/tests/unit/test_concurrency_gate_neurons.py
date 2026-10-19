@@ -25,9 +25,6 @@ autouse fake_bus fixture (tests/conftest.py) so these tests exercise the
 actual reserve()/release_reservation()/_gating_mode_for() code, the same
 way test_rate_ledger_neurons.py does.
 """
-import threading
-import time
-from concurrent.futures import Future
 
 import pytest
 

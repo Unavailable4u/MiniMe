@@ -22,6 +22,7 @@ patched as `workspace_code_files.write_audit` for the same "already
 bound into this module's own namespace" reason those files document.
 """
 import io
+import re
 import zipfile
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
@@ -537,8 +538,6 @@ def test_move_path_writes_a_single_summary_audit_entry(monkeypatch):
 # test here stayed green. _GrantCheckingCursor rejects exactly what the
 # migration revokes, so that class of bug fails in unit tests too.
 # ---------------------------------------------------------------------
-
-import re
 
 _REVOKED = [  # (statement regex, what migrations/0009_code_file_versions.sql says)
     (re.compile(r"^\s*update\s+workspace_code_file_versions\b", re.I | re.S),
