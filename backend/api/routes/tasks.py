@@ -18,6 +18,7 @@ import traceback
 
 import sentry_sdk
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -29,9 +30,9 @@ from agents import (
 )
 from api.deps import (  # NEW — CO5 Finding B
     _resolve_chat_or_404,
-    _verify_supabase_jwt,
     require_auth,
 )
+from api.stream_tickets import KIND_SSE, redeem_ticket
 from api.task_runner import confirm_task, preview_task, run_task, run_task_from_template
 from eo import (
     chat_store,
@@ -396,17 +397,23 @@ def request_pause(session_id: str, owner_id: str = Depends(require_auth)):
 
 
 @router.get("/api/task/{session_id}/stream")
-async def stream_answer(session_id: str, token: str = Query(None)):
+async def stream_answer(session_id: str, ticket: str = Query(None)):
     """CO5 Finding B: auth for this route can't go through the usual
     Depends(require_auth) — that dependency reads the Authorization
     header off the request (api/deps.py), but the browser's EventSource
-    API (Step 4's frontend hook) has no way to set custom headers on the
-    request it makes. Same structural problem api/server.py's
-    /ws/{session_id} WebSocket route already hit and solved: take the
-    token as a query param instead, and verify it manually with the same
-    _verify_supabase_jwt() the header path uses under the hood. Frontend
-    implication (flagged for Step 4): the EventSource URL needs
-    `?token=...` appended, not an Authorization header.
+    API has no way to set custom headers on the request it makes. Same
+    structural problem api/server.py's /ws/{session_id} WebSocket route
+    hit.
+
+    Both used to take the user's full Supabase access token as a
+    `?token=` query param, which leaks a whole-API bearer credential
+    into access logs and proxies. They now take a short-lived,
+    single-use `?ticket=` instead: the client first calls
+    POST /api/stream-ticket (normal Authorization header, kind="sse"),
+    then opens this route with the ticket it got back. The ticket is
+    redeemed atomically (api/stream_tickets.py), is bound to this exact
+    session_id, and dies after one use or ~30s. A raw access token
+    passed here is rejected -- there is no fallback.
 
     401 is a real HTTP response here (unlike the WS route, which has no
     response body and has to fake a 401 via a 4401 close code) — this is
@@ -448,9 +455,13 @@ async def stream_answer(session_id: str, token: str = Query(None)):
     got persisted, by construction (same string, not a second
     generation of it).
     """
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing token")
-    owner_id = _verify_supabase_jwt(token)
+    if not ticket:
+        raise HTTPException(status_code=401, detail="Missing ticket")
+    # redeem_ticket() is a blocking Redis round trip; keep it off the
+    # event loop.
+    owner_id = await run_in_threadpool(redeem_ticket, ticket, KIND_SSE, session_id)
+    if owner_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired ticket")
     _resolve_chat_or_404(session_id, owner_id, require_edit=False)
 
     snapshot = read(f"pending_synthesis:{session_id}", default=None)

@@ -95,6 +95,14 @@ class FakeRedis:
                 n += 1
         return n
 
+    def getdel(self, key):
+        # api/stream_tickets.py redeems single-use tickets with GETDEL:
+        # one atomic command, because get()-then-delete() would let two
+        # concurrent requests both redeem the same ticket. Like the rest
+        # of this fake it ignores `ex` TTLs -- tests assert the TTL by
+        # inspecting the set() call instead.
+        return self._store.pop(key, None)
+
     def mget(self, *keys):
         # upstash_redis.Redis.mget() is variadic (mget(*keys)) — see
         # memory/bus.py's read_many(), which calls it as redis.mget(*keys).
