@@ -1,8 +1,8 @@
 "use client";
 import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
-import { supabase } from "../lib/supabaseClient";
 import { authHeaders, authedFetch } from "../lib/authFetch";   // BUGFIX — moved out of this file, see re-export comment below
+import { requestStreamTicket, buildWsUrl } from "../lib/streamTicket";   // single-use ticket for the /ws socket instead of ?token=<jwt>
 import { useUsageStats } from "./UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent now live there
 import { useWorkspaces } from "./WorkspacesContext";   // NEW — Item 2 concern split, slice 3: workspaces/fetchWorkspaces now live there
 import { useChatList } from "./ChatListContext";   // NEW — Item 2 concern split, slice 4: chats/refreshChatList now live there (see that file's header comment for what's still deliberately NOT moved: messages/sessionId/live-run state)
@@ -614,11 +614,22 @@ export function SessionProvider({ children }) {
     let socket = null;
     let cancelled = false;
     (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token || cancelled) return;   // no token yet, or effect already torn down while we were awaiting getSession()
-      const wsUrl = `${API_URL.replace(/^http/, "ws")}/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
-      const ws = new WebSocket(wsUrl);
+      // The browser WebSocket API can't send an Authorization header,
+      // and putting the access token in the URL leaks it into access
+      // logs and proxies. So: mint a short-lived, single-use ticket
+      // first (normal Authorization header) and connect with
+      // `?ticket=...` -- see lib/streamTicket.js. Every connect mints
+      // its own; if a reconnect strategy is added here later it must
+      // mint a fresh ticket per attempt, since a ticket is spent on use.
+      const ticket = await requestStreamTicket({
+        apiUrl: API_URL,
+        kind: "ws",
+        sessionId,
+        fetchFn: authedFetch,
+        getHeaders: authHeaders,
+      });
+      if (!ticket || cancelled) return;   // not signed in yet, or effect already torn down while we were awaiting the ticket
+      const ws = new WebSocket(buildWsUrl(API_URL, sessionId, ticket));
       ws.onmessage = (evt) => {
         let event;
         try {

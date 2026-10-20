@@ -59,14 +59,12 @@ def _get_jwk_client() -> PyJWKClient:
 
 def _verify_supabase_jwt(token: str) -> str:
     """The actual decode-and-verify logic behind require_auth() below.
-    Kept as a bare token->user_id function so the WebSocket handshake in
-    api/server.py can share it: a browser's WebSocket API has no way to
-    set an Authorization header on the handshake request, so that route
-    takes the token as a query param instead of going through
-    require_auth()'s Request-shaped dependency. Raises HTTPException on
-    any failure — the WebSocket route catches that itself and translates
-    it into a close code, since a socket has no response body to attach
-    an HTTP error detail to."""
+    Kept as a bare token->user_id function (rather than inlined) so it
+    can be called without a Request. The WebSocket and SSE routes used to
+    call it directly with a `?token=` query param; they now authenticate
+    with single-use tickets instead (api/stream_tickets.py), so that the
+    access token itself never appears in a URL. Raises HTTPException on
+    any failure."""
     try:
         header = jwt.get_unverified_header(token)
     except jwt.InvalidTokenError:

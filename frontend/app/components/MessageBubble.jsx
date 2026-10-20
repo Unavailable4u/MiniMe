@@ -2,7 +2,8 @@
 import { useState, useEffect, memo } from "react";
 import Markdown from "./Markdown";
 import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
-import { supabase } from "../lib/supabaseClient";   // NEW — CO5 step 4: useStreamingAnswer needs a fresh access_token for the EventSource ?token= param
+import { authedFetch, authHeaders } from "../lib/authFetch";   // mints the single-use stream ticket (see lib/streamTicket.js)
+import { requestStreamTicket, buildSseUrl } from "../lib/streamTicket";
 import { Sparkles, X, Loader2, CheckCircle2, Check, Pencil, FileCode2 } from "lucide-react";   // NEW — Data Layer §9d; Check/Pencil NEW — CO3 patch 4; FileCode2 NEW — W4.2
 import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
 import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
@@ -36,13 +37,21 @@ function tierStyle(data) {
   return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-[var(--neutral-400)]", dot: "bg-[var(--neutral-500)]" };
 }
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 // NEW — CO5 step 4: consumes GET /api/task/{session_id}/stream
 // (api/routes/tasks.py). EventSource has no way to attach an
-// Authorization header to the request it makes, so per that route's
-// own docstring the JWT rides along as a `?token=...` query param
-// instead of the header authHeaders() builds everywhere else in this
-// app — fetched fresh via supabase.auth.getSession(), same pattern
-// SessionContext.jsx already uses, not read off any cached value.
+// Authorization header to the request it makes, and putting the user's
+// access token in the URL leaks it into access logs and proxies. So
+// instead: mint a short-lived, single-use ticket first (normal
+// Authorization header, POST /api/stream-ticket) and open the stream
+// with `?ticket=...`. See lib/streamTicket.js. A ticket is spent on
+// first use, so every (re)connect mints its own.
+//
+// The stream URL is built from API_URL like every other backend call in
+// this app. It used to be a bare relative `/api/task/...`, which resolves
+// against the Next.js origin -- and next.config.js defines no rewrite
+// that would forward it to the backend.
 //
 // Every SSE frame off that route is a plain default "message" event
 // (the backend never sets an `event:` line) whose `data` is either the
@@ -86,13 +95,16 @@ function useStreamingAnswer(sessionId, enabled) {
     setIsStreaming(true);
 
     (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token || cancelled) return;   // no token yet, or effect already torn down while we were awaiting getSession()
+      const ticket = await requestStreamTicket({
+        apiUrl: API_URL,
+        kind: "sse",
+        sessionId,
+        fetchFn: authedFetch,
+        getHeaders: authHeaders,
+      });
+      if (!ticket || cancelled) return;   // not signed in / no access to this chat, or effect already torn down while we were awaiting the ticket
 
-      eventSource = new EventSource(
-        `/api/task/${sessionId}/stream?token=${encodeURIComponent(token)}`
-      );
+      eventSource = new EventSource(buildSseUrl(API_URL, sessionId, ticket));
 
       eventSource.onmessage = (event) => {
         if (event.data === "[DONE]") {
@@ -112,11 +124,13 @@ function useStreamingAnswer(sessionId, enabled) {
       };
 
       eventSource.onerror = () => {
-        // A bad/expired token (401) and a genuine network drop both
-        // surface here — EventSource gives no way to tell them apart
-        // from onerror alone. Either way, stop the streaming indicator
-        // rather than leaving it spinning forever; whatever text
-        // already arrived stays visible in the bubble.
+        // A rejected/expired ticket (401) and a genuine network drop
+        // both surface here — EventSource gives no way to tell them
+        // apart from onerror alone. Either way, stop the streaming
+        // indicator rather than leaving it spinning forever; whatever
+        // text already arrived stays visible in the bubble. Closing also
+        // stops EventSource's built-in auto-reconnect, which would just
+        // replay a ticket that is already spent.
         setIsStreaming(false);
         eventSource.close();
       };

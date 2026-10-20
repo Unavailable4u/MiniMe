@@ -55,20 +55,20 @@ from contextlib import asynccontextmanager  # NEW — §9b: lifespan startup hoo
 
 from fastapi import (  # NEW — §9b
     FastAPI,
-    HTTPException,
     Query,
     Request,
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 # B6 — auth/JWT verification (SUPABASE_URL, require_auth,
 # _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
 # so api/routes/* modules can import it without a circular import back
 # into this file. See api/deps.py's module docstring for why.
-from api.deps import _verify_supabase_jwt
 from api.middleware import add_cors_and_error_middleware
+from api.stream_tickets import KIND_WS, redeem_ticket
 from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
 from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
 from eo import db  # NEW — startup DB pool warm-up, see _lifespan()
@@ -91,6 +91,7 @@ from api.routes.graph_and_notes import router as graph_and_notes_router
 from api.routes.local_workspace import router as local_workspace_data_router
 from api.routes.mcp import router as mcp_router  # NEW — Patch A8: HTTP surface over A2's mcp_registry read functions
 from api.routes.notebooks import router as notebooks_router
+from api.routes.stream_ticket import router as stream_ticket_router  # POST /api/stream-ticket
 from api.routes.system import router as system_router
 
 # B6 — routers split out of this file. tasks_router owns /api/task*,
@@ -356,6 +357,7 @@ async def _agent_task_timeout_handler(request: Request, exc: AgentTaskTimeout):
 # per workspace file path, see api/routes/code.py's own docstring for
 # why it's a separate file rather than folded into workspace_data.py.
 app.include_router(tasks_router)
+app.include_router(stream_ticket_router)  # POST /api/stream-ticket (ws/sse auth tickets)
 app.include_router(system_router)
 app.include_router(chats_router)
 app.include_router(workspaces_router)
@@ -381,18 +383,25 @@ app.include_router(user_profile_router)  # NEW — Patch B6: /api/profile/*
 # proactive suggestions) both consume this same socket — neither
 # needs a route of its own, just a new "kind" in eo/notify.py.
 @app.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str = Query(None)):
-    # Auth token travels as a query param rather than a header: the
-    # browser WebSocket API has no way to set Authorization on the
+async def websocket_endpoint(websocket: WebSocket, session_id: str, ticket: str = Query(None)):
+    # The browser WebSocket API has no way to set Authorization on the
     # handshake request the way require_auth()'s HTTP dependency
-    # expects. 4401 (a custom code in the reserved-for-app-use 4000-4999
-    # range) mirrors HTTP 401 as closely as a WS close code allows.
-    if not token:
+    # expects, so credentials have to ride in the URL. That used to be
+    # the user's full access token (`?token=<jwt>`), which then lands in
+    # access logs and proxies. It is now a short-lived, single-use
+    # ticket the client mints first via POST /api/stream-ticket
+    # (kind="ws") using a normal Authorization header -- see
+    # api/stream_tickets.py. The ticket is bound to this session_id and
+    # redeemed atomically, so a logged URL is worthless. A raw access
+    # token here is rejected; there is no fallback.
+    # 4401 (a custom code in the reserved-for-app-use 4000-4999 range)
+    # mirrors HTTP 401 as closely as a WS close code allows.
+    if not ticket:
         await websocket.close(code=4401)
         return
-    try:
-        _verify_supabase_jwt(token)
-    except HTTPException:
+    # Blocking Redis round trip -- keep it off the event loop.
+    owner_id = await run_in_threadpool(redeem_ticket, ticket, KIND_WS, session_id)
+    if owner_id is None:
         await websocket.close(code=4401)
         return
 
