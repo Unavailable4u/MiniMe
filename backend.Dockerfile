@@ -28,7 +28,15 @@ COPY backend/ .
 # data/exports is where NOTES_EXPORTS_DIR (api/server.py) writes generated
 # reports/decks/scripts — needs to exist and be writable in the container,
 # not just on your local disk.
-RUN mkdir -p data/exports
+#
+# apps/ is where the code agents write generated projects (APPS_ROOT in
+# agents/file_manager.py). It is created here, before the chown below,
+# because docker-compose.yml mounts a named volume on /app/data and
+# /app/apps: Docker seeds a new named volume from the image directory,
+# *including its ownership*. If apps/ didn't exist in the image, Docker
+# would create the mount point root-owned and the non-root `app` user
+# couldn't write to it.
+RUN mkdir -p data/exports apps
 
 # Run as a non-root user (Semgrep dockerfile.security.missing-user) —
 # python:3.12-slim has no unprivileged user baked in like node:*-slim
@@ -41,7 +49,8 @@ USER app
 EXPOSE 8000
 
 # Matches how you've been running it locally: uvicorn api.server:app --port 8000.
-# No --reload in production — that's a dev-only flag; docker-compose.override
-# can add it back for local container development if you want hot-reload
-# inside Docker too.
+# No --reload in production — that's a dev-only flag. For local container
+# development with live reload, use docker-compose.dev.yml, which overrides
+# this CMD (see the comments there for why its --reload-dir list is
+# deliberate).
 CMD ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -149,11 +149,41 @@ def test_llm_judgment_stop_when_no_hard_rule_fires(mock_llm):
 
 def test_llm_judgment_continue_parses_redo_roles(mock_llm):
     mock_llm.set_response("CONTINUE: verifier, fixer")
+    # Both roles must actually exist in this run's results: since the
+    # 2026-09-25 audit fix, _run_gatekeeper() only lets roles that ran
+    # be redone (see the unknown-role test below).
+    results = {
+        "verifier": {"issues": [], "summary": "No issues."},
+        "fixer": {"text": "Nothing to fix."},
+    }
+
+    decision = loop_controller._run_gatekeeper(results, "task", "sess_test", 1)
+
+    assert decision["action"] == "CONTINUE"
+    assert decision["redo_roles"] == ["verifier", "fixer"]
+
+
+def test_llm_judgment_continue_drops_roles_that_did_not_run(mock_llm):
+    """Audit fix 2026-09-25: a hallucinated/unknown role name in the
+    gatekeeper's reply must never be scheduled for a redo pass -- only
+    roles present in this run's results are eligible."""
+    mock_llm.set_response("CONTINUE: verifier, fixer")
 
     decision = loop_controller._run_gatekeeper(CLEAN_RESULTS, "task", "sess_test", 1)
 
     assert decision["action"] == "CONTINUE"
-    assert decision["redo_roles"] == ["verifier", "fixer"]
+    assert decision["redo_roles"] == ["verifier"]  # "fixer" isn't in CLEAN_RESULTS
+
+
+def test_llm_judgment_bare_continue_without_failures_stops(mock_llm):
+    """A CONTINUE naming no roles (and with no failed roles to fall back
+    on) must STOP rather than re-run the whole graph."""
+    mock_llm.set_response("CONTINUE")
+
+    decision = loop_controller._run_gatekeeper(CLEAN_RESULTS, "task", "sess_test", 1)
+
+    assert decision["action"] == "STOP"
+    assert decision["cause"] == "continue_without_specific_roles"
 
 
 def test_gatekeeper_role_resolves_through_generic_worker(mock_llm):

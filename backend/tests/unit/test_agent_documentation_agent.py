@@ -99,6 +99,30 @@ class TestStripFences:
 # 2. run(): batched read_many() usage and generate_text() call shape
 # ---------------------------------------------------------------------------
 class TestGenerateTextCall:
+    def test_dynamic_chain_takes_precedence_over_static_chain(self, monkeypatch):
+        # Since 2026-09-26, run() asks eo.dynamic_chain.build_fallback_chain(
+        # "documentation_agent") first; the static CHAIN is only the
+        # last-resort fallback when that returns [].
+        dynamic = [{"provider": "groq", "model": "m", "key_env": "GROQ_API_KEY"}]
+        roles_asked = []
+        captured = {}
+
+        def _fake_build(role, *a, **k):
+            roles_asked.append(role)
+            return dynamic
+
+        def _fake_generate_text(system_prompt, user_prompt, chain, **kwargs):
+            captured["chain"] = chain
+            return _doc_response()
+
+        monkeypatch.setattr("eo.dynamic_chain.build_fallback_chain", _fake_build)
+        monkeypatch.setattr(documentation_agent, "generate_text", _fake_generate_text)
+
+        documentation_agent.run()
+
+        assert captured["chain"] == dynamic
+        assert roles_asked == ["documentation_agent"]
+
     def test_generate_text_called_with_system_prompt_and_chain(self, monkeypatch):
         captured = {}
 
@@ -109,6 +133,10 @@ class TestGenerateTextCall:
             captured["kwargs"] = kwargs
             return _doc_response()
 
+        # Empty dynamic chain -> run() falls back to the static CHAIN
+        # (pinned here so the assertion doesn't depend on whichever
+        # accounts/quota state the machine running the suite has).
+        monkeypatch.setattr("eo.dynamic_chain.build_fallback_chain", lambda role, *a, **k: [])
         monkeypatch.setattr(documentation_agent, "generate_text", _fake_generate_text)
 
         documentation_agent.run(session_id="s1", tier=3, domain="coding")

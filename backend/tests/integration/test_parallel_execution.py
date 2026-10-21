@@ -284,7 +284,8 @@ def test_approval_role_never_grouped_even_if_it_slips_through():
             approval_roles={"role_r_APPROVAL"},
         )
 
-    assert result4 == {"status": "paused", "paused_at_role": "role_r_APPROVAL"}, \
+    assert result4 == {"status": "paused", "paused_at_role": "role_r_APPROVAL",
+                       "reason": "approval", "message": None}, \
         "run should pause exactly at the approval_roles member"
     assert call_log4 == ["role_p", "role_q", "role_r_APPROVAL"], \
         "role_p (before the group) and role_q (the group's safe member) should both run"
@@ -330,7 +331,8 @@ def test_full_pipeline_sanitize_build_execute_against_adversarial_output():
             session_id="sess-e2e", path="adaptive", approval_roles=approval_roles5,
         )
 
-    assert result5 == {"status": "paused", "paused_at_role": "approver"}, \
+    assert result5 == {"status": "paused", "paused_at_role": "approver",
+                       "reason": "approval", "message": None}, \
         "execution should pause at 'approver' after running the group + 'c' with no errors"
     assert call_log5 == ["a", "b", "c", "approver"], \
         "every role up through the pause point should run exactly once, nothing duplicated or skipped"

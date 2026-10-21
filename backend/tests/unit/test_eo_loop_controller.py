@@ -248,7 +248,22 @@ def test_run_with_looping_returns_paused_status_immediately(mock_graph_build, mo
     _mock_execute_graph(monkeypatch, [{"status": "paused", "paused_at_role": "reviewer"}])
     result = run_with_looping(hires=[], execution_order=["reviewer"], task_text="x",
                                session_id="s4", mode="expert")
-    assert result == {"status": "paused", "paused_at_role": "reviewer", "session_id": "s4"}
+    # `reason`/`message` are forwarded from execute_graph()'s own pause
+    # result (audit fix 2026-09-25); the mocked pass above supplies
+    # neither, so both come through as None.
+    assert result == {"status": "paused", "paused_at_role": "reviewer", "session_id": "s4",
+                      "reason": None, "message": None}
+
+
+def test_run_with_looping_forwards_pause_reason_and_message(mock_graph_build, monkeypatch):
+    _mock_execute_graph(monkeypatch, [{
+        "status": "paused", "paused_at_role": "reviewer",
+        "reason": "token_budget_exceeded", "message": "Token budget reached.",
+    }])
+    result = run_with_looping(hires=[], execution_order=["reviewer"], task_text="x",
+                               session_id="s4b", mode="expert")
+    assert result["reason"] == "token_budget_exceeded"
+    assert result["message"] == "Token budget reached."
 
 
 def test_run_with_looping_paused_status_does_not_pollute_results(mock_graph_build, monkeypatch):
@@ -375,22 +390,25 @@ def test_run_with_looping_mode_case_insensitive(mock_graph_build, monkeypatch):
     assert exec_mock.call_count == 2
 
 
-def test_run_with_looping_redo_roles_empty_falls_back_to_execution_order(mock_graph_build, monkeypatch):
-    """decision.get("redo_roles") or execution_order -- a CONTINUE with
-    no colon (redo list empty) must fall back to redoing the FULL
-    original execution_order, not an empty run."""
-    _mock_execute_graph(monkeypatch, [
+def test_run_with_looping_continue_without_roles_does_not_rerun_whole_graph(mock_graph_build, monkeypatch):
+    """Audit fix 2026-09-25 (fail safe, not fail open): a bare "CONTINUE"
+    with no colon names no roles to redo. This used to fall back to
+    re-running the ENTIRE execution_order (which turned one failed pass
+    into a 27-minute second pass); it must now stop after the first
+    pass instead -- one graph build, one gatekeeper call."""
+    exec_mock = _mock_execute_graph(monkeypatch, [
         {"writer": {"text": "draft 1"}},
         {"writer": {"text": "draft 2"}},
     ])
     gk_mock = MagicMock(side_effect=[{"text": "CONTINUE"}, {"text": "STOP"}])
     monkeypatch.setattr(generic_worker_module, "run", gk_mock)
 
-    run_with_looping(hires=[], execution_order=["writer"], task_text="x",
-                      session_id="s12", mode="expert")
-    # build_execution_graph_from_hires(hires, current_order) -- current_order
-    # positional/keyword depends on call site; assert against call args directly.
-    assert mock_graph_build.call_count == 2
+    result = run_with_looping(hires=[], execution_order=["writer"], task_text="x",
+                               session_id="s12", mode="expert")
+    assert mock_graph_build.call_count == 1
+    assert exec_mock.call_count == 1
+    gk_mock.assert_called_once()
+    assert result["results"] == {"writer": {"text": "draft 1"}}
 
 
 def test_run_with_looping_repeat_failure_pauses_second_check_without_llm_call(mock_graph_build, monkeypatch):

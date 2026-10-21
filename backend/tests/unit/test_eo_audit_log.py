@@ -86,7 +86,9 @@ def test_write_audit_inserts_with_user_scoped_cursor(monkeypatch):
     assert params[1] == "workspace.rename"
     assert params[2] == "workspace"
     assert params[3] == "ws_1"
-    assert params[4].adapted == {"old_name": "a", "new_name": "b"}
+    # psycopg3's Json wrapper exposes the wrapped value as `.obj`
+    # (psycopg2's Json called it `.adapted`).
+    assert params[4].obj == {"old_name": "a", "new_name": "b"}
 
 
 def test_write_audit_defaults_detail_to_empty_dict_when_none(monkeypatch):
@@ -96,7 +98,7 @@ def test_write_audit_defaults_detail_to_empty_dict_when_none(monkeypatch):
     audit_log.write_audit("user_1", "chat.delete", "chat", "chat_1")
 
     _, params = fake_cursor.executed[0]
-    assert params[4].adapted == {}
+    assert params[4].obj == {}
 
 
 def test_write_audit_never_raises_when_the_cursor_context_manager_fails(monkeypatch):

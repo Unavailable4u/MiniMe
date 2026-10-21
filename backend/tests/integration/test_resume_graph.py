@@ -47,6 +47,13 @@ def _stub_role_lookups(monkeypatch):
     monkeypatch.setattr(generic_worker.conversation_memory, "get_full_context", lambda session_id: "")
 
 
+def _paused_for_approval(role):
+    """Full pause shape since the 2026-09-25 audit fix: `reason` and
+    `message` ride along with status/paused_at_role."""
+    return {"status": "paused", "paused_at_role": role,
+            "reason": "approval", "message": None}
+
+
 def _build_plan(roles):
     role_names = list(roles)
     agent_names = [resolve_role(r) for r in role_names]
@@ -66,7 +73,7 @@ def test_pause_writes_snapshot_and_approve_resumes_to_completion(mock_llm, fake_
         session_id=session_id, path="adaptive", approval_roles={"writer"},
     )
 
-    assert paused == {"status": "paused", "paused_at_role": "writer"}
+    assert paused == _paused_for_approval("writer")
     snapshot = bus_read(f"paused_execution:{session_id}", default=None)
     assert snapshot is not None
     assert snapshot["idx"] == 0
@@ -121,11 +128,11 @@ def test_reject_redo_reruns_the_role_and_respects_max_revisits(mock_llm, fake_bu
     # reject_redo #1 (visits 0 -> 1): re-runs "writer" from scratch, and
     # since "writer" is still in approval_roles, pauses again immediately.
     redo_1 = resume_graph(session_id, {"action": "reject_redo"})
-    assert redo_1 == {"status": "paused", "paused_at_role": "writer"}
+    assert redo_1 == _paused_for_approval("writer")
 
     # reject_redo #2 (visits 1 -> 2): same shape, still under the cap.
     redo_2 = resume_graph(session_id, {"action": "reject_redo"})
-    assert redo_2 == {"status": "paused", "paused_at_role": "writer"}
+    assert redo_2 == _paused_for_approval("writer")
 
     # reject_redo #3: visits is now 2, which is >= MAX_STAGE_REVISITS (2)
     # -- must raise rather than loop forever, and must not leave a
@@ -199,7 +206,7 @@ def test_revise_section_patches_data_store_and_leaves_run_paused(mock_llm, fake_
         agent_names, role_names=role_names, task_text="write something",
         session_id=session_id, path="adaptive", approval_roles={"writer"},
     )
-    assert paused == {"status": "paused", "paused_at_role": "writer"}
+    assert paused == _paused_for_approval("writer")
 
     write_section(session_id, "intro", "the cat sat on the mat", author_role="writer")
 

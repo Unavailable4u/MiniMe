@@ -102,12 +102,32 @@ class TestChainComposition:
         assert last["provider"] == "gemini"
         assert last["key_env"] == "GEMINI_API_KEY_1"
 
-    def test_run_uses_the_module_chain(self, fake_bus, mock_llm):
+    def test_run_uses_the_module_chain_when_dynamic_chain_is_empty(self, fake_bus, mock_llm, monkeypatch):
+        # Since 2026-09-26, run() asks eo.dynamic_chain.build_fallback_chain()
+        # first and only falls back to the static module CHAIN when that
+        # comes back empty (every account excluded/cooling down).
+        monkeypatch.setattr("eo.dynamic_chain.build_fallback_chain", lambda role, *a, **k: [])
         mock_llm.set_response("print('hi')")
         spec = {"name": "greeter", "description": "prints hi", "language": "python"}
         code_writer_lean.run(module_spec=spec)
         chain = mock_llm.mock.call_args.kwargs.get("chain") or mock_llm.mock.call_args[0][2]
         assert chain == code_writer_lean.CHAIN
+
+    def test_run_prefers_the_dynamic_chain_for_its_own_role(self, fake_bus, mock_llm, monkeypatch):
+        dynamic = [{"provider": "groq", "model": "m", "key_env": "GROQ_API_KEY"}]
+        roles_asked = []
+
+        def _fake_build(role, *a, **k):
+            roles_asked.append(role)
+            return dynamic
+
+        monkeypatch.setattr("eo.dynamic_chain.build_fallback_chain", _fake_build)
+        mock_llm.set_response("print('hi')")
+        spec = {"name": "greeter", "description": "prints hi", "language": "python"}
+        code_writer_lean.run(module_spec=spec)
+        chain = mock_llm.mock.call_args.kwargs.get("chain") or mock_llm.mock.call_args[0][2]
+        assert chain == dynamic
+        assert roles_asked == ["code_writer_lean"]
 
 
 # ---------------------------------------------------------------------------

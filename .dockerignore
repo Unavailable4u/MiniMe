@@ -25,6 +25,9 @@ backend/evals/promptfoo/.promptfoo
 backend/__pycache__
 backend/**/__pycache__
 backend/data
+# Locally generated projects (APPS_ROOT) -- runtime state, like backend/data;
+# docker-compose.yml gives the container its own volume for this.
+backend/apps
 backend/tests
 
 # Frontend — the container installs its own deps and builds its own output

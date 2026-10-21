@@ -55,6 +55,15 @@ def _sequential_next_step(result, role_names, idx, session_id=None, known_roles=
     return (next_idx if next_idx < len(role_names) else None, "plan")
 
 
+def _paused(role, reason="approval", message=None):
+    """The full pause shape _run_loop()/resume_graph() return since the
+    2026-09-25 audit fix: `reason` ("approval" / "manual_pause" /
+    "budget_exceeded" / ...) and `message` ride along with status and
+    paused_at_role so the API layer can explain WHY a run paused."""
+    return {"status": "paused", "paused_at_role": role,
+            "reason": reason, "message": message}
+
+
 @pytest.fixture(autouse=True)
 def _quiet_emit(monkeypatch):
     """Every test in this file cares about dispatch/bookkeeping
@@ -500,7 +509,7 @@ class TestRunLoopPause:
             next_step=spy_next_step,
         ))
 
-        assert result == {"status": "paused", "paused_at_role": "role_a"}
+        assert result == _paused("role_a", reason="approval")
         assert next_step_calls == []  # dispatcher never consulted once paused
         assert any(e[0] == "awaiting_approval" for e in _quiet_emit)
         from memory.bus import read as bus_read
@@ -534,7 +543,7 @@ class TestRunLoopPause:
             approval_roles=set(), session_id="sess-manual",
         ))
 
-        assert result == {"status": "paused", "paused_at_role": "role_a"}
+        assert result == _paused("role_a", reason="manual_pause")
         assert bus_read("pause_requested:sess-manual", default=None) is None
 
     def test_non_approval_role_does_not_pause(self, monkeypatch):
@@ -553,10 +562,11 @@ class TestRunLoopPause:
 class TestRunLoopToolBudget:
     """Patch B6 (§3.4) -- the tool-call budget's pause path must reuse
     approval_roles' exact checkpoint: same trigger point, same snapshot
-    shape, same {"status": "paused", "paused_at_role": ...} return value.
-    A budget-exceeded pause is only distinguishable from an
-    approval_roles pause by the "reason" on the awaiting_approval event
-    (existing frontend resume code needs zero changes either way)."""
+    shape, same {"status": "paused", "paused_at_role": ..., "reason": ...,
+    "message": ...} return keys. A budget-exceeded pause is only
+    distinguishable from an approval_roles pause by its "reason" value
+    (on both the return value and the awaiting_approval event) --
+    existing frontend resume code needs zero changes either way."""
 
     def test_budget_exceeded_on_chat_tab_pauses_with_identical_shape_to_approval(
         self, monkeypatch, fake_bus, _quiet_emit,
@@ -579,8 +589,9 @@ class TestRunLoopToolBudget:
             approval_roles=set(), session_id="sess-budget", tab="chat",
         ))
 
-        # Byte-for-byte the same shape an approval_roles pause returns.
-        assert result == {"status": "paused", "paused_at_role": "role_a"}
+        # Same keys as an approval_roles pause; only `reason` differs.
+        assert result == _paused("role_a", reason="budget_exceeded")
+        assert set(result) == set(_paused("role_a"))
         approval_events = [e for e in _quiet_emit if e[0] == "awaiting_approval"]
         assert len(approval_events) == 1
         assert approval_events[0][1]["payload"]["reason"] == "budget_exceeded"
@@ -677,7 +688,7 @@ class TestRunLoopGroupApprovalBackstop:
 
         # Degraded to sequential: role_a is dispatched alone, and pauses
         # before role_b ever runs -- exactly the single-role pause path.
-        assert result == {"status": "paused", "paused_at_role": "role_a"}
+        assert result == _paused("role_a", reason="approval")
 
 
 class TestRunLoopProactiveDependencyInsertion:
@@ -994,7 +1005,7 @@ class TestResumeGraph:
         result = executor.resume_graph("sess-redo", {"action": "reject_redo"})
 
         assert call_count["n"] == 1
-        assert result == {"status": "paused", "paused_at_role": "role_a"}
+        assert result == _paused("role_a", reason="approval")
 
     def test_reject_redo_increments_stage_revisits_on_the_fresh_snapshot(self, monkeypatch, fake_bus):
         from memory.bus import read as bus_read
@@ -1100,7 +1111,7 @@ class TestResumeGraph:
         )
         result = executor.resume_graph("sess-repause-scratchpad", {"action": "approve"})
 
-        assert result == {"status": "paused", "paused_at_role": "role_b"}
+        assert result == _paused("role_b", reason="approval")
         assert list_notes("sess-repause-scratchpad")  # untouched
 
     def test_approve_can_pause_again_on_a_later_role(self, monkeypatch, fake_bus):
@@ -1118,4 +1129,4 @@ class TestResumeGraph:
         )
         result = executor.resume_graph("sess-double-pause", {"action": "approve"})
 
-        assert result == {"status": "paused", "paused_at_role": "role_b"}
+        assert result == _paused("role_b", reason="approval")

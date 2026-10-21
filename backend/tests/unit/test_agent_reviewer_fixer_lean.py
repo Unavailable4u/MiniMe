@@ -10,7 +10,9 @@ review+fix pass over a single small code module.
      MissingDependencyError("code_writer_lean", ...).
   2. CHAIN shape: exactly 6 steps -- 2 Groq, 3 OpenRouter (using the
      3 distinct key slots), 1 Gemini fallback -- generate_text is
-     called with this exact chain every time (Patch 8.9's fix).
+     called with this static chain whenever eo.dynamic_chain's
+     build_fallback_chain() comes back empty (Patch 8.9's fix); a
+     non-empty dynamic chain takes precedence over it.
   3. Parsing: valid JSON response updates code + issues_found;
      malformed JSON degrades to the ORIGINAL code with a explanatory
      issue, never propagating garbage downstream.
@@ -57,6 +59,30 @@ class TestModuleResolution:
 # 2. CHAIN shape (Patch 8.9 fix: real per-step key redundancy)
 # ---------------------------------------------------------------------------
 class TestChainShape:
+    @pytest.fixture(autouse=True)
+    def _static_chain(self, monkeypatch):
+        """run() resolves its chain via eo.dynamic_chain.build_fallback_chain(
+        "reviewer_fixer_lean") and only falls back to the static module
+        CHAIN when that returns []. These tests pin the static CHAIN's
+        shape, so force the empty-dynamic case -- otherwise the chain
+        under test would depend on whichever accounts/quota state the
+        machine running the suite happens to have."""
+        monkeypatch.setattr("eo.dynamic_chain.build_fallback_chain", lambda role, *a, **k: [])
+
+    def test_run_prefers_the_dynamic_chain_when_available(self, fake_bus, mock_llm, monkeypatch):
+        dynamic = [{"provider": "mistral", "model": "m", "key_env": "MISTRAL_API_KEY"}]
+        roles_asked = []
+
+        def _fake_build(role, *a, **k):
+            roles_asked.append(role)
+            return dynamic
+
+        monkeypatch.setattr("eo.dynamic_chain.build_fallback_chain", _fake_build)
+        mock_llm.set_json_response({"issues_found": [], "code": "x"})
+        reviewer_fixer_lean.run(module=SAMPLE_MODULE)
+        assert mock_llm.mock.call_args.kwargs["chain"] == dynamic
+        assert roles_asked == ["reviewer_fixer_lean"]
+
     def test_chain_has_exactly_six_steps(self, fake_bus, mock_llm):
         mock_llm.set_json_response({"issues_found": [], "code": "x"})
         reviewer_fixer_lean.run(module=SAMPLE_MODULE)
