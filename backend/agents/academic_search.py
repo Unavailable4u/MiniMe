@@ -24,8 +24,16 @@ import json
 import os
 import re
 import sys
-import xml.etree.ElementTree as ET
 
+# defusedxml, not the stdlib's xml.etree.ElementTree: the arXiv response
+# parsed in _search_arxiv() is untrusted third-party XML. defusedxml's
+# fromstring() refuses entity declarations and external entities (entity
+# expansion / XXE) instead of processing them; it raises a
+# DefusedXmlException, which _search_arxiv()'s existing `except Exception`
+# turns into "arXiv failed, return []", same as a network error. Parsed
+# elements are ordinary xml.etree Elements, so nothing downstream changes.
+# (Pinned in requirements.txt.)
+import defusedxml.ElementTree as ET
 import requests
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

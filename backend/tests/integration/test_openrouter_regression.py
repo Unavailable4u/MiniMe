@@ -22,9 +22,10 @@ edge, _get_openrouter(), is faked):
      cooldown written.
   3. MALFORMED_REQUEST on an openrouter step -> raises, does NOT fall
      through (never masked as a retryable failure).
-  4. RATE_LIMIT_WINDOW  on an openrouter step, no headroom anywhere else
-     in the chain -> ledger-derived cooldown written, bounded sleep,
-     retries the SAME step in place, succeeds.
+  4. RATE_LIMIT_WINDOW  on an openrouter step -> per-(key, model)
+     cooldown written and the chain moves on IMMEDIATELY, never
+     sleeping (audit fix 2026-09-25's no-sleep policy); with nowhere
+     left to move on to, the call fails fast with ChainExhaustedError.
   5. CONTEXT_LENGTH_EXCEEDED on an openrouter step -> prompt shrunk,
      retries the SAME step in place, succeeds.
   6. Success path -> usage logged and correctly tagged provider="openrouter".
@@ -45,7 +46,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from utils import llm_client
-from utils.llm_client import OpenAIAPIStatusError
+from utils.llm_client import ChainExhaustedError, OpenAIAPIStatusError
 
 TODAY = date.today().isoformat()
 
@@ -64,7 +65,13 @@ class _FakeBus:
     def read(self, key, default=None):
         return self.store.get(key, default)
 
-    def write(self, key, value):
+    def write(self, key, value, ex=None):
+        # utils/llm_client.py writes usage records (and the per-session
+        # ledger-event counters) with a TTL via memory.bus.write(key,
+        # value, ex=...). This in-memory stand-in has no expiry to model,
+        # but must accept the kwarg -- without it log_usage() hit a
+        # TypeError (swallowed as "usage logging failed (non-fatal)") and
+        # no usage record was ever stored for the test to assert on.
         self.store[key] = value
 
 
@@ -327,28 +334,34 @@ def test_malformed_request_raises_and_does_not_fall_through(harness):
 #    ledger-derived cooldown, bounded sleep, retries THIS step in place.
 # ---------------------------------------------------------------------------
 
-def test_rate_limit_window_waits_and_retries_in_place(harness):
+def test_rate_limit_window_cools_down_and_fails_fast_without_sleeping(harness, monkeypatch):
+    """Audit fix 2026-09-25 (no-sleep policy). This used to assert the
+    old behavior: sleep a bounded amount, then retry the SAME step in
+    place. That policy is gone -- a rate-limited key is now cooled down
+    (per key AND model) and the chain moves on immediately; the NEXT
+    call skips that key until the cooldown expires on its own. With a
+    single-step chain there's nowhere to move on to, so the call fails
+    fast with ChainExhaustedError instead of stalling every role."""
+    # Pin the end-of-chain wait to its fail-fast default so an operator's
+    # LLM_CHAIN_EXHAUSTION_WAIT_SECONDS env var can't change this test.
+    monkeypatch.setattr(llm_client, "_EXHAUSTIVE_WAIT_CAP_SECONDS", 0.0)
     rate_limit_exc = _FakeProviderError(
         "Rate limit exceeded", status_code=429,
         body_text="you have exceeded your requests per minute rate limit")
-    client = harness["make_client"](
-        "OPENROUTER_API_KEY_TEST_1",
-        script=[rate_limit_exc, ("succeeded after waiting", "stop", 77)])
-    # Single-step chain -- no other step to reroute to, so this MUST hit
-    # the "wait and retry in place" arm, not "reroute".
+    client = harness["make_client"]("OPENROUTER_API_KEY_TEST_1", script=[rate_limit_exc])
     chain = [_chain_step("OPENROUTER_API_KEY_TEST_1")]
 
-    result = llm_client.generate_text(
-        "system prompt", "user content", chain, agent_name="OR-6 Test Agent")
+    before = datetime.now(UTC).timestamp()
+    with pytest.raises(ChainExhaustedError):
+        llm_client.generate_text(
+            "system prompt", "user content", chain, agent_name="OR-6 Test Agent")
 
-    assert result == "succeeded after waiting"
-    assert client.call_count == 2  # one failed attempt, one retry-in-place
-    # Bounded: _LEDGER_WAIT_CAP_SECONDS caps the wait regardless of the
-    # provider's own (here, absent) Retry-After signal.
-    assert harness["sleep_calls"], "expected a bounded sleep before the in-place retry"
-    assert all(0 < s <= llm_client._LEDGER_WAIT_CAP_SECONDS for s in harness["sleep_calls"])
-    cooldown_key = "cooldown_until:openrouter:OPENROUTER_API_KEY_TEST_1"
-    assert cooldown_key in harness["fake_bus"].store
+    assert client.call_count == 1   # no retry-in-place
+    assert not harness["sleep_calls"], "the no-sleep policy forbids waiting on a rate limit"
+    # Cooldowns for rate limits are recorded per (key, model) -- see
+    # _model_cooldown_id() -- unlike 401/403's key-wide cooldown.
+    cooldown_key = "cooldown_until:openrouter:OPENROUTER_API_KEY_TEST_1::openrouter/free"
+    assert harness["fake_bus"].store[cooldown_key] > before   # a real future cooldown
 
 
 def test_rate_limit_window_reroutes_when_a_later_step_has_headroom(harness):
@@ -371,12 +384,14 @@ def test_rate_limit_window_reroutes_when_a_later_step_has_headroom(harness):
 
     assert result == "rerouted"
     assert client1.call_count == 1
-    # Rerouted, not waited-and-retried -- no sleep, and (per
-    # _handle_transient_error()'s RATE_LIMIT_WINDOW/reroute arm) no
-    # cooldown write either, since the key itself was never confirmed
-    # to be actually rate-limited long enough to matter here.
+    # Rerouted, not waited-and-retried -- no sleep. The rate-limited
+    # (key, model) IS cooled down now (audit fix 2026-09-25), so later
+    # calls skip it without re-probing; the second key is untouched.
     assert not harness["sleep_calls"]
-    assert "cooldown_until:openrouter:OPENROUTER_API_KEY_TEST_1" not in harness["fake_bus"].store
+    assert ("cooldown_until:openrouter:OPENROUTER_API_KEY_TEST_1::openrouter/free"
+            in harness["fake_bus"].store)
+    assert not any(k.startswith("cooldown_until:openrouter:OPENROUTER_API_KEY_TEST_2")
+                   for k in harness["fake_bus"].store)
 
 
 # ---------------------------------------------------------------------------

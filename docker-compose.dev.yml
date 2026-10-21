@@ -1,0 +1,84 @@
+# MiniMe -- local DEVELOPMENT overlay. Not standalone: layer it on top of
+# docker-compose.yml, which holds everything shared (build, ports, env_file,
+# the frontend service):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# Requires Docker Compose >= 2.24.4 for the `!override` tag below. Check
+# with `docker compose version`. Older versions do NOT error: they silently
+# ignore the tag and stack the base file's named volumes under the bind
+# mount (verified against 2.24.3), which is not what you want in dev.
+#
+# On Linux, if your user id isn't 1000, put these in a repo-root .env (it is
+# gitignored; Compose reads it automatically) so files the container writes
+# into ./backend are owned by you, not by some other uid:
+#
+#   DEV_UID=<output of `id -u`>
+#   DEV_GID=<output of `id -g`>
+#
+# macOS / Windows (Docker Desktop) need nothing: bind-mount ownership is
+# mapped for you.
+#
+# Only the backend gets dev treatment. The frontend service is unchanged
+# (a production `next build` image), so for frontend work run
+# `npm run dev` in ./frontend on the host instead.
+services:
+  backend:
+    # `!override` REPLACES the base file's volume list instead of appending
+    # to it. Without it Compose would merge both, and the base file's
+    # backend_data / backend_apps named volumes would be mounted on top of
+    # ./backend/data and ./backend/apps -- hiding them from your editor and
+    # git. In dev those directories live in your working tree.
+    volumes: !override
+      - ./backend:/app
+
+    # The image's non-root `app` user can't write to a bind-mounted host
+    # directory on Linux (the files belong to your uid), and the backend
+    # writes into /app at runtime (data/, apps/). Run as your own uid
+    # instead. Overriding `user` is why HOME is set below: that uid has no
+    # passwd entry or home directory in the image.
+    user: "${DEV_UID:-1000}:${DEV_GID:-1000}"
+    environment:
+      HOME: /tmp
+      # Don't litter ./backend with __pycache__ dirs owned by the container.
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    # The image's CMD has no --reload (right for prod), which also meant the
+    # old bind-mount gave no live-reload benefit. Reload is added here.
+    #
+    # The --reload-dir list is deliberate and must NOT be /app as a whole.
+    # The backend writes .py files at runtime -- the code agents generate
+    # projects into /app/apps, and their fix loops rewrite files they just
+    # created. Rewriting a watched file restarts the server, i.e. in the
+    # middle of the very run that produced it (creating a new file alone
+    # doesn't; modifying a known one does). So only the packages that are
+    # real application code are watched. uvicorn's --reload-exclude can't
+    # do this job: it only applies when `watchfiles` is installed, and
+    # requirements.txt doesn't include it (uvicorn warns and ignores it).
+    # If you add a new top-level package under backend/, add it here too.
+    command:
+      - uvicorn
+      - api.server:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/agents
+      - --reload-dir
+      - /app/api
+      - --reload-dir
+      - /app/eo
+      - --reload-dir
+      - /app/graph
+      - --reload-dir
+      - /app/memory
+      - --reload-dir
+      - /app/relay
+      - --reload-dir
+      - /app/utils
+
+    # Don't crash-loop in the background while you're editing; a failed
+    # start should be visible in `docker compose up`'s output.
+    restart: "no"

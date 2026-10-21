@@ -28,8 +28,9 @@ db.cursor() is a @contextmanager; FakeCursor/FakeCursorContext below is
 a minimal stand-in that queues canned fetchone()/fetchall() results in
 call order and records every execute() (query, params) pair, without
 touching a real Postgres connection. db.Json is left as the real
-psycopg2.extras.Json wrapper (available in this environment) so
-`.adapted` can be asserted on directly, same convention as
+psycopg.types.json.Json wrapper (psycopg3 -- eo/db.py migrated off
+psycopg2) so `.obj` (psycopg3's name for what psycopg2 called
+`.adapted`) can be asserted on directly, same convention as
 test_eo_audit_log.py.
 
 write_audit (imported via `from eo.audit_log import write_audit` --
@@ -416,7 +417,7 @@ def test_append_message_fills_in_ts_when_missing(monkeypatch):
 
     _, insert_msg_params = cursor.executed[2]
     stored_message = insert_msg_params[4]  # db.Json(message)
-    assert stored_message.adapted["ts"]
+    assert stored_message.obj["ts"]
 
 
 def test_append_message_preserves_caller_supplied_ts(monkeypatch):
@@ -427,7 +428,7 @@ def test_append_message_preserves_caller_supplied_ts(monkeypatch):
         "chat_1", "owner_1", {"role": "user", "text": "hi", "ts": "2020-01-01T00:00:00+00:00"})
 
     _, insert_msg_params = cursor.executed[2]
-    assert insert_msg_params[4].adapted["ts"] == "2020-01-01T00:00:00+00:00"
+    assert insert_msg_params[4].obj["ts"] == "2020-01-01T00:00:00+00:00"
 
 
 # ---------------------------------------------------------------------

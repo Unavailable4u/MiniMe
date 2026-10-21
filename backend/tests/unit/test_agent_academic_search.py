@@ -244,6 +244,49 @@ class TestArxiv:
                              lambda *a, **k: _FakeResponse(text="<not><valid"))
         assert academic_search._search_arxiv("q", 5) == []
 
+    # --- hostile responses -------------------------------------------------
+    # The arXiv reply is untrusted third-party XML. These tests pin the
+    # reason _search_arxiv() uses defusedxml and not the stdlib parser.
+    #
+    # The internal-entity case is deliberately small and harmless rather
+    # than a "billion laughs" bomb: current expat already caps classic
+    # amplification, so a bomb would pass under the stdlib parser too and
+    # prove nothing. A plain `<!ENTITY x "...">` is different -- the stdlib
+    # silently expands it (that is the whole attack surface), defusedxml
+    # refuses the document.
+
+    def test_internal_entity_declaration_is_rejected_not_expanded(self, monkeypatch):
+        atom = """<?xml version="1.0"?>
+<!DOCTYPE feed [<!ENTITY injected "EXPANDED-BY-PARSER">]>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>&injected;</title><summary>abstract</summary></entry>
+</feed>"""
+        monkeypatch.setattr(academic_search.requests, "get",
+                             lambda *a, **k: _FakeResponse(text=atom))
+        assert academic_search._search_arxiv("q", 5) == []
+
+    def test_external_entity_declaration_is_rejected_and_leaks_nothing(self, monkeypatch, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("TOP-SECRET-FILE-CONTENTS")
+        atom = f"""<?xml version="1.0"?>
+<!DOCTYPE feed [<!ENTITY xxe SYSTEM "file://{secret}">]>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>&xxe;</title><summary>abstract</summary></entry>
+</feed>"""
+        monkeypatch.setattr(academic_search.requests, "get",
+                             lambda *a, **k: _FakeResponse(text=atom))
+        papers = academic_search._search_arxiv("q", 5)
+        assert papers == []
+        assert "TOP-SECRET-FILE-CONTENTS" not in repr(papers)
+
+    def test_rejected_hostile_document_is_reported_like_any_other_failure(self, monkeypatch, capsys):
+        atom = ('<?xml version="1.0"?><!DOCTYPE feed [<!ENTITY a "b">]>'
+                '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>&a;</title></entry></feed>')
+        monkeypatch.setattr(academic_search.requests, "get",
+                             lambda *a, **k: _FakeResponse(text=atom))
+        academic_search._search_arxiv("q", 5)
+        assert "arXiv failed" in capsys.readouterr().out
+
 
 class TestCrossref:
     def test_parses_items(self, monkeypatch):
