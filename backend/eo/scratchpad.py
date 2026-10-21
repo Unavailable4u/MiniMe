@@ -31,16 +31,14 @@ Cleanup has two layers, per the plan:
      that errors out mid-way) never calls resolve_note() for some notes.
   3. Backstop: clear_scratchpad() wipes the whole key. Wired into
      eo/loop_controller.py's run_with_looping() at the point it returns
-     its finished (non-paused) result — see that function for the call
-     site. NOT wired into eo/executor.py's resume_graph(), which
-     duplicates run_with_looping()'s own finished-return tail inline
-     for the resumed-macro-loop case rather than calling back into
-     loop_controller.py; a scratchpad from a run that pauses and later
-     resumes to completion is not cleared by this patch. Flagged in
-     DEFERRED.md rather than fixed here — resume_graph()'s duplicated
-     tail is a pre-existing structural gap, not something this patch's
-     scope (add the scratchpad mechanism) should be reaching into
-     executor.py to restructure.
+     its finished (non-paused) result, and into eo/executor.py's
+     resume_graph() at both of its finished-return points (plain
+     resume, and the macro-loop tail). resume_graph() duplicates
+     run_with_looping()'s own finished-return tail inline rather than
+     calling back into loop_controller.py, so the call has to be
+     repeated there; it was initially missed (flagged in DEFERRED.md,
+     fixed in Patch C6, commit 2c35cd2). Every PAUSED exit deliberately
+     does not clear: a run that pauses again still needs its notes.
 """
 import uuid
 from datetime import datetime, timezone

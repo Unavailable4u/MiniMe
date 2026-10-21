@@ -1114,6 +1114,76 @@ class TestResumeGraph:
         assert result == _paused("role_b", reason="approval")
         assert list_notes("sess-repause-scratchpad")  # untouched
 
+    # --- the macro-loop tail: resume_graph()'s SECOND finished exit -------
+    # DEFERRED.md's entry named two finished-return points (plain resume,
+    # covered above, and the expert/beast macro-loop tail). Only the first
+    # had a regression test; these cover the second so the "doesn't clear
+    # the scratchpad" gap stays closed for both.
+
+    def _macro_snapshot(self, session_id, **overrides):
+        return _write_pause_snapshot(
+            session_id,
+            approval_roles=[],
+            mode="expert",
+            macro_loop_num=1,
+            macro_current_order=["role_a"],
+            macro_results={},
+            macro_mode="expert",
+            macro_hires=None,
+            macro_execution_order=["role_a"],
+            **overrides,
+        )
+
+    def test_macro_loop_tail_that_finishes_clears_the_scratchpad(self, monkeypatch, fake_bus):
+        from eo.scratchpad import write_note, list_notes
+        import eo.loop_controller as loop_controller
+
+        write_note("sess-macro-finish", "leftover note from before the pause")
+        assert list_notes("sess-macro-finish")  # sanity: note is there
+
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+        import eo.dispatcher as dispatcher_module
+        monkeypatch.setattr(dispatcher_module, "next_step", lambda *a, **k: (None, "plan"))
+        # The gatekeeper says STOP, so the macro loop breaks straight to
+        # its tail -- the exit under test.
+        monkeypatch.setattr(loop_controller, "_run_gatekeeper",
+                            lambda *a, **k: {"action": "STOP"})
+
+        self._macro_snapshot("sess-macro-finish")
+        result = executor.resume_graph("sess-macro-finish", {"action": "approve"})
+
+        # The macro tail's return shape (not the plain-resume shape).
+        assert set(result) == {"results", "final_role"}
+        assert list_notes("sess-macro-finish") == []
+
+    def test_macro_loop_pass_that_pauses_again_does_not_clear_the_scratchpad(self, monkeypatch, fake_bus):
+        from eo.scratchpad import write_note, list_notes
+        import eo.loop_controller as loop_controller
+
+        write_note("sess-macro-repause", "note the reviewer still needs")
+
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+        import eo.dispatcher as dispatcher_module
+        monkeypatch.setattr(dispatcher_module, "next_step", lambda *a, **k: (None, "plan"))
+        # Gatekeeper asks for another pass, and that pass pauses.
+        monkeypatch.setattr(loop_controller, "_run_gatekeeper",
+                            lambda *a, **k: {"action": "REDO", "redo_roles": ["role_a"]})
+        import eo.router as router_module
+        monkeypatch.setattr(router_module, "build_execution_graph_from_hires",
+                            lambda hires, order: (["generic_worker"], ["role_a"], {}))
+        monkeypatch.setattr(executor, "execute_graph",
+                            lambda *a, **k: {"status": "paused", "paused_at_role": "role_a"})
+
+        self._macro_snapshot("sess-macro-repause")
+        result = executor.resume_graph("sess-macro-repause", {"action": "approve"})
+
+        assert result["status"] == "paused"
+        assert list_notes("sess-macro-repause")  # untouched
+
     def test_approve_can_pause_again_on_a_later_role(self, monkeypatch, fake_bus):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
