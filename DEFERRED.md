@@ -11,6 +11,11 @@ Convention: when a patch flags something inline as out of scope, add a
 one-line entry here in the same commit, pointing back to the inline
 comment (`file:line`) that flagged it.
 
+When a deferred item is later fixed, mark its entry **[RESOLVED]** and add
+how it closed, rather than deleting it: other docs (e.g.
+`docs/decisions/`) point at these entries, and the entry is the record of
+what was deferred and why.
+
 ## Deferred at the start of Patch Series B (architecture plan §3.6)
 
 - **The daemon (external project access).** Separate feature, separate
@@ -98,8 +103,8 @@ comment (`file:line`) that flagged it.
 
 ## Deferred during Patch B7
 
-- **`eo/executor.py`'s `resume_graph()` doesn't clear the scratchpad on
-  completion.** (`backend/eo/scratchpad.py`, `backend/eo/executor.py`)
+- **[RESOLVED] `eo/executor.py`'s `resume_graph()` doesn't clear the
+  scratchpad on completion.** (`backend/eo/scratchpad.py`, `backend/eo/executor.py`)
   `resume_graph()` duplicates `run_with_looping()`'s own finished-return
   tail inline for the resumed-macro-loop case, rather than calling back
   into `eo/loop_controller.py` — so this patch's `clear_scratchpad()`
@@ -108,6 +113,17 @@ comment (`file:line`) that flagged it.
   Fixing it properly means resume_graph()'s duplicated tail should stop
   being a separate copy of that logic, which is a bigger structural
   change than this patch's scope (add the scratchpad mechanism).
+
+  **Resolved** in Patch C6 (landed in commit `2c35cd2`, 2026-08-30): rather
+  than restructure the duplicated tail, `resume_graph()` now calls
+  `clear_scratchpad()` at both of its finished exits (the plain-resume
+  return and the macro-loop tail) and at neither of its paused ones. The
+  four exits are pinned by regression tests in
+  `backend/tests/unit/test_eo_executor.py` (`TestResumeGraph`):
+  `test_approve_that_finishes_the_run_clears_the_scratchpad`,
+  `test_approve_that_pauses_again_does_not_clear_the_scratchpad`,
+  `test_macro_loop_tail_that_finishes_clears_the_scratchpad` and
+  `test_macro_loop_pass_that_pauses_again_does_not_clear_the_scratchpad`.
 
 ## Removed during Patch C0
 
@@ -121,11 +137,14 @@ comment (`file:line`) that flagged it.
 
 ## Reviewed during Patch B9
 
-- **`resume_graph()`'s scratchpad gap (flagged during Patch B7, above)
-  is still open.** Confirmed still present during B9's integration pass
+- **[RESOLVED] `resume_graph()`'s scratchpad gap (flagged during Patch B7,
+  above) was still open as of B9.** Confirmed still present during B9's integration pass
   (`backend/eo/executor.py`'s `resume_graph()` still has two finished-
   return points — the plain-resume case and the macro-loop-continuation
   tail — neither calling `clear_scratchpad()`). Not fixed here: B9 is an
   integration pass over B0-B8's own scope, not a rewrite of
   `resume_graph()`'s duplicated tail. Worth its own patch once that
   structural change is prioritized.
+
+  **Resolved** afterwards by Patch C6 -- see the B7 entry above for the fix
+  and its tests.

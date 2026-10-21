@@ -3,6 +3,11 @@
 **Status:** accepted
 **Context:** `MiniMe-CLI-Internal-Architecture-Plan.md` §7/§8; Patch Series
 B (`MiniMe-Patch-Series-B-Plan.md`), B0-B9.
+**Update (2026-10-21):** the `resume_graph()` scratchpad gap this record
+describes as still open was closed afterwards, in Patch C6 (commit
+`2c35cd2`); see the resolved entries in `DEFERRED.md`. The text below is
+left as written, because it records what was true when B9 closed the series
+out.
 
 ## The question
 
