@@ -43,7 +43,7 @@ import inspect
 import threading
 from dataclasses import dataclass
 
-SURFACES = ("web", "minimake", "minimate", "system")
+SURFACES = ("web", "m2c", "menux", "system")
 
 
 @dataclass(frozen=True)

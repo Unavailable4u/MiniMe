@@ -71,10 +71,10 @@ def test_commit_then_summary_matches_the_sum_of_the_rows(pg, user):
     from eo import plans, usage_ledger
     _commit(user, "web", 3.5, session_id="s1", input_tokens=100, output_tokens=50, cost_usd=0.0035)
     _commit(user, "web", 1.25)
-    _commit(user, "minimake", 2.0, run_id="run-1")
+    _commit(user, "m2c", 2.0, run_id="run-1")
 
     s = usage_ledger.usage_summary(user)
-    assert s["by_surface"] == {"web": 4.75, "minimake": 2.0, "minimate": 0.0}
+    assert s["by_surface"] == {"web": 4.75, "m2c": 2.0, "menux": 0.0}
     assert s["used"] == 6.75
     assert s["pool"] == plans.pool_for("free")
     assert s["remaining"] == round(s["pool"] - 6.75, 6)
@@ -180,13 +180,13 @@ def test_get_usage_route_matches_the_rows(pg, user):
     from api.routes.usage import router
 
     _commit(user, "web", 2.5)
-    _commit(user, "minimate", 1.5)
+    _commit(user, "menux", 1.5)
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[require_auth] = lambda: user
     body = TestClient(app).get("/api/usage").json()
     assert body["used"] == 4.0
-    assert body["by_surface"] == {"web": 2.5, "minimake": 0.0, "minimate": 1.5}
+    assert body["by_surface"] == {"web": 2.5, "m2c": 0.0, "menux": 1.5}
     assert set(body) == {"plan_key", "status", "pool", "used", "remaining",
                          "period_start", "resets_at", "by_surface"}
 

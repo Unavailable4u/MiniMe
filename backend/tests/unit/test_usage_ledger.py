@@ -100,10 +100,10 @@ def _record(**over):
 
 def test_record_call_attributes_to_the_open_scope(monkeypatch):
     rec = Recorder().install(monkeypatch)
-    with usage_context.scope("u1", "minimake", "s1"):
+    with usage_context.scope("u1", "m2c", "s1"):
         _record()
     params = rec.calls[0][1]
-    assert (params[0], params[1], params[2]) == ("u1", "minimake", "s1")
+    assert (params[0], params[1], params[2]) == ("u1", "m2c", "s1")
 
 
 def test_record_call_with_no_owner_is_system_with_null_user(monkeypatch):
@@ -164,10 +164,10 @@ def _rows(**by_surface):
 
 
 def test_summary_total_is_exactly_the_sum_of_the_breakdown(monkeypatch):
-    Recorder(rows=_rows(web=10.5, minimake=4.25), row=None).install(monkeypatch)
+    Recorder(rows=_rows(web=10.5, m2c=4.25), row=None).install(monkeypatch)
     s = usage_ledger.usage_summary("u1", NOW)
     assert s["used"] == 14.75 == sum(s["by_surface"].values())
-    assert s["by_surface"] == {"web": 10.5, "minimake": 4.25, "minimate": 0.0}
+    assert s["by_surface"] == {"web": 10.5, "m2c": 4.25, "menux": 0.0}
     assert s["pool"] == plans.pool_for("free")
     assert s["remaining"] == round(s["pool"] - 14.75, 6)
     assert s["resets_at"].startswith("2026-11-01")

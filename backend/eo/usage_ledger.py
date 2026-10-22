@@ -2,14 +2,14 @@
 eo/usage_ledger.py -- S01: the shared usage ledger.
 
 One row in `usage_ledger` (migration 0012) per real LLM call, attributed to
-an account and a surface ('web', 'minimake', 'minimate', or 'system' when
+an account and a surface ('web', 'm2c', 'menux', or 'system' when
 no account owns the call), plus the read side: how much of its credit pool
 has an account used this period?
 
 Rows hold NUMBERS AND OPAQUE IDS ONLY -- never prompt text, output text,
 file paths, or error messages. The one free-text-shaped column,
 `session_id`, is the same opaque task/chat id llm_call_log already
-stores; `run_id` is for MiniMake's opaque run id.
+stores; `run_id` is for M2C's opaque run id.
 
 The pieces, and who calls them:
 
@@ -26,7 +26,7 @@ The pieces, and who calls them:
                      an estimated call? Returns a structured result
                      (status 'ok' or 'quota_exhausted') and leaves
                      presentation to the caller -- the web app and
-                     MiniMake each decide how to show it. Nothing in
+                     M2C each decide how to show it. Nothing in
                      llm_client calls check(); S01 meters, it does not
                      block. Also fail-open.
   usage_summary(...) Pool, used, remaining, reset date and by-surface
@@ -53,7 +53,7 @@ SURFACES = usage_context.SURFACES
 
 # The surfaces an account's own breakdown reports. 'system' rows have no
 # account (user_id NULL), so they can never appear in a user's summary.
-USER_SURFACES = ("web", "minimake", "minimate")
+USER_SURFACES = ("web", "m2c", "menux")
 
 _CREDIT_DECIMALS = 6  # matches usage_ledger.credits numeric(18, 6)
 

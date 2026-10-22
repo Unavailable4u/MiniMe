@@ -5,7 +5,7 @@ One route:
 
   GET /api/usage -- the signed-in account's credit pool for the current
   period: pool, used, remaining, when it resets, and a by-surface
-  breakdown (web / minimake / minimate). Credits only; users never see
+  breakdown (web / m2c / menux). Credits only; users never see
   dollars. `used` is SUM(credits) over the account's ledger rows in the
   period window, so it always equals the rows -- see eo/usage_ledger.py.
 
