@@ -45,6 +45,7 @@ from eo.agent_task_pool import run_in_agent_pool  # NEW — perf audit §4.6 / p
 # see eo/agent_task_pool.py's own docstring for why.
 from eo.data_store import VersionConflict  # NEW — C4: revise_section's optimistic-concurrency error
 from eo.executor import resume_graph
+from eo import usage_context  # NEW — S01
 from eo.registry import (
     get_role_metadata,
     list_role_metadata,
@@ -576,7 +577,11 @@ async def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth))
         decision["expected_version"] = req.expected_version
 
     try:
-        result = await run_in_agent_pool(resume_graph, req.session_id, decision)
+        # NEW — S01: resume_graph() has no owner_id of its own; open the usage scope
+        # here, where the authenticated caller is known. run_in_agent_pool() copies
+        # this context onto the worker thread.
+        with usage_context.scope(owner_id, "web", req.session_id):
+            result = await run_in_agent_pool(resume_graph, req.session_id, decision)
     except VersionConflict as exc:
         # NEW — C4: revise_section's expected_version didn't match the
         # section's current stored version — a real conflict (someone

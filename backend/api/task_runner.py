@@ -58,6 +58,7 @@ from eo import (
     fact_summarizer,  # NEW — Part 3, extended by Patch B2
     loop_v4,
     routing_memory,
+    usage_context,  # NEW — S01: attributes this task's LLM calls to its owner in the usage ledger
     user_profile,  # NEW — Patch B2, profile_signals write-side
     workspace_facts,
 )
@@ -981,6 +982,7 @@ def _quota_summary(response: dict, session_id: str) -> dict:
     }
 
 
+@usage_context.attributed("web")   # NEW — S01
 def run_task(task_text: str, tier_override: int = None, directed_task_type_override: str = None,
              app_slug: str = None, run_tests: bool = False, session_id: str = None,
              mode: str = "auto", project_unique_name: str = None,
@@ -1028,6 +1030,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     identical behavior to today: no budget enforcement at all.
     """
     session_id = session_id or str(uuid.uuid4())
+    usage_context.attach_session(session_id)   # NEW — S01: the id was minted here, after the scope opened
     # Audit fix 2026-09-25: reset eo/run_guard.py's per-run rails (cancel flag,
     # failure-breaker counters, token-spend counter) for this fresh dispatch.
     # run_task() is only ever called for a NEW task_text; continuing a paused
@@ -1147,11 +1150,13 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     return response
 
 
+@usage_context.attributed("web")   # NEW — S01
 def preview_task(task_text: str, tier_override: int = None, directed_task_type_override: str = None,
                   app_slug: str = None, run_tests: bool = False, session_id: str = None,
                   mode: str = "auto", project_unique_name: str = None, owner_id: str = None) -> dict:
     """...docstring unchanged, plus: owner_id — same contract as run_task()."""
     session_id = session_id or str(uuid.uuid4())
+    usage_context.attach_session(session_id)   # NEW — S01: the id was minted here, after the scope opened
     conversation_memory.append_turn(session_id, "user", task_text)
 
     resolved = _resolve_decision_and_hires(task_text, tier_override, directed_task_type_override,
@@ -1179,6 +1184,7 @@ def preview_task(task_text: str, tier_override: int = None, directed_task_type_o
     }
 
 
+@usage_context.attributed("web")   # NEW — S01
 def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
                   app_slug: str = None, mode: str = "auto", project_unique_name: str = None,
                   approval_roles: set = None,
@@ -1246,6 +1252,7 @@ def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
     return response
 
 
+@usage_context.attributed("web")   # NEW — S01
 def run_task_from_template(template_id: str, task_text: str, session_id: str = None,
                             mode: str = "auto", project_unique_name: str = None,
                             owner_id: str = None, scope: str = None) -> dict:   
@@ -1306,6 +1313,7 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
     record_template_run(template_id)
 
     session_id = session_id or str(uuid.uuid4())
+    usage_context.attach_session(session_id)   # NEW — S01: the id was minted here, after the scope opened
     conversation_memory.append_turn(session_id, "user", task_text, owner_id=owner_id)   
 
     decision = classification_from_template(template)

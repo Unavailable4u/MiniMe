@@ -46,6 +46,7 @@ from eo.registry import (
     get_role_prompt,
     record_role_hires,
 )
+from eo import usage_context  # NEW — S01
 from eo.structure import PATH_TO_TIER, TIER_TO_PATH, build_reference_structure_addition
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
@@ -375,8 +376,8 @@ def run_panel(task_text: str, draft: dict) -> dict:
     votes = {}
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
-            executor.submit(_get_member_vote, "B", task_text, MEMBER_B_CHAIN): "B",
-            executor.submit(_get_member_vote, "C", task_text, MEMBER_C_CHAIN): "C",
+            executor.submit(usage_context.bind(_get_member_vote), "B", task_text, MEMBER_B_CHAIN): "B",
+            executor.submit(usage_context.bind(_get_member_vote), "C", task_text, MEMBER_C_CHAIN): "C",
         }
         for future in as_completed(futures):
             label = futures[future]

@@ -66,6 +66,7 @@ from eo import (
     panel_content,
     quiz_progress,
     study_progress,
+    usage_context,  # NEW — S01
     workspace_facts,
 )
 from eo.mcp_agent_tools import mcp_tools_for_agent  # NEW — Patch A3
@@ -1334,6 +1335,7 @@ class NotebooksGenerateRequest(BaseModel):
 
 
 @router.post("/api/workspaces/{ws_id}/notebooks/generate")
+@usage_context.attributed("web")   # NEW — S01: meter this route's LLM calls to its owner
 def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str = Depends(require_auth)):
     try:
         chat_workspace.get_workspace(ws_id, owner_id)
@@ -1477,6 +1479,7 @@ class NotebooksPodcastRequest(BaseModel):
 
 
 @router.post("/api/workspaces/{ws_id}/notebooks/podcast")
+@usage_context.attributed("web")   # NEW — S01: meter this route's LLM calls to its owner
 def notebooks_podcast(ws_id: str, req: NotebooksPodcastRequest, owner_id: str = Depends(require_auth)):
     try:
         chat_workspace.get_workspace(ws_id, owner_id)
@@ -1554,6 +1557,7 @@ class NotebooksVideoOverviewRequest(BaseModel):
 
 
 @router.post("/api/workspaces/{ws_id}/notebooks/video_overview")
+@usage_context.attributed("web")   # NEW — S01: meter this route's LLM calls to its owner
 def notebooks_video_overview(ws_id: str, req: NotebooksVideoOverviewRequest, owner_id: str = Depends(require_auth)):
     try:
         chat_workspace.get_workspace(ws_id, owner_id)
@@ -1683,6 +1687,7 @@ class TopicWorkflowRequest(BaseModel):
 
 
 @router.post("/api/workspaces/{ws_id}/topics/workflow")
+@usage_context.attributed("web")   # NEW — S01: meter this route's LLM calls to its owner
 def topic_workflow_endpoint(ws_id: str, req: TopicWorkflowRequest, owner_id: str = Depends(require_auth)):
     try:
         chat_workspace.get_workspace(ws_id, owner_id)
@@ -1760,6 +1765,7 @@ def topic_workflow_endpoint(ws_id: str, req: TopicWorkflowRequest, owner_id: str
 # module's docstring for why.
 
 @router.post("/api/workspaces/{ws_id}/table")
+@usage_context.attributed("web")   # NEW — S01: meter this route's LLM calls to its owner
 def build_table_endpoint(ws_id: str, req: BuildTableRequest, owner_id: str = Depends(require_auth)):
     try:
         chat_workspace.get_workspace(ws_id, owner_id)

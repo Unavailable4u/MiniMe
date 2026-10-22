@@ -50,6 +50,7 @@ from threading import Event, Lock, Thread
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from eo import usage_context  # NEW — S01
 from utils import rate_ledger
 
 # Sane upper bound on real OS threads a single run_gated() call will ever
@@ -294,6 +295,11 @@ def run_gated(tasks: "list[GatedTask]", session_id: str = None) -> "list[Future]
         return []
 
     futures: list[Future] = [Future() for _ in tasks]
+    # NEW — S01: pool workers start with an empty contextvars context, so
+    # capture the caller's usage scope here and re-enter it around each task
+    # (eo/usage_context.py) -- otherwise LLM calls that carry no session_id,
+    # e.g. part_price_finder's, would be metered as 'system'.
+    _usage_scope = usage_context.current()
     pending = list(range(len(tasks)))  # indices into tasks/futures still waiting on admission
     pending_lock = Lock()
     wake = Event()
@@ -327,7 +333,11 @@ def run_gated(tasks: "list[GatedTask]", session_id: str = None) -> "list[Future]
                 rate_ledger.release_reservation(reservation_id)
             return
         try:
-            result = tasks[idx].call()
+            if _usage_scope is not None:
+                with usage_context.scope(_usage_scope.user_id, _usage_scope.surface, _usage_scope.session_id):
+                    result = tasks[idx].call()
+            else:
+                result = tasks[idx].call()
         except BaseException as exc:  # noqa: BLE001 -- mirror Future's own "capture any exception" contract
             _release(tasks[idx], reservation_id)
             fut.set_exception(exc)

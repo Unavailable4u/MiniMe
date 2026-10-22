@@ -109,6 +109,7 @@ from api.routes.system import router as system_router
 # per workspace file path, see api/routes/code.py's own docstring for
 # why it's a separate file rather than folded into workspace_data.py.
 from api.routes.tasks import router as tasks_router
+from api.routes.usage import router as usage_router  # NEW — S01: GET /api/usage
 from api.routes.user_profile import router as user_profile_router  # NEW — Patch B6
 from api.routes.workspace_data import router as workspace_data_router
 from api.routes.workspaces import router as workspaces_router
@@ -371,6 +372,7 @@ app.include_router(local_workspace_router)  # F2 Part 2: /ws/daemon/{workspace_i
 app.include_router(local_workspace_data_router)  # F2 Part 3: /api/workspaces/{ws_id}/local/*
 app.include_router(mcp_router)  # Patch A8: /api/mcp/servers, /api/mcp/servers/{name}/status
 app.include_router(user_profile_router)  # NEW — Patch B6: /api/profile/*
+app.include_router(usage_router)  # NEW — S01: /api/usage
 
 
 # NEW — Data Layer architecture §9b: the real transport behind

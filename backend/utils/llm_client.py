@@ -107,6 +107,7 @@ from openai import OpenAI
 from openai import RateLimitError as OpenAIRateLimitError
 
 from eo import db as _call_log_db
+from eo import usage_ledger as _usage_ledger  # NEW — S01: shared usage ledger hook, see _record_usage_ledger()
 from eo.tracing import get_tracer, truncate_for_trace
 from memory.bus import incr as bus_incr
 from memory.bus import read as bus_read
@@ -2092,6 +2093,46 @@ def _record_call_log(*, provider: str, model: str, key_id: str, agent_name: str,
         print(f"  [{agent_name}] call-cost logging failed (non-fatal): {exc}")
 
 
+def _record_usage_ledger(*, provider: str, model: "str | None", agent_name: str,
+                          session_id: "str | None", usage) -> None:
+    """S01 -- one row per real LLM call in the shared usage ledger
+    (usage_ledger, migration 0012), written right next to
+    _record_call_log() at the same two call sites. The two tables answer
+    different questions and are written independently: llm_call_log is
+    internal cross-user cost/latency telemetry with no user column;
+    usage_ledger is the per-account, per-surface metering record behind
+    GET /api/usage and the credit pool.
+
+    Who the call is FOR is not known here -- no acting user is threaded
+    through the fallback chain -- so eo/usage_ledger.record_call() asks
+    eo/usage_context.py, which resolves it from the calling thread's scope
+    or, on a thread-pool worker, from the session_id this call already
+    carries. A call with no owning account is stored as surface 'system'.
+
+    Token counts and cost come from the same _usage_details_from_usage()
+    / _compute_cost_usd() _record_call_log() uses, not a second copy;
+    only the cached-token read is new (usage_ledger.cached_tokens_from_
+    usage()).
+
+    FAIL-OPEN, same contract as _record_call_log() above: never raises and
+    never blocks the call it describes. The extra `except` here is for
+    anything that could go wrong BEFORE record_call()'s own guard (the
+    usage unwrap, the price lookup) -- a ledger problem must never fail a
+    user's call."""
+    try:
+        usage_details = _usage_details_from_usage(usage) or {}
+        input_tokens = usage_details.get("input")
+        output_tokens = usage_details.get("output")
+        _usage_ledger.record_call(
+            provider=provider, model=model, session_id=session_id,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            cost_usd=_compute_cost_usd(provider, model, input_tokens, output_tokens),
+            usage=usage, agent_name=agent_name,
+        )
+    except Exception as exc:
+        print(f"  [{agent_name}] usage-ledger logging failed (non-fatal): {exc}")
+
+
 # CO5 follow-up -- spot-check probe for the groq
 # stream_options={"include_usage": True} question flagged in
 # stream_completion()'s docstring point 4. This does NOT fix anything by
@@ -3373,6 +3414,8 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             _record_call_log(provider=provider, model=model, key_id=key, agent_name=agent_name,
                               session_id=session_id, tier=tier, path=path, domain=domain,
                               usage=usage, elapsed_ms=_call_elapsed_ms, finish_reason=finish_reason)
+            _record_usage_ledger(provider=provider, model=model, agent_name=agent_name,
+                                  session_id=session_id, usage=usage)   # NEW — S01
             _record_ledger_bookkeeping(provider, key, model, usage, headroom_headers,
                                         reservation_id=_reservation_id)
             # Diagnostic (2026-09-13, SGA Groq-latency audit): the two
@@ -4095,6 +4138,8 @@ async def _walk_chain_once_stream(system_prompt: str, user_content: str, chain: 
                 _record_call_log(provider=provider, model=model, key_id=key_env, agent_name=agent_name,
                                   session_id=session_id, tier=tier, path=path, domain=domain,
                                   usage=usage, elapsed_ms=_stream_elapsed_ms, finish_reason=finish_reason)
+                _record_usage_ledger(provider=provider, model=model, agent_name=agent_name,
+                                      session_id=session_id, usage=usage)   # NEW — S01
                 if finish_reason == "length":
                     print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
                           f"mid-stream -- Fix C continuation is NOT implemented for "
