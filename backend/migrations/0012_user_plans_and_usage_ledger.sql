@@ -1,15 +1,15 @@
 -- 0012_user_plans_and_usage_ledger.sql
 --
 -- S01 (shared usage ledger and plan limits): the billing foundation the
--- Tech-A/B roadmap and the MiniMake/MiniMate build plans all assume exists.
+-- Tech-A/B roadmap and the M2C/Menux build plans all assume exists.
 -- Two tables:
 --
 --   user_plans    -- one row per account: which plan it is on, the size of
 --                    its monthly credit pool, and the window that pool
 --                    covers.
 --   usage_ledger  -- one row per real LLM call, attributed to a user and to
---                    the product surface that made it ('web', 'minimake',
---                    'minimate', or 'system' for platform-internal calls
+--                    the product surface that made it ('web', 'm2c',
+--                    'menux', or 'system' for platform-internal calls
 --                    with no owning account).
 --
 -- This is deliberately a SECOND table next to llm_call_log (migration
@@ -134,7 +134,7 @@ create table if not exists usage_ledger (
     id                  uuid primary key default gen_random_uuid(),
     user_id             text,
     surface             text not null
-                            check (surface in ('web', 'minimake', 'minimate', 'system')),
+                            check (surface in ('web', 'm2c', 'menux', 'system')),
     session_id          text,
     run_id              text,
     provider            text not null,

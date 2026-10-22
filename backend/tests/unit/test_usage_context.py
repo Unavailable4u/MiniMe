@@ -32,10 +32,10 @@ def test_scope_cleans_up_even_when_the_body_raises():
 
 
 def test_pool_worker_without_context_is_matched_by_session_id():
-    with uc.scope("u1", "minimake", "s1"):
+    with uc.scope("u1", "m2c", "s1"):
         with ThreadPoolExecutor(max_workers=2) as pool:
             who = pool.submit(uc.resolve, "s1").result()
-    assert (who.user_id, who.surface) == ("u1", "minimake")
+    assert (who.user_id, who.surface) == ("u1", "m2c")
 
 
 def test_pool_worker_with_an_unknown_session_is_system():
@@ -93,10 +93,10 @@ def test_same_user_twice_on_a_session_is_not_ambiguous():
 
 
 def test_missing_user_id_never_downgrades_an_outer_attribution():
-    with uc.scope("u1", "minimake", "s1"):
+    with uc.scope("u1", "m2c", "s1"):
         with uc.scope(None, "web", "s2"):
             who = uc.resolve(None)
-    assert (who.user_id, who.surface, who.session_id) == ("u1", "minimake", "s2")
+    assert (who.user_id, who.surface, who.session_id) == ("u1", "m2c", "s2")
 
 
 def test_missing_user_id_with_no_outer_scope_is_a_noop():
