@@ -17,11 +17,16 @@
 //     console+inspector bridge as "static" carried in as a project file
 //     instead of injected into an HTML document (see
 //     lib/preview/mmInspectorFile.js's own header for why).
-//   - "python": runs through the SAME usePyodideWorker.js worker
-//     ArtifactRenderer.jsx's PythonArtifact already uses — click Run,
-//     see stdout/stderr, no live-typing auto-run (Pyodide's own
-//     startup is ~10-20s, so re-running on every keystroke would be
-//     actively hostile, unlike the static path's cheap string-inlining).
+//   - "python": Patch B03 (M2C build plan, decision O6) — NOT run here
+//     any more. This state used to mount a PythonPreview with a Run
+//     button on the Pyodide worker; the browser no longer runs project
+//     Python from the preview panel, so it shows the neutral empty state
+//     "Python files aren't run in the browser" instead. Pyodide itself
+//     stays, for chat artifacts only (ArtifactRenderer.jsx's
+//     PythonArtifact, usePyodideWorker.js and the worker are untouched).
+//     Note the routing is per PROJECT, via detectKind(): any project with
+//     a .py file (and no package.json + .jsx) lands here, not just when a
+//     .py file happens to be the selected tab.
 //   - null (detectKind found nothing recognizable, or filesMeta hasn't
 //     loaded yet): the plan's own "No preview available for this
 //     project type — here's why" text.
@@ -52,7 +57,7 @@
 // own header for why "allow-scripts" alone, no allow-same-origin, no
 // allow-forms, is enough and deliberately not more).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Play } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useEditorStore } from "../../lib/workbench/editorStore";
 import { detectKind } from "../../lib/preview/detectKind";
 import { bundleStatic } from "../../lib/preview/bundleStatic";
@@ -65,7 +70,6 @@ import { instrumentSource } from "../../lib/preview/instrument"; // W6.6
 import { shouldBundleFile, pickReactEntry, parseDependencies, withInjectedImport, inspectorPathFor } from "../../lib/preview/reactBundle"; // W6.6
 import { buildMmInspectorFileContent } from "../../lib/preview/mmInspectorFile"; // W6.6
 import { SandpackProvider, SandpackPreview, useSandpack } from "@codesandbox/sandpack-react"; // W6.6
-import { usePyodideWorker } from "../../hooks/usePyodideWorker";
 import { DEVICE_PRESETS, DeviceToolbar } from "./DeviceToolbar"; // W7.3: moved out of this file unchanged
 import UrlPreview from "./UrlPreview"; // W7.3
 import { DEFAULT_PREVIEW_PREFS, loadPreviewPrefs, savePreviewPrefs } from "../../lib/preview/previewUrl"; // W7.3
@@ -661,94 +665,6 @@ function SandpackReactBridge({ nonce, ranges, cursor, activePath, onSelectElemen
   );
 }
 
-function PythonPreview({ filesMeta, overlay }) {
-  const { run } = usePyodideWorker();
-  const [status, setStatus] = useState("idle"); // idle | loading | ok | error
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-
-  // Same entry-picking spirit as detectKind's index.html shortest-path
-  // rule: prefer a file literally named main.py (the obvious
-  // convention), else the shallowest .py file in the project.
-  const entryPath = useMemo(() => {
-    const pyFiles = Object.keys(filesMeta || {}).filter((p) => /\.py$/i.test(p));
-    const main = pyFiles.find((p) => p === "main.py" || p.endsWith("/main.py"));
-    if (main) return main;
-    return pyFiles.sort((a, b) => a.split("/").length - b.split("/").length)[0] || null;
-  }, [filesMeta]);
-
-  const { state } = useEditorStore();
-
-  // W6.7: is the file Run would execute coming from a proposal? Python
-  // has no live rebuild (see this component's own header note), so the
-  // output on screen belongs to whichever version was last run —
-  // flipping the ribbon's toggle clears it rather than leaving the
-  // ORIGINAL's output sitting under a "previewing proposed changes"
-  // ribbon (or the reverse).
-  const usingProposed = !!(overlay && entryPath && entryPath in overlay);
-  useEffect(() => {
-    setStatus("idle");
-    setResult(null);
-    setError(null);
-  }, [usingProposed]);
-
-  async function handleRun() {
-    setStatus("loading");
-    setError(null);
-    try {
-      // Live buffer if the entry file happens to be open (unsaved edits
-      // included, same as the static path), otherwise this component
-      // doesn't have a provider prop to fall back to a server read with
-      // -- PreviewPane passes `provider` down to StaticPreview only
-      // today; wiring it here too is a reasonable, small follow-up once
-      // "run the file as currently saved" turns out not to be enough.
-      const code = usingProposed ? overlay[entryPath] : state.buffers[entryPath]?.edited;
-      const payload = await run(code ?? "");
-      setResult(payload);
-      setStatus("ok");
-    } catch (err) {
-      setError(err?.message || String(err));
-      setStatus("error");
-    }
-  }
-
-  if (!entryPath) {
-    return <EmptyState title="No Python entry file found" detail="Expected at least one .py file in this project." />;
-  }
-
-  const hasOutput = result && (result.stdout || result.stderr || (result.images && result.images.length > 0));
-
-  return (
-    <div className="h-full min-h-0 overflow-auto p-3 space-y-2">
-      <p className="text-[11px] text-[var(--neutral-500)]">
-        Running <span className="text-[var(--neutral-300)] font-mono">{entryPath}</span>
-        {usingProposed && <span className="text-amber-400"> · proposed version</span>}
-      </p>
-      <button
-        type="button"
-        onClick={handleRun}
-        disabled={status === "loading"}
-        className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded border border-[var(--neutral-800)] text-[var(--neutral-300)] hover:bg-white/5 disabled:opacity-60 transition-colors"
-      >
-        {status === "loading" ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-        {status === "loading" ? "Starting Python — first run loads the runtime (~10–20s)…" : status === "ok" ? "Run again" : "Run"}
-      </button>
-      {status === "error" && <div className="text-[11px] text-red-400 whitespace-pre-wrap">{error}</div>}
-      {status === "ok" && hasOutput && (
-        <div className="space-y-2">
-          {result.stdout && (
-            <pre className="overflow-x-auto p-2 text-xs text-[var(--neutral-300)] bg-black/60 rounded max-h-[240px] whitespace-pre-wrap">{result.stdout}</pre>
-          )}
-          {result.stderr && (
-            <pre className="overflow-x-auto p-2 text-xs text-amber-400 bg-black/60 rounded max-h-[160px] whitespace-pre-wrap">{result.stderr}</pre>
-          )}
-        </div>
-      )}
-      {status === "ok" && !hasOutput && <p className="text-[11px] text-[var(--neutral-600)]">Ran with no output.</p>}
-    </div>
-  );
-}
-
 function EmptyState({ title, detail }) {
   return (
     <div className="h-full flex flex-col items-center justify-center gap-1 px-6 text-center">
@@ -920,7 +836,8 @@ function PreviewPane({ provider, filesMeta, cursor, onSelectElement, workspaceId
       />
     );
   } else if (detected.kind === "python") {
-    body = <PythonPreview filesMeta={effectiveMeta} overlay={overlay} />;
+    // Patch B03: no Run in the preview panel (see this file's header).
+    body = <EmptyState title="Python files aren't run in the browser" detail="The preview shows HTML and React projects." />;
   } else if (detected.kind === "react") {
     body = <ReactPreview provider={provider} filesMeta={effectiveMeta} cursor={cursor} onSelectElement={handleSelectElement} overlay={overlay} />;
   } else {
@@ -932,7 +849,7 @@ function PreviewPane({ provider, filesMeta, cursor, onSelectElement, workspaceId
   // is open. Switching between "bare body" and "wrapper + body" would
   // make React unmount and remount the preview every time a review
   // opens or closes — reloading the iframe and dropping the device
-  // preset, inspect mode and a Python run's output for no reason.
+  // preset and inspect mode for no reason.
   return (
     <div className="h-full min-h-0 flex flex-col">
       <SourceTabs mode={sourceMode} onChange={(mode) => updatePrefs({ mode })} />
