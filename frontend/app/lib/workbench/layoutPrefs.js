@@ -23,20 +23,30 @@
 // change from elsewhere (search results opening a panel tab in W2.6,
 // "Fix with AI" opening Console in W6.2, the preview toggle in W6.1).
 
-/** Bottom panel tabs, in display order. Ids are what gets persisted. */
+/**
+ * Bottom panel tabs, in display order. Ids are what gets persisted.
+ *
+ * M2C B09: the browser Terminal panel was removed, and with it the
+ * "terminal" tab. A layout saved while that tab was active still has
+ * `bottomTab: "terminal"` in localStorage; that is no longer a known id,
+ * so normalizeLayout() below turns it into the default tab (loading a
+ * saved value) or ignores it (applying an update) — the rest of the saved
+ * layout is kept and the next save overwrites the stale value. Nothing
+ * here needs a migration: the "unknown id degrades to one default"
+ * rule already covers it.
+ */
 export const BOTTOM_TABS = [
   { id: "problems", label: "Problems" },
   { id: "console", label: "Console" },
-  { id: "terminal", label: "Terminal" },
   { id: "history", label: "History" },
 ];
 
 const BOTTOM_TAB_IDS = new Set(BOTTOM_TABS.map((t) => t.id));
 
 // Closed by default: until the panel has real content (W2.6 History,
-// W6.2 Console, W3.1 Terminal) an open-by-default empty panel would
-// only take height away from the editor. The tab strip is still
-// visible when closed, so it stays discoverable.
+// W6.2 Console) an open-by-default empty panel would only take height
+// away from the editor. The tab strip is still visible when closed, so
+// it stays discoverable.
 //
 // `source` (W3.1): which FileProvider the Explorer/tabs/search/history
 // are all currently pointed at — "cloud" (workspace_code_files) or

@@ -353,6 +353,10 @@ laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "nope", 
 assertEqual(laid.layout, before.layout, "SET_LAYOUT re-validates: an unknown tab id and a non-boolean are ignored, the current values stay");
 assertEqual(laid === before, true, "...and an update made only of invalid fields is a no-op (same state object)");
 
+// M2C B09: "terminal" used to be a tab id; it is now just another unknown one.
+laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "terminal" } });
+assertEqual(laid === before, true, "SET_LAYOUT naming the removed \"terminal\" tab is ignored (no-op, current tab stays)");
+
 laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "nope", bottomOpen: false } });
 assertEqual(
   laid.layout,

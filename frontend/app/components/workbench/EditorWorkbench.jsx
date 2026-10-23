@@ -23,8 +23,9 @@
 //
 // W2.3b completes the shell: a preview column at the right of the
 // editor (empty until W6.1 mounts a PreviewPane in it), a bottom panel
-// (Problems / Console / Terminal / History — containers only, each
-// filled by its own later step), a drag splitter for each, and the
+// (Problems / Console / History — containers only, each filled by its
+// own later step; a Terminal tab was removed in M2C B09), a drag
+// splitter for each, and the
 // persisted layout. Top to bottom the shell is now: a "main row"
 // (explorer | editor | preview), the bottom panel, the status bar.
 //
@@ -158,7 +159,6 @@ import { loadSavePrefs, saveSavePrefs } from "../../lib/workbench/savePrefs";
 import { encodeTabFlags, planAutosave, planBufferSync } from "../../lib/workbench/tabUtils";
 import ConfirmDialog from "../ConfirmDialog";
 import PendingActionBar from "../PendingActionBar";
-import TerminalPanel from "../TerminalPanel";
 import AiUpdateToast from "./AiUpdateToast"; // W8.2
 import BottomPanel from "./BottomPanel";
 import CodeEditor from "./CodeEditor";
@@ -481,11 +481,10 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // back {action_id, tool, params} (params for write_file is just
   // {path} — see PendingActionBar.jsx's Pusher handler, the content
   // never round-trips over the wire), so this is where the content we
-  // actually sent lives until confirm/deny resolves it. Same "a Map the
-  // component owns, not the store" shape as TerminalPanel.jsx's own
-  // runsRef for the identical reason: correlating OUR proposals among
-  // possibly several pending ones on this workspace (an agent, another
-  // tab) is UI bookkeeping, not editor state.
+  // actually sent lives until confirm/deny resolves it. A Map the
+  // component owns, not the store, because correlating OUR proposals
+  // among possibly several pending ones on this workspace (an agent,
+  // another tab) is UI bookkeeping, not editor state.
   const pendingLocalWritesRef = useRef(new Map());
 
   // ---- file list ----------------------------------------------------
@@ -1718,8 +1717,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // on the workspace, not only ones this tab proposed (an agent, or
   // another browser tab, can confirm one too) — pendingLocalWritesRef is
   // what tells "a write_file THIS saveFile() proposed" apart from any
-  // other confirmed action, the same way TerminalPanel.jsx's own runsRef
-  // filters the same channel's events down to commands IT started.
+  // other confirmed action.
   // Someone else's write to a path this tab happens to have open isn't
   // handled here: Local's capabilities.watch is false on purpose (see
   // fileProviders.js) — there's no live-change story for Local yet,
@@ -1748,24 +1746,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
     [saveSuccess]
   );
 
-  // The Terminal tab's real content once Local is active — reusing
-  // components/TerminalPanel.jsx as-is (it already owns its own
-  // propose/confirm/deny round trip for execute_command; nothing here
-  // duplicates that). Cloud keeps BottomPanel's own EMPTY_STATES.terminal
-  // copy, which already explains terminals are a local-folder thing.
-  const terminalPanelNode = useMemo(() => {
-    if (provider.id !== "local") return null;
-    if (daemonChecked && !daemonLive) {
-      return (
-        <div className="h-full flex flex-col items-center justify-center gap-2 text-center text-xs text-[var(--neutral-600)] px-3">
-          <span>
-            No daemon connected — see <code className="text-[10px]">daemon/README.md</code>.
-          </span>
-        </div>
-      );
-    }
-    return <TerminalPanel workspaceId={workspaceId} live={daemonLive} />;
-  }, [provider.id, workspaceId, daemonLive, daemonChecked]);
+  // (M2C B09: the browser Terminal panel that used to be built here, as
+  // a bottom-panel tab, was removed. The backend command routes stay
+  // until M2C replaces them.)
 
   // ---- panel layout (W2.3b) --------------------------------------------
 
@@ -2031,9 +2014,8 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
       search: searchPanelNode,
       history: historyPanelNode,
       console: consolePanelNode,
-      ...(terminalPanelNode ? { terminal: terminalPanelNode } : {}),
     }),
-    [problemsPanelNode, searchPanelNode, historyPanelNode, consolePanelNode, terminalPanelNode]
+    [problemsPanelNode, searchPanelNode, historyPanelNode, consolePanelNode]
   );
 
   // ---- autosave + unsaved-edits guards (W2.5) --------------------------

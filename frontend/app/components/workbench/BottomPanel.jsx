@@ -1,15 +1,19 @@
 "use client";
 // frontend/app/components/workbench/BottomPanel.jsx — W2.3b (Build
 // Workbench plan). The panel under the editor row: Problems · Console ·
-// Terminal · History. It was the CONTAINER only at first — each tab's
-// content filled in by its own later step, most already landed:
+// History. It was the CONTAINER only at first — each tab's content
+// filled in by its own later step, all of which have landed:
 //   Problems  → W8.3b (pipeline test/scan findings) — see
 //               EditorWorkbench.jsx's `bottomPanels.problems`
 //               (ProblemsPanel.jsx)
 //   Console   → W6.2 (preview bridge) — see EditorWorkbench.jsx's own
 //               `bottomPanels.console` (ConsolePanel.jsx)
-//   Terminal  → W3.1 (local daemon)
 //   History   → W2.6 (file versions)
+//
+// M2C B09: the Terminal tab (W3.1, the local-daemon terminal) was
+// removed along with its component. The tab list itself lives in
+// layoutPrefs.js's BOTTOM_TABS, which this file renders; see the note
+// there on how a layout saved with "terminal" active is handled.
 //
 // The tab strip is always rendered, even collapsed: a closed panel is
 // just that 32px strip, which keeps the panel discoverable without
@@ -45,10 +49,6 @@ const EMPTY_STATES = {
   console: {
     title: "Console is empty",
     body: "Output and errors from the live preview will appear here.",
-  },
-  terminal: {
-    title: "Terminal is for local folders",
-    body: "It opens when a local folder is connected through the local daemon. Project files stored in the cloud have no terminal.",
   },
   history: {
     title: "File history",
