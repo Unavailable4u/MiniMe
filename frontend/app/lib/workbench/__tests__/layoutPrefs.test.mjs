@@ -58,8 +58,13 @@ function fakeStorage(initial = {}) {
 
 assertEqual(
   BOTTOM_TABS.map((t) => t.id),
-  ["problems", "console", "terminal", "history"],
-  "the bottom panel has the four planned tabs, in order"
+  ["problems", "console", "history"],
+  "the bottom panel has three tabs, in order (the Terminal tab was removed in M2C B09)"
+);
+assertEqual(
+  BOTTOM_TABS.some((t) => t.id === "terminal" || /terminal/i.test(t.label)),
+  false,
+  "no Terminal tab is offered any more"
 );
 assertEqual(DEFAULT_LAYOUT, { bottomOpen: false, bottomTab: "problems", previewOpen: false, source: "cloud" }, "defaults: panel and preview closed, Problems selected, cloud source");
 
@@ -165,6 +170,48 @@ saveLayout(throwing, "ws-1", DEFAULT_LAYOUT); // must not throw
 assertEqual(true, true, "storage that throws on write/remove: save is swallowed");
 
 assertEqual(browserStorage(), null, "browserStorage() is null outside a browser (no `window` under node)");
+
+// --- M2C B09: a layout saved while the Terminal tab still existed ---------
+//
+// Browsers that last had the Terminal tab active hold `bottomTab:
+// "terminal"` in localStorage. That id is no longer a tab, so it has to
+// degrade to a valid one (never crash, never leave the panel blank), and
+// the rest of the saved layout has to survive.
+
+assertEqual(normalizeLayout({ bottomTab: "terminal" }).bottomTab, "problems", "a stale \"terminal\" tab id normalizes to the default tab");
+assertEqual(
+  normalizeLayout({ bottomOpen: true, bottomTab: "terminal", previewOpen: true, source: "local" }),
+  { bottomOpen: true, bottomTab: "problems", previewOpen: true, source: "local" },
+  "...and the other saved fields are kept"
+);
+assertEqual(
+  normalizeLayout({ bottomTab: "terminal" }, { bottomOpen: true, bottomTab: "history", previewOpen: false, source: "cloud" }).bottomTab,
+  "history",
+  "applying an update that names \"terminal\" is ignored: the current tab stays (SET_LAYOUT shape)"
+);
+assertEqual(
+  BOTTOM_TABS.some((t) => t.id === normalizeLayout({ bottomTab: "terminal" }).bottomTab),
+  true,
+  "the fallback is always one of BOTTOM_TABS, so the panel never has an unknown active tab"
+);
+
+store = fakeStorage({ [layoutStorageKey("ws-1")]: JSON.stringify({ bottomOpen: true, bottomTab: "terminal", previewOpen: false, source: "cloud" }) });
+assertEqual(
+  loadLayout(store, "ws-1"),
+  { bottomOpen: true, bottomTab: "problems", previewOpen: false, source: "cloud" },
+  "loadLayout: a saved \"terminal\" tab loads as Problems with the panel still open"
+);
+// The workbench re-saves whatever it loaded on mount (EditorWorkbench's
+// persist effect), which must overwrite the stale id rather than keep it.
+saveLayout(store, "ws-1", loadLayout(store, "ws-1"));
+assertEqual(
+  JSON.parse(store.data[layoutStorageKey("ws-1")]).bottomTab,
+  "problems",
+  "re-saving the loaded layout replaces the stale \"terminal\" value in storage"
+);
+store = fakeStorage({ [layoutStorageKey("ws-1")]: JSON.stringify({ bottomTab: "terminal" }) });
+saveLayout(store, "ws-1", loadLayout(store, "ws-1"));
+assertEqual(Object.keys(store.data), [], "a stale \"terminal\" on an otherwise default layout is cleaned up (saved as defaults, key removed)");
 
 // --- W3.1: source ------------------------------------------------------
 
