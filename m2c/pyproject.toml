@@ -1,0 +1,50 @@
+# m2c/pyproject.toml -- Patch C01: packaging for the M2C client.
+#
+# Build backend: hatchling. Chosen over setuptools because this is a pure-
+# Python src-layout package with no compiled code and no setup.py quirks:
+# PEP 517/660 editable installs work out of the box (`pip install -e .`),
+# the version is read from one line in src/m2c/__init__.py without importing
+# it, and `uv tool install` / `pipx` build it the same way. Pinned exactly,
+# like the other tools in this repo (ruff, the CI actions): bump it
+# deliberately, and prefer a release at least a couple of weeks old.
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "m2c"
+dynamic = ["version"]
+description = "M2C (Minime to Code): a local-first coding agent client for Linux and WSL2."
+readme = "README.md"
+requires-python = ">=3.11"            # decision D1
+# Runtime dependencies: the standard library only. tests/test_cli.py fails if
+# one is added here (or imported) without that test being changed on purpose.
+dependencies = []
+# No `license` field yet: whether the client is open-sourced is decision D11,
+# still open. Set it (and the license headers) when that is decided.
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.optional-dependencies]
+# Same pin as daemon/requirements.txt.
+dev = ["pytest==8.4.1"]
+
+[project.scripts]
+m2c = "m2c.cli:main"
+
+[tool.hatch.version]
+path = "src/m2c/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/m2c"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/README.md", "/pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
