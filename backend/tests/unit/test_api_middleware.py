@@ -12,6 +12,11 @@ These tests build a small app through add_cors_and_error_middleware() —
 the exact function api/server.py calls — rather than importing
 api.server (which boots the DB pool, Sentry, Laya, MCP...), so the real
 middleware order is what's under test.
+
+Patch B07 (M2C) adds the CORS-origin tests at the bottom of this file:
+the dev-friendly default origins, the ALLOWED_ORIGINS override, the
+optional dev-only ALLOWED_ORIGIN_REGEX, and the rule that a wildcard
+can never be combined with credentials.
 """
 import asyncio
 import warnings
@@ -23,9 +28,12 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from api.middleware import (
+    DEFAULT_ALLOWED_ORIGINS,
     INTERNAL_ERROR_DETAIL,
     UnhandledErrorMiddleware,
     add_cors_and_error_middleware,
+    parse_allowed_origin_regex,
+    parse_allowed_origins,
 )
 
 warnings.filterwarnings("ignore", message=".*httpx.*", category=DeprecationWarning)
@@ -205,3 +213,177 @@ def test_non_http_scopes_pass_straight_through(scope_type):
     with pytest.raises(RuntimeError, match="ws failure"):
         asyncio.run(go())
     assert sent == []  # no HTTP 500 invented for a non-HTTP scope
+
+# ---------------------------------------------------------------------
+# Patch B07 — dev-friendly CORS origins
+#
+# api/server.py cannot be imported in a unit test (it boots the DB pool,
+# Sentry, Laya, MCP...), so the env-string parsing lives in
+# api/middleware.py as pure functions and is tested here directly; the
+# behavior tests go through add_cors_and_error_middleware(), the exact
+# function api/server.py calls.
+# ---------------------------------------------------------------------
+
+LOCALHOST = "http://localhost:3000"
+LOOPBACK_IP = "http://127.0.0.1:3000"
+LAN_ORIGIN = "http://192.168.1.50:3000"
+LAN_REGEX = r"http://192\.168\.\d{1,3}\.\d{1,3}:3000"
+
+
+def _cors_client(origins, **kwargs) -> TestClient:
+    app = FastAPI()
+    add_cors_and_error_middleware(app, origins, **kwargs)
+
+    @app.get("/ok")
+    def ok():
+        return {"ok": True}
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _cors_options(app: FastAPI) -> dict:
+    """The kwargs CORSMiddleware was installed with."""
+    (entry,) = [m for m in app.user_middleware if m.cls is CORSMiddleware]
+    return dict(entry.kwargs)
+
+
+# ----- defaults -------------------------------------------------------
+
+def test_default_origins_include_localhost_and_loopback_ip():
+    assert parse_allowed_origins(None) == [LOCALHOST, LOOPBACK_IP]
+    assert list(DEFAULT_ALLOWED_ORIGINS) == [LOCALHOST, LOOPBACK_IP]
+
+
+@pytest.mark.parametrize("raw", ["", "   ", ",", " , ,, "])
+def test_blank_or_separator_only_env_falls_back_to_the_defaults(raw):
+    # `ALLOWED_ORIGINS=` left blank in a .env file must not silently
+    # lock every browser out, and must never turn into a wildcard.
+    assert parse_allowed_origins(raw) == [LOCALHOST, LOOPBACK_IP]
+
+
+def test_default_list_is_a_fresh_copy_each_call():
+    first = parse_allowed_origins(None)
+    first.append("http://mutated.example")
+    assert parse_allowed_origins(None) == [LOCALHOST, LOOPBACK_IP]
+
+
+def test_loopback_ip_origin_is_allowed_by_default():
+    client = _cors_client(parse_allowed_origins(None))
+    for origin in (LOCALHOST, LOOPBACK_IP):
+        r = client.get("/ok", headers={"Origin": origin})
+        assert r.headers["access-control-allow-origin"] == origin
+
+
+# ----- ALLOWED_ORIGINS override --------------------------------------
+
+def test_env_value_overrides_the_defaults_entirely():
+    got = parse_allowed_origins("https://app.example.com")
+    assert got == ["https://app.example.com"]
+    assert LOCALHOST not in got and LOOPBACK_IP not in got
+
+
+def test_env_value_is_stripped_and_empty_items_are_ignored():
+    raw = "  https://a.example.com , ,https://b.example.com,, \t"
+    assert parse_allowed_origins(raw) == ["https://a.example.com", "https://b.example.com"]
+
+
+def test_overridden_origins_are_what_the_middleware_enforces():
+    client = _cors_client(parse_allowed_origins(" https://a.example.com ,"))
+    ok = client.get("/ok", headers={"Origin": "https://a.example.com"})
+    assert ok.headers["access-control-allow-origin"] == "https://a.example.com"
+    # The old dev default is gone once production origins are explicit.
+    dev = client.get("/ok", headers={"Origin": LOCALHOST})
+    assert "access-control-allow-origin" not in dev.headers
+
+
+# ----- ALLOWED_ORIGIN_REGEX (dev-only) -------------------------------
+
+def test_regex_setting_is_optional_and_blank_means_none():
+    assert parse_allowed_origin_regex(None) is None
+    assert parse_allowed_origin_regex("") is None
+    assert parse_allowed_origin_regex("   ") is None
+    assert parse_allowed_origin_regex(f"  {LAN_REGEX}  ") == LAN_REGEX
+
+
+def test_regex_origin_is_allowed_and_non_matching_origin_is_not():
+    client = _cors_client([LOCALHOST], allowed_origin_regex=LAN_REGEX)
+    lan = client.get("/ok", headers={"Origin": LAN_ORIGIN})
+    assert lan.headers["access-control-allow-origin"] == LAN_ORIGIN
+    # The explicit list keeps working next to the regex.
+    explicit = client.get("/ok", headers={"Origin": LOCALHOST})
+    assert explicit.headers["access-control-allow-origin"] == LOCALHOST
+    other = client.get("/ok", headers={"Origin": "http://evil.example"})
+    assert "access-control-allow-origin" not in other.headers
+
+
+def test_regex_must_match_the_whole_origin_not_a_prefix():
+    client = _cors_client([LOCALHOST], allowed_origin_regex=LAN_REGEX)
+    sneaky = client.get("/ok", headers={"Origin": LAN_ORIGIN + ".evil.example"})
+    assert "access-control-allow-origin" not in sneaky.headers
+
+
+def test_regex_applies_to_preflight_too():
+    client = _cors_client([LOCALHOST], allowed_origin_regex=LAN_REGEX)
+    r = client.options(
+        "/ok", headers={"Origin": LAN_ORIGIN, "Access-Control-Request-Method": "POST"}
+    )
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == LAN_ORIGIN
+
+
+def test_regex_defaults_to_none_so_existing_callers_are_unaffected():
+    app = FastAPI()
+    add_cors_and_error_middleware(app, [LOCALHOST])  # old two-argument call
+    assert _cors_options(app).get("allow_origin_regex") is None
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.get("/nope", headers={"Origin": LAN_ORIGIN})
+    assert "access-control-allow-origin" not in r.headers
+
+
+def test_invalid_regex_fails_at_install_time_with_a_clear_message():
+    # Starlette would only compile it lazily, when the first request
+    # builds the middleware stack; a typo in ALLOWED_ORIGIN_REGEX must
+    # instead stop the server at boot, naming the setting.
+    with pytest.raises(ValueError, match="ALLOWED_ORIGIN_REGEX"):
+        add_cors_and_error_middleware(FastAPI(), [LOCALHOST], allowed_origin_regex="(")
+
+
+# ----- wildcard can never be combined with credentials ---------------
+
+@pytest.mark.parametrize(
+    "origins, regex",
+    [
+        (["*"], None),
+        ([LOCALHOST, "*"], None),
+        ([LOCALHOST], ".*"),
+        (parse_allowed_origins("*"), None),
+    ],
+)
+def test_wildcard_is_never_combined_with_credentials(origins, regex):
+    app = FastAPI()
+    add_cors_and_error_middleware(app, origins, allowed_origin_regex=regex)
+
+    # 1. Configuration: credentials are never switched on.
+    assert _cors_options(app).get("allow_credentials", False) is False
+
+    # 2. Behavior: even a cookie-bearing request gets no credentials
+    #    grant (Starlette would reflect the origin AND allow
+    #    credentials if allow_credentials were True with a wildcard).
+    @app.get("/ok")
+    def ok():
+        return {"ok": True}
+
+    client = TestClient(app, raise_server_exceptions=False)
+    headers = {"Origin": "http://anything.example", "Cookie": "session=abc"}
+    simple = client.get("/ok", headers=headers)
+    assert "access-control-allow-credentials" not in simple.headers
+    preflight = client.options(
+        "/ok", headers={**headers, "Access-Control-Request-Method": "POST"}
+    )
+    assert "access-control-allow-credentials" not in preflight.headers
+
+
+def test_credentials_are_off_for_normal_explicit_origins_too():
+    app = FastAPI()
+    add_cors_and_error_middleware(app, [LOCALHOST])
+    assert _cors_options(app).get("allow_credentials") is False

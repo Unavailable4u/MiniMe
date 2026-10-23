@@ -67,7 +67,11 @@ from fastapi.responses import JSONResponse
 # _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
 # so api/routes/* modules can import it without a circular import back
 # into this file. See api/deps.py's module docstring for why.
-from api.middleware import add_cors_and_error_middleware
+from api.middleware import (
+    add_cors_and_error_middleware,
+    parse_allowed_origin_regex,
+    parse_allowed_origins,
+)
 from api.stream_tickets import KIND_WS, redeem_ticket
 from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
 from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
@@ -267,13 +271,19 @@ app = FastAPI(title="MiniMe v6 — EO layer API", lifespan=_lifespan)
 # api/routes/notebooks.py (B6 piece 7) along with every route that
 # read it. See that file's own copy of this same comment/definition.
 
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+# Patch B07: ALLOWED_ORIGINS defaults to both http://localhost:3000 and
+# http://127.0.0.1:3000 (an explicit value replaces the defaults; items
+# are stripped, empty ones ignored). ALLOWED_ORIGIN_REGEX is an optional
+# DEV-ONLY extra for LAN testing. Credentials are never enabled, so "*"
+# can't be combined with them. All of this is in api/middleware.py.
+ALLOWED_ORIGINS = parse_allowed_origins(os.getenv("ALLOWED_ORIGINS"))
+ALLOWED_ORIGIN_REGEX = parse_allowed_origin_regex(os.getenv("ALLOWED_ORIGIN_REGEX"))
 # CORS + the unhandled-error net, installed together because their ORDER
 # matters: without the error middleware sitting just inside CORS, an
 # unhandled exception (any DB error, any bug) is answered by Starlette's
 # outermost layer with NO CORS headers, and the browser reports an
 # opaque "Failed to fetch" instead of the real 500. See api/middleware.py.
-add_cors_and_error_middleware(app, ALLOWED_ORIGINS)
+add_cors_and_error_middleware(app, ALLOWED_ORIGINS, allowed_origin_regex=ALLOWED_ORIGIN_REGEX)
 
 
 # perf audit §4.6 / priority #9 (part 1): eo/db.py's cursor() now retries
