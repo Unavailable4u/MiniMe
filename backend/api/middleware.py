@@ -48,8 +48,36 @@ Use add_cors_and_error_middleware() rather than adding the two
 middlewares by hand: the ORDER is the whole point (this one must be
 added BEFORE CORSMiddleware, since the last middleware added is the
 outermost), and having one function own it lets tests pin the order.
+
+CORS ORIGINS (Patch B07)
+------------------------
+Which origins may call the API is configured by two env vars read in
+api/server.py and parsed here, so the parsing is unit-testable without
+booting the server:
+
+  ALLOWED_ORIGINS       comma-separated explicit origins. Unset or blank
+                        means DEFAULT_ALLOWED_ORIGINS, which names both
+                        http://localhost:3000 and http://127.0.0.1:3000
+                        (a browser treats them as different origins, and
+                        `next dev` is reachable at either). A non-blank
+                        value REPLACES the defaults: production sets its
+                        real origin(s) explicitly and gets nothing else.
+  ALLOWED_ORIGIN_REGEX  optional, DEV ONLY, for testing from another
+                        device on the LAN (http://192.168.x.y:3000). A
+                        regex is far easier to get wrong than a list, so
+                        production leaves it unset.
+
+Credentials are never enabled. The middleware does not offer an
+allow_credentials option and passes allow_credentials=False explicitly,
+so "*" (or a regex such as ".*") can never be combined with credentials:
+Starlette answers a credentialed request to a wildcard by reflecting the
+caller's Origin, which would let any website make authenticated calls.
+The API authenticates with an Authorization header, which needs no
+credentials mode. If cookie auth is ever added, it must also stop
+accepting "*" before allow_credentials is switched on.
 """
 import contextlib
+import re
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,6 +86,44 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # Generic on purpose — see the module docstring.
 INTERNAL_ERROR_DETAIL = "Internal server error"
+
+# Patch B07: what ALLOWED_ORIGINS means when it is unset or blank. Both
+# spellings of loopback, because the browser matches the Origin header
+# literally and developers open the app at either one.
+DEFAULT_ALLOWED_ORIGINS: tuple[str, ...] = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+)
+
+
+def parse_allowed_origins(raw: str | None) -> list[str]:
+    """Turns the ALLOWED_ORIGINS env string into the origin list.
+
+    Items are comma-separated; whitespace around an item is stripped and
+    empty items are ignored (so "a, b,," and a trailing comma are fine).
+    If nothing is left (the variable is unset, blank, or only commas)
+    the dev defaults are used. A blank value never means "allow
+    everything" and never means "allow nothing"; a typo'd empty line in
+    a .env file should not lock the developer out of their own app.
+
+    Always returns a new list, so a caller cannot mutate the defaults.
+    """
+    items = [item.strip() for item in (raw or "").split(",")]
+    items = [item for item in items if item]
+    return items or list(DEFAULT_ALLOWED_ORIGINS)
+
+
+def parse_allowed_origin_regex(raw: str | None) -> str | None:
+    """Turns the ALLOWED_ORIGIN_REGEX env string into the regex, or None.
+
+    DEV ONLY (LAN testing). Blank or unset means "no regex". The pattern
+    is matched against the WHOLE Origin header (Starlette uses
+    fullmatch), so anchors are not needed, but it should still be as
+    narrow as possible, for example
+    ``http://192\\.168\\.\\d{1,3}\\.\\d{1,3}:3000``.
+    """
+    value = (raw or "").strip()
+    return value or None
 
 
 class UnhandledErrorMiddleware:
@@ -98,14 +164,41 @@ class UnhandledErrorMiddleware:
             raise
 
 
-def add_cors_and_error_middleware(app: FastAPI, allowed_origins: list[str]) -> None:
+def add_cors_and_error_middleware(
+    app: FastAPI,
+    allowed_origins: list[str],
+    *,
+    allowed_origin_regex: str | None = None,
+) -> None:
     """Installs UnhandledErrorMiddleware and CORSMiddleware in the one
     order that works: error middleware first (inner), CORS last
-    (outer), so the error middleware's 500 passes through CORS."""
+    (outer), so the error middleware's 500 passes through CORS.
+
+    `allowed_origin_regex` (Patch B07, keyword-only, default None so
+    existing callers are unaffected) is a DEV-ONLY extra: an origin is
+    allowed if it is in `allowed_origins` OR fully matches the regex.
+    An invalid pattern raises ValueError here, at boot, instead of
+    failing on the first request when Starlette would compile it.
+
+    Credentials are deliberately not configurable: see "CORS ORIGINS" in
+    the module docstring.
+    """
+    if allowed_origin_regex is not None:
+        try:
+            re.compile(allowed_origin_regex)
+        except re.error as exc:
+            raise ValueError(
+                f"ALLOWED_ORIGIN_REGEX is not a valid regular expression: {exc}"
+            ) from exc
+
     app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
+        allow_origin_regex=allowed_origin_regex,
+        # Explicit, not just the Starlette default: never combine a
+        # wildcard (or a catch-all regex) with credentials.
+        allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
