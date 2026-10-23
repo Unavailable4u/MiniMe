@@ -133,6 +133,32 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm test
+  protocol:
+    # P00 (M2C Wave 1) -- the protocol / tool-schema contract (protocol/v1).
+    #
+    # Its own job, with its own pinned requirements file, on purpose:
+    # jsonschema is NOT in backend/requirements.txt, and backend/tests/
+    # conftest.py imports eo.registry at module scope (which needs the whole
+    # backend dependency set), so the contract test runs here with
+    # --noconftest instead. In the normal `test` job the same test file is
+    # collected too but skips itself (pytest.importorskip("jsonschema")).
+    #
+    # Step 1 (validate.py) checks the schemas, every golden transcript in
+    # protocol/fixtures, the invalid examples, and -- once WP C01 has created
+    # the m2c/ package -- that its synced copy of protocol/v1 is byte-identical
+    # (passes vacuously until then). Step 2 is the pytest suite built on the
+    # same functions. Blocking, like test/lint: a failure means the contract
+    # that client and server are built against is broken.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.11" }
+      - run: pip install -r protocol/requirements.txt
+      - run: python protocol/validate.py
+      - run: pytest tests/unit/test_protocol_contract.py --noconftest -v
+        working-directory: backend
   secrets-scan:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,19 @@
+{
+  "name": "plan_exit",
+  "version": "v0",
+  "risk": "R0",
+  "description": "Present the finished plan to the user for approval and leave plan mode. In plan mode this is the only tool besides the read-only ones.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "plan": {
+        "type": "string",
+        "description": "The complete plan, in Markdown."
+      }
+    },
+    "required": [
+      "plan"
+    ],
+    "additionalProperties": false
+  }
+}

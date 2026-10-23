@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/tool_proposed.json",
+  "title": "tool_proposed (server -> client)",
+  "description": "The model wants a tool run on the device. The client's policy engine decides allow, ask or deny; it may raise the risk, never lower it. Tools in the v0 catalog have their input checked here; any other name passes through and the client fails closed.",
+  "x-m2c-data-class": "content",
+  "type": "object",
+  "required": [
+    "call_id",
+    "tool",
+    "input",
+    "risk"
+  ],
+  "properties": {
+    "call_id": {
+      "$ref": "common.json#/$defs/call_id"
+    },
+    "tool": {
+      "$ref": "common.json#/$defs/tool_name"
+    },
+    "input": {
+      "type": "object"
+    },
+    "risk": {
+      "$ref": "common.json#/$defs/risk"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "read_file"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/read_file.json#/input_schema"
+          },
+          "risk": {
+            "const": "R0"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "list_dir"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/list_dir.json#/input_schema"
+          },
+          "risk": {
+            "const": "R0"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "glob"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/glob.json#/input_schema"
+          },
+          "risk": {
+            "const": "R0"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "grep"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/grep.json#/input_schema"
+          },
+          "risk": {
+            "const": "R0"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "edit_file"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/edit_file.json#/input_schema"
+          },
+          "risk": {
+            "const": "R1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "write_file"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/write_file.json#/input_schema"
+          },
+          "risk": {
+            "const": "R1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "delete_path"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/delete_path.json#/input_schema"
+          },
+          "risk": {
+            "enum": [
+              "R1",
+              "R4"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "bash"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/bash.json#/input_schema"
+          },
+          "risk": {
+            "const": "R2"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "plan_exit"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/plan_exit.json#/input_schema"
+          },
+          "risk": {
+            "const": "R0"
+          }
+        }
+      }
+    }
+  ]
+}

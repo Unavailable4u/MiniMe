@@ -1,0 +1,30 @@
+{
+  "name": "bash",
+  "version": "v0",
+  "risk": "R2",
+  "description": "Run a shell command in the project directory inside the sandbox. Returns stdout, stderr and exit code.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string"
+      },
+      "timeout_s": {
+        "type": "integer",
+        "description": "Kill the command after this many seconds.",
+        "default": 120,
+        "minimum": 1,
+        "maximum": 3600
+      },
+      "reason": {
+        "type": "string",
+        "description": "One line shown in the approval prompt.",
+        "maxLength": 200
+      }
+    },
+    "required": [
+      "command"
+    ],
+    "additionalProperties": false
+  }
+}

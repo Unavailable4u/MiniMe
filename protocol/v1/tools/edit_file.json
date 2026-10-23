@@ -1,0 +1,30 @@
+{
+  "name": "edit_file",
+  "version": "v0",
+  "risk": "R1",
+  "description": "Replace exactly one occurrence of old_string with new_string in a file you have read. Fails if old_string is missing or appears more than once, unless replace_all is true.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string"
+      },
+      "old_string": {
+        "type": "string"
+      },
+      "new_string": {
+        "type": "string"
+      },
+      "replace_all": {
+        "type": "boolean",
+        "default": false
+      }
+    },
+    "required": [
+      "path",
+      "old_string",
+      "new_string"
+    ],
+    "additionalProperties": false
+  }
+}

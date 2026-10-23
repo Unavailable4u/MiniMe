@@ -1,0 +1,29 @@
+{
+  "name": "read_file",
+  "version": "v0",
+  "risk": "R0",
+  "description": "Read a text file from the project, optionally a line range. Returns the text with line numbers. Records the file as seen so it can be edited afterwards. Protected files (private keys, .env files, credential stores) are refused.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Project-relative path of the file."
+      },
+      "start_line": {
+        "type": "integer",
+        "description": "First line to return, 1-based. Default: 1.",
+        "minimum": 1
+      },
+      "end_line": {
+        "type": "integer",
+        "description": "Last line to return, inclusive. Default: end of file (output may be truncated; ask for the next range).",
+        "minimum": 1
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  }
+}

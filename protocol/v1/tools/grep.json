@@ -1,0 +1,46 @@
+{
+  "name": "grep",
+  "version": "v0",
+  "risk": "R0",
+  "description": "Search file contents with a regular expression (ripgrep syntax). Output is size-capped; narrow the search with path or glob when it is truncated.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string",
+        "description": "Regular expression to search for."
+      },
+      "path": {
+        "type": "string",
+        "description": "Project-relative file or directory to search. Default: the project root."
+      },
+      "glob": {
+        "type": "string",
+        "description": "Only search files whose names match this glob, for example *.py."
+      },
+      "context_lines": {
+        "type": "integer",
+        "description": "Lines of context to show around each match.",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 10
+      },
+      "case_insensitive": {
+        "type": "boolean",
+        "description": "Ignore case when matching.",
+        "default": false
+      },
+      "max_matches": {
+        "type": "integer",
+        "description": "Cap on returned matches.",
+        "default": 200,
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "required": [
+      "pattern"
+    ],
+    "additionalProperties": false
+  }
+}

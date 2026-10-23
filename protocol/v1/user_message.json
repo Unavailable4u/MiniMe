@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/user_message.json",
+  "title": "user_message (client -> server)",
+  "description": "A message from the person at the terminal.",
+  "x-m2c-data-class": "content",
+  "type": "object",
+  "required": [
+    "text"
+  ],
+  "properties": {
+    "text": {
+      "$ref": "common.json#/$defs/bulk_text",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

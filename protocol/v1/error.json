@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/error.json",
+  "title": "error (server -> client)",
+  "description": "A failure. Never carries seq (it is not part of the replayable stream); a failure that changes a run's state is followed by a state_changed event. message is fixed, sanitized text.",
+  "x-m2c-data-class": "metadata",
+  "type": "object",
+  "required": [
+    "code",
+    "message"
+  ],
+  "properties": {
+    "code": {
+      "$ref": "common.json#/$defs/error_code"
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "ref_id": {
+      "$ref": "common.json#/$defs/uuid",
+      "description": "id of the client message this answers, when there is one."
+    },
+    "details": {
+      "type": "object",
+      "properties": {
+        "min_protocol": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_protocol": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry_after_s": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reset_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "call_id": {
+          "$ref": "common.json#/$defs/call_id"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
