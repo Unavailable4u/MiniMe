@@ -1536,8 +1536,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
             Partial
           </button>
         </div>
+        {/* NEW — Patch B04: Promote goes through guardUnsaved() like every
+            other way out of this project (requestSelectWs, requestBuildView),
+            so a dirty Editor gets the same "Discard unsaved changes?"
+            confirmation instead of being left behind silently. A clean
+            Editor runs it straight away, as before. */}
         <button
-          onClick={() => handlePromote(selected.id, targetStage)}
+          onClick={() => guardUnsaved(() => handlePromote(selected.id, targetStage))}
           disabled={promoting}
           className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
         >
