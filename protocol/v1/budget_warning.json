@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/budget_warning.json",
+  "title": "budget_warning (server -> client)",
+  "description": "A cap is close. scope run is the per-run ceiling; account is the shared pool (11.5: both surfaces warn at 80%).",
+  "x-m2c-data-class": "metadata",
+  "type": "object",
+  "required": [
+    "scope",
+    "spent_pct"
+  ],
+  "properties": {
+    "scope": {
+      "enum": [
+        "run",
+        "account"
+      ]
+    },
+    "spent_pct": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "reset_at": {
+      "$ref": "common.json#/$defs/timestamp"
+    }
+  },
+  "additionalProperties": false
+}

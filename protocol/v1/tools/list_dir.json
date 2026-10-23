@@ -1,0 +1,27 @@
+{
+  "name": "list_dir",
+  "version": "v0",
+  "risk": "R0",
+  "description": "List the entries of a directory in the project. Honours ignore files.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Project-relative directory. Default: the project root.",
+        "default": "."
+      },
+      "max_depth": {
+        "type": "integer",
+        "description": "How many levels to descend. 1 lists only the directory itself.",
+        "default": 1,
+        "minimum": 1,
+        "maximum": 8
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  }
+}

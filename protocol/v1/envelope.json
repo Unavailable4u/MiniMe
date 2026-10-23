@@ -1,0 +1,468 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/envelope.json",
+  "title": "M2C protocol v1 envelope",
+  "description": "Every message on the device socket. payload is validated against <t>.json. run_id: required on run-scoped messages, forbidden on hello/welcome/ping/pong, optional on error. seq: server stream events only (run_event, tool_proposed, budget_warning), strictly +1 per run.",
+  "x-m2c-types": {
+    "client_to_server": [
+      "hello",
+      "run.start",
+      "user_message",
+      "tool_result",
+      "tool_stream",
+      "approval",
+      "cancel",
+      "run.resume",
+      "ping"
+    ],
+    "server_to_client": [
+      "welcome",
+      "run_event",
+      "tool_proposed",
+      "budget_warning",
+      "error",
+      "pong"
+    ]
+  },
+  "type": "object",
+  "required": [
+    "v",
+    "t",
+    "id",
+    "ts",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "t": {
+      "enum": [
+        "hello",
+        "run.start",
+        "user_message",
+        "tool_result",
+        "tool_stream",
+        "approval",
+        "cancel",
+        "run.resume",
+        "ping",
+        "welcome",
+        "run_event",
+        "tool_proposed",
+        "budget_warning",
+        "error",
+        "pong"
+      ]
+    },
+    "id": {
+      "$ref": "common.json#/$defs/uuid"
+    },
+    "run_id": {
+      "$ref": "common.json#/$defs/run_id"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ts": {
+      "$ref": "common.json#/$defs/timestamp"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "hello"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "hello.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "run.start"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "run.start.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "user_message"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "user_message.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "tool_result"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "tool_result.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "tool_stream"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "tool_stream.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "approval"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "approval.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "cancel"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "cancel.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "run.resume"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "run.resume.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "ping"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "ping.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "welcome"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "welcome.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "run_event"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "run_event.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "tool_proposed"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "tool_proposed.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "budget_warning"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "budget_warning.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "error"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "error.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "const": "pong"
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "pong.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "enum": [
+              "run.start",
+              "user_message",
+              "tool_result",
+              "tool_stream",
+              "approval",
+              "cancel",
+              "run.resume",
+              "run_event",
+              "tool_proposed",
+              "budget_warning"
+            ]
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "required": [
+          "run_id"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "enum": [
+              "hello",
+              "welcome",
+              "ping",
+              "pong"
+            ]
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "run_id"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "enum": [
+              "run_event",
+              "tool_proposed",
+              "budget_warning"
+            ]
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "required": [
+          "seq"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "t": {
+            "enum": [
+              "hello",
+              "run.start",
+              "user_message",
+              "tool_result",
+              "tool_stream",
+              "approval",
+              "cancel",
+              "run.resume",
+              "ping",
+              "welcome",
+              "error",
+              "pong"
+            ]
+          }
+        },
+        "required": [
+          "t"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "seq"
+          ]
+        }
+      }
+    }
+  ]
+}

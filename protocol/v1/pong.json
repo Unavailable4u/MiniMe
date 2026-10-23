@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/pong.json",
+  "title": "pong (server -> client)",
+  "description": "Answer to ping; echoes the nonce.",
+  "x-m2c-data-class": "metadata",
+  "type": "object",
+  "properties": {
+    "nonce": {
+      "type": "string",
+      "maxLength": 64
+    }
+  },
+  "additionalProperties": false
+}

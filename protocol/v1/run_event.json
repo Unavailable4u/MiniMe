@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/run_event.json",
+  "title": "run_event (server -> client)",
+  "description": "Ordered events of a run. payload.type selects the subtype; each subtype declares its own data class.",
+  "type": "object",
+  "required": [
+    "type"
+  ],
+  "properties": {
+    "type": {
+      "enum": [
+        "text_delta",
+        "text_done",
+        "tool_started",
+        "tool_finished",
+        "state_changed",
+        "usage",
+        "notice"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "text_delta"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/text_delta"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "text_done"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/text_done"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "tool_started"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/tool_started"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "tool_finished"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/tool_finished"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "state_changed"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/state_changed"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "usage"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/usage"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "notice"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/notice"
+      }
+    }
+  ],
+  "$defs": {
+    "text_delta": {
+      "x-m2c-data-class": "content",
+      "type": "object",
+      "required": [
+        "type",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "const": "text_delta"
+        },
+        "text": {
+          "$ref": "common.json#/$defs/bulk_text"
+        }
+      },
+      "additionalProperties": false
+    },
+    "text_done": {
+      "x-m2c-data-class": "metadata",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "description": "The assistant message is complete. stop_reason tells the client whether the loop continues (tool_use) or the turn is over.",
+      "properties": {
+        "type": {
+          "const": "text_done"
+        },
+        "stop_reason": {
+          "enum": [
+            "end_turn",
+            "tool_use",
+            "max_tokens"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "tool_started": {
+      "x-m2c-data-class": "metadata",
+      "type": "object",
+      "required": [
+        "type",
+        "call_id",
+        "tool"
+      ],
+      "description": "The server has evidence the device began executing the call (an allow approval, or the first tool_stream). Optional: auto-allowed calls may go straight to tool_finished.",
+      "properties": {
+        "type": {
+          "const": "tool_started"
+        },
+        "call_id": {
+          "$ref": "common.json#/$defs/call_id"
+        },
+        "tool": {
+          "$ref": "common.json#/$defs/tool_name"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tool_finished": {
+      "x-m2c-data-class": "metadata",
+      "type": "object",
+      "required": [
+        "type",
+        "call_id",
+        "tool",
+        "status"
+      ],
+      "description": "Exactly once per proposed call. disconnected is the product-guide 13.5 outcome for a call cut off by a lost connection; the model is told on resume.",
+      "properties": {
+        "type": {
+          "const": "tool_finished"
+        },
+        "call_id": {
+          "$ref": "common.json#/$defs/call_id"
+        },
+        "tool": {
+          "$ref": "common.json#/$defs/tool_name"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error",
+            "denied",
+            "timeout",
+            "disconnected",
+            "cancelled"
+          ]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "state_changed": {
+      "x-m2c-data-class": "metadata",
+      "type": "object",
+      "required": [
+        "type",
+        "state"
+      ],
+      "description": "awaiting_approval is advisory: the server enters it when it proposes a call whose risk is above R0, but only the device's policy decides whether anyone is asked.",
+      "properties": {
+        "type": {
+          "const": "state_changed"
+        },
+        "state": {
+          "$ref": "common.json#/$defs/run_state"
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "usage": {
+      "x-m2c-data-class": "metadata",
+      "type": "object",
+      "required": [
+        "type",
+        "model",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "credits"
+      ],
+      "description": "Numbers only: what one model call cost, for the status line. The authoritative ledger is on the server (O2).",
+      "properties": {
+        "type": {
+          "const": "usage"
+        },
+        "model": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "credits": {
+          "type": "number",
+          "minimum": 0
+        },
+        "run_credits_total": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "notice": {
+      "x-m2c-data-class": "metadata",
+      "type": "object",
+      "required": [
+        "type",
+        "code",
+        "severity",
+        "message"
+      ],
+      "description": "A heads-up for the person, for example a change of model class (never silent). message is server-authored fixed text and must not embed prompts, paths or tool output.",
+      "properties": {
+        "type": {
+          "const": "notice"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

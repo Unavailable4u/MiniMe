@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/hello.json",
+  "title": "hello (client -> server)",
+  "description": "First message on every connection. Carries the device credential, so it is never logged.",
+  "x-m2c-data-class": "metadata",
+  "type": "object",
+  "required": [
+    "protocol_versions",
+    "device_credential",
+    "client_version",
+    "capabilities"
+  ],
+  "properties": {
+    "protocol_versions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "description": "Every protocol version this client can speak. The server picks the highest it also supports (welcome.protocol) or answers protocol_unsupported."
+    },
+    "device_credential": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._~+/=-]{16,512}$",
+      "x-m2c-secret": true
+    },
+    "client_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_.-]{1,32}$"
+      },
+      "description": "Optional features the client supports, for example sandbox or acp."
+    }
+  },
+  "additionalProperties": false
+}
