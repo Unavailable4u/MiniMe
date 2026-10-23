@@ -72,6 +72,41 @@ jobs:
         with: { python-version: "3.11" }
       - run: pip install -r daemon/requirements.txt
       - run: pytest daemon/tests -v
+  m2c-test:
+    # C01 -- the new top-level `m2c/` client package (src layout, Python
+    # >= 3.11, standard-library-only runtime, pytest as its one dev
+    # dependency). Placed right after `daemon-test`, which it is modeled on
+    # (same pinned actions, same Python 3.11 -- the package's own floor,
+    # decision D1 -- and same timeout), rather than at the end of the file:
+    # other patches append their own jobs there, and two hunks that both
+    # end at EOF cannot both be applied with `git apply`.
+    #
+    # One real difference from daemon-test: `working-directory: m2c`.
+    # daemon/ is imported as a package relative to the repo root; m2c/ is a
+    # proper installable package, so this job installs it
+    # (`pip install -e ".[dev]"`) and pytest imports it exactly as a user's
+    # install would. tests/conftest.py points M2C_HOME and HOME at a temp
+    # directory for every test, so nothing here touches the runner's real
+    # home.
+    #
+    # Blocking (no continue-on-error), same reasoning as daemon-test: a
+    # small deterministic unit-test suite in which every environment probe is
+    # mocked, so the runner needs no ripgrep or bubblewrap. `m2c --version`
+    # is a smoke test that the console entry point was generated and runs.
+    # `m2c doctor` is deliberately NOT run here: its exit status depends on
+    # which tools the runner image happens to ship, not on this code.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: m2c
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.11" }
+      - run: pip install -e ".[dev]"
+      - run: pytest -v
+      - run: m2c --version
   frontend-lint:
     # Was entirely unwired: package.json's own "lint" script (`next lint`)
     # existed but nothing in CI ever called it, and it wasn't even

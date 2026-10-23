@@ -1,0 +1,14 @@
+# m2c/.gitignore -- Patch C01.
+#
+# The repo-root .gitignore only lists `venv/`, `__pycache__/` and
+# `.pytest_cache/`: it does not cover `.venv/` (the name the C01 test command
+# creates), `*.egg-info/` or build output. Scoped to m2c/ here so the root
+# file -- which other patches in the same wave may also touch -- stays alone.
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
