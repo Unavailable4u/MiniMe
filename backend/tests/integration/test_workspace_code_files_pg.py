@@ -10,6 +10,14 @@ role (minime_app), not postgres, so the grants are enforced:
 
     MINIME_TEST_DATABASE_URL="postgresql://minime_app@localhost/minime_test" \
         pytest tests/integration/test_workspace_code_files_pg.py
+
+B01: the module-level guard below FAILS (it does not skip) when that URL
+connects as a superuser, a BYPASSRLS role, or the owner of the code-file
+tables, or when the database still lets minime_app UPDATE the version-history
+table. In any of those cases every test here would pass without the grants
+being exercised, and a reintroduced `UPDATE workspace_code_file_versions`
+would go unnoticed. The workspace fixture also needs the test user to exist in
+auth.users (README, "Real-database tests").
 """
 import contextlib
 import os
@@ -20,7 +28,56 @@ import pytest
 DSN = os.environ.get("MINIME_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="MINIME_TEST_DATABASE_URL not set")
 
-USER = "pg_test_user"
+# workspaces.owner_id is a uuid with a foreign key to auth.users(id) (the real
+# schema, see migrations/0000_base_schema.sql), so the test user must be a valid
+# UUID AND already exist in auth.users. The app role cannot write the auth
+# schema, so an admin seeds it once per scratch database (README, "Real-database
+# tests"):  insert into auth.users (id) values ('00000000-0000-4000-8000-00000000b001');
+USER = "00000000-0000-4000-8000-00000000b001"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _connected_as_the_app_role():
+    """Fail loudly unless DSN is the unprivileged app role on a fully migrated schema.
+
+    Grants are the whole point of this file. A superuser (or BYPASSRLS role, or a
+    table owner) is not subject to them, so tests would pass vacuously. Likewise a
+    scratch database where migration 0009's REVOKE UPDATE was never applied."""
+    import psycopg
+    problems = []
+    with psycopg.connect(DSN) as conn:
+        who, is_super, bypass = conn.execute(
+            "select current_user, r.rolsuper, r.rolbypassrls "
+            "from pg_roles r where r.rolname = current_user").fetchone()
+        if who != "minime_app":
+            problems.append(f"connected as {who!r}, not 'minime_app'")
+        if is_super:
+            problems.append("the role is a superuser (grants and RLS are not enforced)")
+        if bypass:
+            problems.append("the role has BYPASSRLS")
+        owned = [r[0] for r in conn.execute(
+            "select tablename from pg_tables where schemaname = 'public' "
+            "and tableowner = current_user "
+            "and tablename in ('workspaces', 'workspace_code_files', 'workspace_code_file_versions')")]
+        if owned:
+            problems.append(f"the role OWNS {owned} (owners bypass grants and RLS)")
+
+        def can(table, priv):
+            return conn.execute("select has_table_privilege(current_user, %s, %s)",
+                                (table, priv)).fetchone()[0]
+
+        if can("workspace_code_file_versions", "UPDATE"):
+            problems.append("the role can UPDATE workspace_code_file_versions "
+                            "(migration 0009's REVOKE was not applied)")
+        for table, priv in (("workspace_code_files", "UPDATE"),
+                            ("workspace_code_file_versions", "INSERT"),
+                            ("workspace_code_file_versions", "DELETE")):
+            if not can(table, priv):
+                problems.append(f"the role lacks {priv} on {table} (migrations not fully applied?)")
+    if problems:
+        pytest.fail(
+            "MINIME_TEST_DATABASE_URL must connect as the unprivileged app role on a database "
+            "with every migration applied: " + "; ".join(problems), pytrace=False)
 
 
 @pytest.fixture
@@ -55,13 +112,27 @@ def wcf(monkeypatch):
 
 @pytest.fixture
 def ws(wcf):
-    """A workspace the test user owns; removed afterwards (cascades)."""
+    """A workspace the test user owns; removed afterwards (cascades).
+
+    Both the insert and the cleanup run with app.current_user_id set, because
+    RLS applies to minime_app: without it the insert is rejected, and (worse)
+    the cleanup delete silently matches zero rows and leaks the workspace and
+    every code file under it."""
     import psycopg
     ws_id = f"pgtest-{uuid.uuid4().hex[:8]}"
-    with psycopg.connect(DSN) as conn:
-        conn.execute("insert into workspaces (id, owner_id) values (%s, %s)", (ws_id, USER))
+    try:
+        with psycopg.connect(DSN) as conn:
+            conn.execute("select set_config('app.current_user_id', %s, true)", (USER,))
+            conn.execute("insert into workspaces (id, name, owner_id) values (%s, %s, %s)",
+                         (ws_id, "pgtest", USER))
+    except psycopg.errors.ForeignKeyViolation:
+        pytest.fail(
+            f"auth.users has no row for the test user {USER}. As an admin on the scratch "
+            f"database run:  insert into auth.users (id) values ('{USER}');  (see README, "
+            f"'Real-database tests')")
     yield ws_id
     with psycopg.connect(DSN) as conn:
+        conn.execute("select set_config('app.current_user_id', %s, true)", (USER,))
         conn.execute("delete from workspaces where id = %s", (ws_id,))
 
 
@@ -165,3 +236,85 @@ def test_moving_a_folder_up_over_its_own_nested_namesake(wcf, ws):
     live = wcf.get_file(ws, "a/b/c.py")
     assert live["content"] == "3"
     assert wcf.write_file(ws, "a/b/c.py", "next", USER)["version"] == live["version"] + 1
+
+
+# ---------------------------------------------------------------------
+# B01 additions: the scenarios the audit found missing, and a direct,
+# behavioural proof that the grants are enforced on this connection.
+# ---------------------------------------------------------------------
+
+def test_the_app_role_is_refused_update_on_version_history_and_row_locks(wcf, ws):
+    """The behavioural twin of the guard fixture: ask the database, as the app role,
+    to do the things migration 0009 forbids. `UPDATE ... SET file_path` is exactly
+    what move_path() once ran (-> 500 on every move); the row lock is the same
+    privilege through a different door."""
+    import psycopg
+    wcf.write_file(ws, "g.py", "1", USER)
+    wcf.write_file(ws, "g.py", "2", USER)            # leaves one history row to aim at
+    for sql in (
+        "update workspace_code_file_versions set file_path = 'x.py' where workspace_id = %s",
+        "select 1 from workspace_code_file_versions where workspace_id = %s for update",
+    ):
+        conn = psycopg.connect(DSN)
+        try:
+            conn.execute("select set_config('app.current_user_id', %s, true)", (USER,))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(sql, (ws,))
+        finally:
+            conn.rollback()
+            conn.close()
+
+
+def test_save_snapshots_every_overwritten_version(wcf, ws):
+    first = wcf.write_file(ws, "s.py", "one", USER)
+    assert (first["version"], first["content"]) == (1, "one")
+    assert wcf.write_file(ws, "s.py", "two", USER, base_version=1)["version"] == 2
+    assert wcf.write_file(ws, "s.py", "three", USER, base_version=2)["version"] == 3
+
+    live = wcf.get_file(ws, "s.py")
+    assert (live["content"], live["version"]) == ("three", 3)
+    assert wcf.list_files(ws)["s.py"]["version"] == 3
+    # each overwritten version is kept with the content it had; the live one is not duplicated
+    assert {h["version"]: h["content"] for h in wcf.get_file_history(ws, "s.py")} == {1: "one", 2: "two"}
+
+    with pytest.raises(wcf.VersionConflictError):    # a stale tab is refused...
+        wcf.write_file(ws, "s.py", "stale", USER, base_version=1)
+    assert wcf.get_file(ws, "s.py")["content"] == "three"   # ...and changes nothing
+
+
+def test_moving_a_folder_carries_every_files_history_to_the_new_paths(wcf, ws):
+    for body in ("1", "2"):
+        wcf.write_file(ws, "src/a.py", body, USER)   # live v2, history [1]
+    wcf.write_file(ws, "src/sub/b.py", "b", USER)    # live v1
+    wcf.write_file(ws, "keep/k.py", "k", USER)       # outside the move
+
+    moved = wcf.move_path(ws, "src", "lib", USER)
+
+    assert {m["file_path"]: m["version"] for m in moved} == {"lib/a.py": 3, "lib/sub/b.py": 2}
+    assert set(wcf.list_files(ws)) == {"lib/a.py", "lib/sub/b.py", "keep/k.py"}   # old paths are gone
+    assert wcf.get_file(ws, "lib/a.py")["content"] == "2"
+    assert wcf.get_file(ws, "lib/sub/b.py")["content"] == "b"
+    assert _history(wcf, ws, "lib/a.py") == [1, 2]
+    assert _history(wcf, ws, "lib/sub/b.py") == [1]
+    assert wcf.get_file(ws, "keep/k.py")["version"] == 1
+    # tombstones at the old paths hold each file's last live version
+    assert _history(wcf, ws, "src/a.py") == [2]
+    assert _history(wcf, ws, "src/sub/b.py") == [1]
+    # and a save at a moved path carries on above its history
+    assert wcf.write_file(ws, "lib/a.py", "3", USER)["version"] == 4
+
+
+def test_restoring_an_older_version_of_a_live_file_writes_it_as_a_new_version(wcf, ws):
+    for body in ("v1", "v2", "v3"):
+        wcf.write_file(ws, "r.py", body, USER)       # live v3, history [1, 2]
+
+    restored = wcf.restore_version(ws, "r.py", 1, USER)
+
+    assert (restored["content"], restored["version"]) == ("v1", 4)
+    # nothing is lost: v3 was snapshotted before being replaced, so the restore itself is undoable
+    assert {h["version"]: h["content"] for h in wcf.get_file_history(ws, "r.py")} == {
+        1: "v1", 2: "v2", 3: "v3"}
+    undone = wcf.restore_version(ws, "r.py", 3, USER)
+    assert (undone["content"], undone["version"]) == ("v3", 5)
+    with pytest.raises(ValueError):                  # a version that never existed
+        wcf.restore_version(ws, "r.py", 99, USER)
