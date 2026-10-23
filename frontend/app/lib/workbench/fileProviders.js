@@ -91,9 +91,97 @@ export class FileConflictError extends Error {
   }
 }
 
-async function parseErrorDetail(res) {
-  const body = await res.json().catch(() => null);
-  return body?.detail || `${res.status} ${res.statusText}`;
+// Patch B06 (M2C build plan, WP B06 — readable validation errors).
+//
+// FastAPI answers a request-validation failure (HTTP 422) with `detail` as
+// an ARRAY of objects — [{loc: ["body", "file_path"], msg: "...", type:
+// "..."}, ...] — not a string. This helper used to return `body.detail`
+// as-is, every caller does `new Error(await parseErrorDetail(res))`, and
+// `new Error(array)` stringifies to "[object Object]", which is what the
+// Build tab showed the user. formatErrorDetail() below turns whatever
+// `detail` is into ONE readable line:
+//   - array   -> "file_path: message; other: message". A leading "body" or
+//                "query" is dropped from each item's `loc` (it only says
+//                where in the request the field lives) and the rest is
+//                joined with "." — so a nested field reads
+//                "files.0.path: Field required". A `loc` that is only
+//                ["body"] (a whole-body error) renders the message alone.
+//   - object  -> its `message`, else its `msg`, else compact JSON.
+//   - string  -> unchanged.
+//   - missing / empty (undefined, null, "", [], {}) -> "", and
+//     parseErrorDetail() then falls back to "<status> <statusText>", the
+//     pre-B06 fallback, so a response with nothing useful in it reads
+//     exactly as before.
+//
+// Never throws (an error message must not itself become a second error):
+// a non-JSON body, a body that isn't an object, and a `detail`
+// JSON.stringify can't serialise (e.g. a BigInt) all end up at the
+// fallback or skip just the unusable item.
+//
+// codeProposals.js carries a near-copy of parseErrorDetail() with the same
+// bug; deliberately NOT touched by this patch (one WP = one patch) —
+// tracked as a follow-up.
+function isBlank(value) {
+  return typeof value !== "string" || value.trim() === "";
+}
+
+function compactJson(value) {
+  try {
+    const out = JSON.stringify(value);
+    return typeof out === "string" ? out : "";
+  } catch {
+    return "";
+  }
+}
+
+// "body.file_path" -> "file_path": drop one leading "body"/"query", join
+// the rest with ".". Anything that isn't an array (a malformed `loc`) is
+// treated as no location rather than guessed at.
+function formatLoc(loc) {
+  if (!Array.isArray(loc)) return "";
+  const parts = loc.filter((p) => typeof p === "string" || typeof p === "number");
+  if (parts[0] === "body" || parts[0] === "query") parts.shift();
+  return parts.join(".");
+}
+
+// One non-array detail value (a top-level object, or one array item that
+// isn't a FastAPI {loc, msg} entry) -> a string, "" if nothing usable.
+function formatDetailValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return isBlank(value) ? "" : value;
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+  if (Array.isArray(value)) return value.length ? compactJson(value) : "";
+  if (typeof value !== "object") return "";
+  if (!isBlank(value.message)) return value.message;
+  if (!isBlank(value.msg)) return value.msg;
+  if (Object.keys(value).length === 0) return "";
+  return compactJson(value);
+}
+
+function formatErrorDetail(detail) {
+  if (!Array.isArray(detail)) return formatDetailValue(detail);
+  const lines = [];
+  for (const item of detail) {
+    if (item && typeof item === "object" && !Array.isArray(item) && !isBlank(item.msg)) {
+      const field = formatLoc(item.loc);
+      lines.push(field ? `${field}: ${item.msg}` : item.msg);
+    } else {
+      const text = formatDetailValue(item);
+      if (text) lines.push(text);
+    }
+  }
+  return lines.join("; ");
+}
+
+export async function parseErrorDetail(res) {
+  let fallback = "Request failed";
+  try {
+    fallback = `${res.status} ${res.statusText}`;
+    const body = await res.json();
+    return formatErrorDetail(body?.detail) || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 /**
