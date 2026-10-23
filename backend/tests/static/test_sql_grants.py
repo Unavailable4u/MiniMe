@@ -75,6 +75,7 @@ APP_ROLE = "minime_app"
 # relative to backend/. Add a module here to put it under the same guard.
 SQL_MODULES = [
     "eo/workspace_code_files.py",
+    "eo/devices.py",
 ]
 
 _DML = ("select", "insert", "update", "delete")
