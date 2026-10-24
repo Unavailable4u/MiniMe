@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/welcome.json",
+  "title": "welcome (server -> client)",
+  "description": "Answer to hello. The server states the version in use and the oldest it still accepts.",
+  "x-m2c-data-class": "metadata",
+  "type": "object",
+  "required": [
+    "protocol",
+    "min_protocol",
+    "token_ttl_s",
+    "limits"
+  ],
+  "properties": {
+    "protocol": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Version chosen for this connection."
+    },
+    "min_protocol": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Oldest version this server still accepts. Raised only by a breaking change (a new v<N> directory)."
+    },
+    "token_ttl_s": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "limits": {
+      "type": "object",
+      "required": [
+        "max_parallel_runs"
+      ],
+      "properties": {
+        "max_parallel_runs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_message_bytes": {
+          "type": "integer",
+          "minimum": 1024
+        }
+      },
+      "additionalProperties": false
+    },
+    "server_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    }
+  },
+  "additionalProperties": false
+}

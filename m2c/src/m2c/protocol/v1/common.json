@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/common.json",
+  "title": "M2C protocol v1 shared definitions",
+  "description": "Definitions referenced by the envelope and the payload schemas. Nothing here is a message on its own.",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Lower-case canonical UUID, minted by the sender of the message."
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "RFC 3339 date-time with an explicit offset."
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,64}$",
+      "description": "Opaque run identifier. Minted by the client in run.start (a UUID or ULID is recommended); the server validates it, scopes it to the device's user, and rejects a collision with invalid_message. Never parse it."
+    },
+    "call_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$",
+      "description": "Identifier of one tool call, minted by the server in tool_proposed. Duplicate results for the same call_id are ignored."
+    },
+    "risk": {
+      "enum": [
+        "R0",
+        "R1",
+        "R2",
+        "R3",
+        "R4"
+      ],
+      "description": "R0 read-only, R1 write inside project, R2 run command, R3 network or outside project, R4 irreversible or external effect."
+    },
+    "profile": {
+      "enum": [
+        "code"
+      ],
+      "description": "O8: every run carries its profile. Further profiles (Menux's) are added to this list additively."
+    },
+    "mode": {
+      "enum": [
+        "plan",
+        "ask",
+        "accept-edits"
+      ],
+      "description": "Permission mode the run starts in. The device's policy engine stays authoritative; the server uses the mode to decide which tools the model may see (plan mode: read-only tools plus plan_exit)."
+    },
+    "error_code": {
+      "enum": [
+        "unauthorized",
+        "device_revoked",
+        "quota_exhausted",
+        "run_not_found",
+        "protocol_unsupported",
+        "rate_limited",
+        "provider_unavailable",
+        "tool_timeout",
+        "invalid_message",
+        "internal"
+      ],
+      "description": "Stable strings. Clients treat an unknown code as internal."
+    },
+    "run_state": {
+      "enum": [
+        "created",
+        "running",
+        "awaiting_approval",
+        "completed",
+        "paused_budget",
+        "paused_disconnected",
+        "paused_error",
+        "cancelled",
+        "failed",
+        "expired"
+      ],
+      "description": "Run state machine: created -> running <-> awaiting_approval -> completed, plus paused_budget, paused_disconnected, paused_error, cancelled, failed, expired. Terminal: completed, cancelled, failed, expired."
+    },
+    "trust": {
+      "enum": [
+        "local_project",
+        "local_other",
+        "external"
+      ],
+      "description": "Where a tool result came from, so the policy engine can taint the session."
+    },
+    "tool_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,127}$",
+      "description": "A v0 catalog name, or a later-catalog / MCP name such as mcp__server__tool."
+    },
+    "tool_catalog_version": {
+      "enum": [
+        "v0"
+      ],
+      "description": "Which set of tool schemas the client can execute (protocol/v1/tools)."
+    },
+    "cwd_label": {
+      "type": "string",
+      "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f]{1,128}$",
+      "description": "A human label for the working directory, for example the project's folder name. NEVER a path: separators and control characters are rejected."
+    },
+    "model_pref": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:/-]{0,63}$",
+      "description": "Opaque model preference, for example auto. The server maps it, and tells the user through a notice when it cannot honour it; it never downgrades silently."
+    },
+    "bulk_text": {
+      "type": "string",
+      "maxLength": 200000,
+      "description": "Content carried only in flight. v1 ceiling of 200000 characters; welcome.limits may announce a lower one."
+    },
+    "tool_call": {
+      "type": "object",
+      "required": [
+        "call_id",
+        "tool",
+        "input"
+      ],
+      "properties": {
+        "call_id": {
+          "$ref": "common.json#/$defs/call_id"
+        },
+        "tool": {
+          "$ref": "common.json#/$defs/tool_name"
+        },
+        "input": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "history_item": {
+      "type": "object",
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "user",
+            "assistant",
+            "tool"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "user"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "then": {
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "text": {
+                "$ref": "common.json#/$defs/bulk_text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "assistant"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "then": {
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "text": {
+                "$ref": "common.json#/$defs/bulk_text"
+              },
+              "tool_calls": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "$ref": "common.json#/$defs/tool_call"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "tool"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "then": {
+            "required": [
+              "call_id",
+              "ok",
+              "output"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "call_id": {
+                "$ref": "common.json#/$defs/call_id"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "output": {
+                "$ref": "common.json#/$defs/bulk_text"
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "trust": {
+                "$ref": "common.json#/$defs/trust"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

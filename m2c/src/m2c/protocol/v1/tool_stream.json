@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/tool_stream.json",
+  "title": "tool_stream (client -> server)",
+  "description": "Partial output of a running tool (bash). Forwarded to a live viewer; the model only ever sees the final tool_result.",
+  "x-m2c-data-class": "content",
+  "type": "object",
+  "required": [
+    "call_id",
+    "stream",
+    "chunk"
+  ],
+  "properties": {
+    "call_id": {
+      "$ref": "common.json#/$defs/call_id"
+    },
+    "stream": {
+      "enum": [
+        "stdout",
+        "stderr"
+      ]
+    },
+    "chunk": {
+      "type": "string",
+      "maxLength": 65536
+    }
+  },
+  "additionalProperties": false
+}
