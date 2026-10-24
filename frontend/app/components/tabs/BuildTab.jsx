@@ -34,6 +34,7 @@ import ContextChips from "../workbench/ContextChips";
 import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
 import { realFilePaths } from "../../lib/workbench/fileTree";
 import { planWorkOnStep } from "../../lib/workbench/instructionStep";
+import { createLatestGuard } from "../../lib/latestRequest"; // NEW — Patch B05: "latest request wins" guard for the board fetch, see refresh() below
 // NEW — W8.5b: the Deploy card files the writer's plan for the same Keep/Undo
 // review as any AI edit. codeProposals.js is fetch/Pusher only (no CodeMirror,
 // so it doesn't pull the editor into this tab's chunk); deployProposal.js is the
@@ -1140,20 +1141,12 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
   // NEW — patch 7: which of BUILD_VIEWS is showing for the selected
   // project. Same pattern as PlanTab's BlueprintView `view` state.
   const [buildView, setBuildView] = useState("tasks");
-  // NEW — W3.2: set once by the redirect effect below, read once by the
-  // EditorWorkbench prop just past the render return, then cleared by
-  // EditorWorkbench itself (onConsumeInitialSourceOverride) once it's
-  // applied it to that mount's initial layout — never re-armed after
-  // that, so switching projects or leaving/re-entering Editor manually
-  // doesn't keep forcing Local.
-  const [forceLocalSourceOnce, setForceLocalSourceOnce] = useState(false);
-  // NEW — W8.4: the mirror image of the above. "Work on this" picks a
-  // file out of the project's CLOUD files, so the Editor it opens has to
-  // be on the Cloud source even if this project was last left on Local
-  // (a Local provider would be asked for a path it has never heard of).
-  // Same one-shot shape: armed right before the sub-view switch, consumed
-  // by EditorWorkbench on mount, never persisted as the person's own
-  // source preference.
+  // NEW — W8.4: "Work on this" picks a file out of the project's CLOUD
+  // files, so the Editor it opens is asked for the Cloud source. One-shot:
+  // armed right before the sub-view switch, consumed by EditorWorkbench on
+  // mount, never persisted as the person's own source preference. (M2C
+  // B10: Local folder mode is gone, so cloud is the only source and this
+  // is now effectively a no-op; the W3.2 "force Local" twin was removed.)
   const [forceCloudSourceOnce, setForceCloudSourceOnce] = useState(false);
   // NEW — W2.5: unsaved-edits guard. EditorWorkbench reports whether any
   // open file has unsaved edits through `onDirtyChange`. It lands in a
@@ -1370,14 +1363,14 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
   // NEW — W3.2: AppShell remapped a stale "local" tab id here and is
   // telling us so, once. There's no wsId to restore (the old Local
   // Files tab picked from every workspace, not just build-stage ones —
-  // D7's accepted trade-off), so this only opens the Editor sub-view
-  // and arms forceLocalSourceOnce for whichever build project ends up
-  // selected above; requestBuildView's guardUnsaved isn't needed since
-  // nothing can be dirty yet this early.
+  // D7's accepted trade-off), so this only opens the Editor sub-view for
+  // whichever build project ends up selected above (M2C B10: it shows
+  // that project's cloud files; the Local source it used to select is
+  // gone); requestBuildView's guardUnsaved isn't needed since nothing
+  // can be dirty yet this early.
   useEffect(() => {
     if (!initialLocalTabRedirect) return;
     setBuildView("code");
-    setForceLocalSourceOnce(true);
     onConsumeInitialLocalTabRedirect?.();
   }, [initialLocalTabRedirect, onConsumeInitialLocalTabRedirect]);
 
@@ -1402,19 +1395,40 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
   // that resolved id rather than the workspace id.
   const resolvedSessionId = data?._session_id || null;
 
+  // NEW — Patch B05: every board fetch takes a ticket from this guard, and a
+  // response is applied only if its ticket is still the newest. Before this,
+  // a slow response for the PREVIOUS project could land after the new
+  // project's and overwrite it (the effect's `cancelled` flag guarded
+  // setError/setLoading but never setData, and refresh() is also called
+  // from the Deploy and Monitoring cards, outside the effect). A ref, so the
+  // counter survives re-renders and is shared by every refresh() closure.
+  const boardGuardRef = useRef(null);
+  if (boardGuardRef.current === null) boardGuardRef.current = createLatestGuard();
+
+  // CHANGED — Patch B05: resolves to the board data when this request is
+  // still the newest, or to `null` when a newer request (another project, or
+  // another refresh of this one) started meanwhile and this response was
+  // dropped. (Still `undefined` when no project is selected, as before.)
+  // The callers that exist today (the load effect below and the Deploy and
+  // Monitoring cards' `await onRefresh()`) ignore the value, so `null` is
+  // safe for all of them.
   async function refresh() {
     if (!selectedWsId) return;
+    const guard = boardGuardRef.current;
+    const ticket = guard.begin();
     const res = await fetch(`${API_URL}/api/tasks/workspace/${selectedWsId}`, {
       headers: await authHeaders(),
     });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const d = await res.json();
+    if (!guard.isLatest(ticket)) return null;
     setData(d);
     return d;
   }
 
   useEffect(() => {
     if (!selectedWsId) {
+      boardGuardRef.current.invalidate(); // NEW — Patch B05: a response still in flight for the project just cleared must not repopulate the board
       setData(null);
       setLoading(false);
       return;
@@ -1798,11 +1812,8 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
                 apiUrl={API_URL}
                 reserveCorner={chatDockCollapsed}
                 onDirtyChange={handleEditorDirty}
-                initialSourceOverride={forceLocalSourceOnce ? "local" : forceCloudSourceOnce ? "cloud" : undefined}
-                onConsumeInitialSourceOverride={() => {
-                  setForceLocalSourceOnce(false);
-                  setForceCloudSourceOnce(false); // W8.4
-                }}
+                initialSourceOverride={forceCloudSourceOnce ? "cloud" : undefined}
+                onConsumeInitialSourceOverride={() => setForceCloudSourceOnce(false)}
                 // W6.2: "Fix with AI" (Console tab) requests Ask mode
                 // via codeContext.js regardless of whether the chat dock
                 // happens to be visible right now -- CodeAwareChatPanel's

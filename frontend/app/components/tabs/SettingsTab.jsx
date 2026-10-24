@@ -4,6 +4,7 @@ import { useSession } from "../../context/SessionContext";
 import { useDensity } from "../../hooks/useDensity";
 import { useProactiveSuggestions } from "../../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
 import IntegrationsPanel from "../IntegrationsPanel";   // NEW — Part 8.5/8.9
+import DevicesPanel from "../DevicesPanel";   // NEW — Patch X01: pair, list and revoke M2C devices
 import AuditLogTab from "./AuditLogTab";   // NEW — Part 8.6: audit log
 
 const DENSITY_OPTIONS = [
@@ -101,6 +102,14 @@ function SettingsTab() {
       <section>
         <h2 className="text-[var(--neutral-400)] font-medium mb-2">Integrations</h2>
         <IntegrationsPanel />
+      </section>
+      {/* NEW — Patch X01 (M2C): the terminal client's pairing page. `m2c login`
+          shows a code; entering it here approves that terminal (S03's
+          /api/devices routes). Self-contained: it reads API_URL from
+          useSession() itself, like IntegrationsPanel. */}
+      <section>
+        <h2 className="text-[var(--neutral-400)] font-medium mb-2">Devices</h2>
+        <DevicesPanel />
       </section>
       <section>
         <h2 className="text-[var(--neutral-400)] font-medium mb-2">Activity</h2>

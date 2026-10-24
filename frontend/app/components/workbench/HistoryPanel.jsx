@@ -109,11 +109,10 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
   // clear `versions` first — the old list stays on screen while the
   // new one loads, instead of flashing to empty on every save.
   useEffect(() => {
-    // W3.1: Local has no version table (capabilities.history: false) —
-    // don't call provider.history() at all rather than letting it throw
-    // (LocalFileProvider doesn't even implement it) and surface that as
-    // a generic error banner.
-    if (!path || !provider || !provider.capabilities?.history) return;
+    // (M2C B10: the Local provider had no version table and this guard
+    // skipped history() for it; with cloud files only, every provider has
+    // one.)
+    if (!path || !provider) return;
     const seq = ++seqRef.current;
     setLoading(true);
     provider
@@ -195,18 +194,6 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
         <p className="text-xs text-[var(--neutral-400)]">No file open</p>
         <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">
           Open a file to see its saved history here.
-        </p>
-      </div>
-    );
-  }
-
-  if (!provider?.capabilities?.history) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
-        <p className="text-xs text-[var(--neutral-400)]">No history for local files</p>
-        <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">
-          Version history is only kept for project files stored in the cloud. Local files are whatever is on disk
-          right now.
         </p>
       </div>
     );

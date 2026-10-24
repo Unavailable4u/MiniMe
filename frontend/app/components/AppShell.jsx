@@ -85,10 +85,9 @@ const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — Item 2 remaining p
 // Templates, Token Usage, and Settings never have project data, so the
 // nav slot stays empty (not just hidden) on those tabs.
 // CHANGED — W3.2: "local" (Part 6's standalone tab) removed from this
-// set along with the tab itself — Local folder browsing now lives
-// inside Build's Editor sub-view (W3.1's Explorer source switch), so it
-// reports its workspace through Build's own "build" entry instead of a
-// second one.
+// set along with the tab itself (its Local folder browsing moved into
+// Build's Editor sub-view in W3.1, and M2C B10 later removed Local
+// folder mode from the editor altogether).
 const WORKSPACE_TAB_IDS = new Set(["chat", "notebooks", "research", "plan", "build", "test", "growth"]);
 
 // NEW — §8: which tab owns each workspace stage.
@@ -201,7 +200,7 @@ function AppShellBody() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [pendingTemplateRoles, setPendingTemplateRoles] = useState(null); // NEW — Role Library's sticky multi-select bar hands a role list here, WorkflowTemplatesTab consumes it once
   const [pendingWorkspaceSelection, setPendingWorkspaceSelection] = useState(null); // NEW — §8: { tabId, wsId } handed off by a promote action, consumed once by the destination tab
-  const [pendingLocalTabRedirect, setPendingLocalTabRedirect] = useState(false); // NEW — W3.2: true for one render when a saved "local" tab id got remapped to "build" below; consumed once by BuildTab to open straight into Editor/Local
+  const [pendingLocalTabRedirect, setPendingLocalTabRedirect] = useState(false); // NEW — W3.2: true for one render when a saved "local" tab id got remapped to "build" below; consumed once by BuildTab to open straight into its Editor sub-view
 
   // NEW — items #5/#13: { [tabId]: { id, name } | null } — each workspace-
   // bearing tab reports its own currently-selected workspace here via
@@ -242,9 +241,9 @@ function AppShellBody() {
     // CHANGED — W3.2: "local" no longer exists in TABS, so the check
     // below would just silently miss and leave activeTab on its "chat"
     // default — a real dead end for anyone who had Local Files open
-    // last. Map it to "build" (where that functionality now lives,
-    // W3.1) and flag the redirect so BuildTab can also land on its
-    // Editor sub-view with the Local source selected, once.
+    // last. Map it to "build" and flag the redirect so BuildTab can
+    // also land on its Editor sub-view, once (M2C B10: which now shows
+    // the project's cloud files — Local folder mode no longer exists).
     if (savedTab === "local") {
       setActiveTabState("build");
       setVisitedTabs((prev) => new Set(prev).add("build"));

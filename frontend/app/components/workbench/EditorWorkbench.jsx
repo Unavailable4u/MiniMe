@@ -59,22 +59,18 @@
 // next/dynamic, and next@14's dynamic() wrapper is a plain function
 // component that never forwards `ref` to what it loads.
 //
-// W3.1 part 2: closes out Local's write path (part 1 shipped browsing/
-// opening only — see fileProviders.js's own header). saveFile() below
-// now branches on `provider.capabilities.writeNeedsConfirm`: Cloud (and
-// any future provider with plain `write`) keeps the W2.5 path above
-// unchanged; Local instead calls provider.propose("write_file", ...)
-// and waits for a human to hit Confirm on the PendingActionBar already
-// rendered above the main row (W3.1 part 1) — handleActionConfirmed()
-// is what turns that confirm into a store update. Autosave is skipped
-// entirely for a writeNeedsConfirm provider (see the autosave effect's
-// own comment on why re-arming it would spam proposals), and the Save
-// button/status bar read differently too (EditorTabs' saveLabel prop,
-// StatusBar's "awaiting-confirmation" state).
+// Patch B10 (M2C build plan, WP B10 — decision §O6): the editor works
+// on cloud project files only. The W3.1 Local folder mode was removed
+// from here: the Explorer's source switch and its discard-edits dialog,
+// the createLocalFileProvider() branch, the daemon status poll that only
+// served it, the PendingActionBar and the propose-then-confirm save path
+// (`writeNeedsConfirm`, `awaitingConfirmation`, handleActionConfirmed).
+// saveFile() is the plain W2.5 write again, autosave and the Save
+// options are always on, and ZIP download is always offered. A layout
+// saved with `source: "local"` restores as "cloud" (layoutPrefs.js).
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { authHeaders } from "../../context/SessionContext";
-import { useDaemonStatus } from "../../hooks/useDaemonStatus";
 import { useExplorerOps } from "../../hooks/useExplorerOps";
 import { useSplitter } from "../../hooks/useSplitter";
 import { useViewport } from "../../hooks/useViewport";
@@ -107,7 +103,7 @@ import {
 import { isDeployProposal, regenerateDeployOutcome } from "../../lib/workbench/deployProposal";
 // W8.6: a wireframe proposal has no "regenerate" — see handleTrayRegenerate below.
 import { isWireframeProposal } from "../../lib/workbench/wireframeCode";
-import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
+import { createCloudFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
 import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
 import { deleteSummary } from "../../lib/workbench/explorerOps";
@@ -145,7 +141,7 @@ import {
   BOTTOM_PANEL_DEFAULT_HEIGHT,
   BOTTOM_PANEL_MIN_HEIGHT,
   EDITOR_MIN_WIDTH,
-  LOCAL_SOURCE_IDS,
+  SOURCE_IDS,
   MAIN_ROW_MIN_HEIGHT,
   PREVIEW_DEFAULT_WIDTH,
   PREVIEW_MIN_WIDTH,
@@ -158,7 +154,6 @@ import {
 import { loadSavePrefs, saveSavePrefs } from "../../lib/workbench/savePrefs";
 import { encodeTabFlags, planAutosave, planBufferSync } from "../../lib/workbench/tabUtils";
 import ConfirmDialog from "../ConfirmDialog";
-import PendingActionBar from "../PendingActionBar";
 import AiUpdateToast from "./AiUpdateToast"; // W8.2
 import BottomPanel from "./BottomPanel";
 import CodeEditor from "./CodeEditor";
@@ -283,7 +278,6 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
     clearStale,
     closeTabs,
     setLayout,
-    switchSource,
     renamePaths,
     reviewOpen,
     reviewSetActive,
@@ -318,20 +312,15 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
     setUsageResult,
   } = useCodeContext();
 
-  // W3.1: which provider backs the workbench right now — read from
-  // `layout.source` (see layoutPrefs.js's own header on why it lives
-  // there) rather than component state, so it persists the same way
-  // bottomOpen/previewOpen already do. One provider per (source,
-  // workspace, api) triple — memoized so re-renders don't create a new
-  // one (which would re-subscribe to Pusher for Cloud, or just be
-  // wasteful for Local).
-  const source = state.layout.source;
+  // The provider backing the workbench: always the cloud one (M2C B10),
+  // whatever `layout.source` holds — that field is normalized to "cloud"
+  // on load (layoutPrefs.js), but nothing here depends on it, so a stale
+  // value can never leave the editor without a provider. One provider
+  // per (workspace, api) pair — memoized so re-renders don't create a
+  // new one (which would re-subscribe to Pusher).
   const provider = useMemo(
-    () =>
-      source === "local"
-        ? createLocalFileProvider({ workspaceId, apiUrl })
-        : createCloudFileProvider({ workspaceId, apiUrl }),
-    [source, workspaceId, apiUrl]
+    () => createCloudFileProvider({ workspaceId, apiUrl }),
+    [workspaceId, apiUrl]
   );
 
   const [viewport] = useViewport();
@@ -372,15 +361,6 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // path's diff is open in the second ConflictCompareView below.
   const [aiUpdates, setAiUpdates] = useState([]);
   const [aiCompare, setAiCompare] = useState(null);
-  // W3.1 part 2: {path: contentThatWasProposed} — a write_file proposal
-  // is outstanding for this path and nothing has been typed since. Kept
-  // as content rather than a plain boolean/Set so a further keystroke
-  // (buffer.edited no longer equal to the stored text) naturally falls
-  // back out of "awaiting confirmation" into ordinary "dirty" without a
-  // separate effect to notice the edit — see saveState's derivation and
-  // handleActionConfirmed() below, the only two readers/writers besides
-  // saveFile() itself.
-  const [awaitingConfirmation, setAwaitingConfirmation] = useState({});
   // W2.5: read once per mount — workbench-wide, not per-workspace (see
   // savePrefs.js's own header), so unlike `layout` there's no
   // workspaceId-keyed re-read to do on a project switch.
@@ -470,39 +450,10 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // specific open pane's live CodeMirror view without CodeEditor itself
   // needing to know Project Search exists.
   const paneRefsRef = useRef(new Map());
-  // W3.1: mirrors useDaemonStatus's `live`, read by loadFileList()
-  // above. A ref rather than a dependency so loadFileList's identity
-  // (and the mount effect that calls it) doesn't churn every 5s poll
-  // tick — only a real live/not-live transition should trigger a fetch,
-  // and that's handled separately, by useDaemonStatus's own onLiveChange.
-  const daemonLiveRef = useRef(false);
-  // W3.1 part 2: action_id -> {path, content} for a write_file THIS
-  // saveFile() proposed. PendingActionBar's own onConfirmed only hands
-  // back {action_id, tool, params} (params for write_file is just
-  // {path} — see PendingActionBar.jsx's Pusher handler, the content
-  // never round-trips over the wire), so this is where the content we
-  // actually sent lives until confirm/deny resolves it. A Map the
-  // component owns, not the store, because correlating OUR proposals
-  // among possibly several pending ones on this workspace (an agent,
-  // another tab) is UI bookkeeping, not editor state.
-  const pendingLocalWritesRef = useRef(new Map());
 
   // ---- file list ----------------------------------------------------
 
   const loadFileList = useCallback(async () => {
-    // W3.1: Local with no live daemon isn't an ERROR to surface (see
-    // Explorer.jsx's own `daemonOffline` branch) — it's an expected,
-    // common state, so this skips the request entirely rather than
-    // letting provider.list() throw a 409 that would otherwise show up
-    // as a scary red banner where a calm "no daemon connected" already
-    // does the job.
-    if (provider.id === "local" && !daemonLiveRef.current) {
-      filesMetaRef.current = null;
-      setFilesMeta(null);
-      setListError(null);
-      setListLoading(false);
-      return null;
-    }
     const seq = ++listSeqRef.current;
     setListLoading(true);
     setListError(null);
@@ -998,52 +949,35 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
             console.warn(`[EditorWorkbench] format-on-save skipped for ${path}`, err);
           }
         }
-        if (provider.capabilities.writeNeedsConfirm) {
-          // W3.1 part 2: Local doesn't write — it proposes, and a
-          // human confirms on PendingActionBar (rendered above the main
-          // row whenever provider.id === "local") before anything
-          // touches disk. Nothing here marks the buffer saved: `dirty`
-          // stays true (it genuinely is — the content only exists in
-          // the buffer and the pending proposal, not on disk yet) and
-          // `awaitingConfirmation` is what lets the status bar/Save
-          // button show that distinctly from an ordinary unsaved edit.
-          // handleActionConfirmed() finishes the job once the person
-          // actually clicks Confirm.
-          const action = await provider.propose("write_file", { path, content: sent });
-          pendingLocalWritesRef.current.set(action.action_id, { path, content: sent });
-          delete failedSavesRef.current[path];
-          setAwaitingConfirmation((prev) => ({ ...prev, [path]: sent }));
-        } else {
-          // W1.1/W2.5: base_version turns this into an optimistic-
-          // concurrency write — a 409 (FileConflictError) means someone
-          // else's save landed first; see the catch below instead of
-          // the old blind overwrite.
-          const saved = await provider.write(path, sent, { baseVersion });
-          delete failedSavesRef.current[path];
-          const latest = stateRef.current.buffers[path];
-          // Typing during the round trip is normal (and constant once
-          // autosave is on): if the buffer no longer matches what was
-          // sent, record the save but keep what's in the editor, instead
-          // of swapping the server's copy in over the newer keystrokes.
-          if (latest) saveSuccess(path, saved, { keepEdited: latest.edited !== sent });
-          // Swap just this file's tree entry in place rather than
-          // refetching the list. `version` is part of it now: the sync
-          // check compares it against the open buffer's.
-          const nextMeta = {
-            ...(filesMetaRef.current || {}),
-            [path]: {
-              workspace_id: saved.workspace_id,
-              file_path: saved.file_path,
-              language: saved.language,
-              size: saved.content ? saved.content.length : 0,
-              version: saved.version,
-              updated_at: saved.updated_at,
-              updated_by: saved.updated_by,
-            },
-          };
-          filesMetaRef.current = nextMeta;
-          setFilesMeta(nextMeta);
-        }
+        // W1.1/W2.5: base_version turns this into an optimistic-
+        // concurrency write — a 409 (FileConflictError) means someone
+        // else's save landed first; see the catch below instead of
+        // the old blind overwrite.
+        const saved = await provider.write(path, sent, { baseVersion });
+        delete failedSavesRef.current[path];
+        const latest = stateRef.current.buffers[path];
+        // Typing during the round trip is normal (and constant once
+        // autosave is on): if the buffer no longer matches what was
+        // sent, record the save but keep what's in the editor, instead
+        // of swapping the server's copy in over the newer keystrokes.
+        if (latest) saveSuccess(path, saved, { keepEdited: latest.edited !== sent });
+        // Swap just this file's tree entry in place rather than
+        // refetching the list. `version` is part of it now: the sync
+        // check compares it against the open buffer's.
+        const nextMeta = {
+          ...(filesMetaRef.current || {}),
+          [path]: {
+            workspace_id: saved.workspace_id,
+            file_path: saved.file_path,
+            language: saved.language,
+            size: saved.content ? saved.content.length : 0,
+            version: saved.version,
+            updated_at: saved.updated_at,
+            updated_by: saved.updated_by,
+          },
+        };
+        filesMetaRef.current = nextMeta;
+        setFilesMeta(nextMeta);
       } catch (err) {
         if (err instanceof FileConflictError && err.current) {
           setConflicts((prev) => ({ ...prev, [path]: { current: err.current, mine: sent } }));
@@ -1676,75 +1610,10 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
     [fileLoaded]
   );
 
-  // ---- local source / daemon / terminal (W3.1) ---------------------------
-
-  // Fires only on a not-live -> live transition (see useDaemonStatus's
-  // own header) — the moment a daemon connects, go fetch the tree, the
-  // same "don't make the person hit refresh themselves" behavior
-  // LocalWorkspaceTab.jsx's own status effect already had.
-  const handleDaemonLive = useCallback(() => {
-    refreshRef.current();
-  }, []);
-  const { live: daemonLive, checked: daemonChecked } = useDaemonStatus(
-    source === "local" ? workspaceId : null,
-    handleDaemonLive
-  );
-  daemonLiveRef.current = daemonLive;
-
-  // Switching source (the Explorer header's Project files / Local
-  // folder toggle): a path under one source means nothing under the
-  // other, so this is a hard reset of tabs/buffers (SWITCH_SOURCE
-  // itself does that part — see editorStore.js). The only thing this
-  // wrapper adds is asking first when there's something to lose,
-  // exactly like requestClose() already does for a single dirty tab.
-  const [pendingSourceChange, setPendingSourceChange] = useState(null);
-  const requestChangeSource = useCallback(
-    (next) => {
-      if (next === stateRef.current.layout.source) return;
-      const dirty = Object.values(stateRef.current.buffers).some((b) => b.dirty);
-      if (dirty) setPendingSourceChange(next);
-      else switchSource(next);
-    },
-    [switchSource]
-  );
-
-  // Any pending local action (a terminal command, or a proposed write)
-  // landing is also the moment the tree might be stale — a command can
-  // create/delete/modify files just as easily as a save can. Mirrors
-  // LocalWorkspaceTab.jsx's own onConfirmed={() => live && loadRoot(...)}.
-  //
-  // W3.1 part 2: PendingActionBar calls this for EVERY confirmed action
-  // on the workspace, not only ones this tab proposed (an agent, or
-  // another browser tab, can confirm one too) — pendingLocalWritesRef is
-  // what tells "a write_file THIS saveFile() proposed" apart from any
-  // other confirmed action.
-  // Someone else's write to a path this tab happens to have open isn't
-  // handled here: Local's capabilities.watch is false on purpose (see
-  // fileProviders.js) — there's no live-change story for Local yet,
-  // only for the specific case of a proposal this saveFile() itself made.
-  const handleActionConfirmed = useCallback(
-    (action) => {
-      if (stateRef.current.layout.source === "local") refreshRef.current();
-      const pending = action?.action_id ? pendingLocalWritesRef.current.get(action.action_id) : null;
-      if (!pending || action.tool !== "write_file") return;
-      pendingLocalWritesRef.current.delete(action.action_id);
-      const { path, content } = pending;
-      setAwaitingConfirmation((prev) => {
-        if (!(path in prev)) return prev;
-        const { [path]: _done, ...rest } = prev;
-        return rest;
-      });
-      // Local files carry no version (LocalFileProvider.read()'s own
-      // comment) — `{content, version: 0}` is the whole "saved" shape
-      // SAVE_SUCCESS needs; `keepEdited` mirrors the Cloud save path
-      // above: if the person kept typing while the confirm was pending,
-      // the newer text stays in the editor rather than being clobbered
-      // by the (now-confirmed, but by then stale) proposed text.
-      const latest = stateRef.current.buffers[path];
-      if (latest) saveSuccess(path, { content, version: 0 }, { keepEdited: latest.edited !== content });
-    },
-    [saveSuccess]
-  );
+  // (M2C B10: the local source's wiring that used to be built here —
+  // the daemon status poll, the source switch with its discard-edits
+  // prompt, and handleActionConfirmed() for the propose/confirm save —
+  // was removed with Local folder mode.)
 
   // (M2C B09: the browser Terminal panel that used to be built here, as
   // a bottom-panel tab, was removed. The backend command routes stay
@@ -1846,19 +1715,10 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   // against the saved version, not the buffer).
   const reviewDirtyPaths = useMemo(() => dirtyOverlap(review, buffers), [review, buffers]);
   const flagsKey = useMemo(() => encodeTabFlags(tabs, buffers), [tabs, buffers]);
-  // W3.1 part 2: a proposed write is outstanding for the active path
-  // and nothing has been typed since (awaitingConfirmation[path] still
-  // equals the live buffer text) — checked ahead of "dirty" since a
-  // proposal-in-waiting IS dirty (nothing's on disk yet) but reads as
-  // something more specific than an ordinary unsaved edit.
-  const isAwaitingConfirmation =
-    !!activePath && provider.capabilities.writeNeedsConfirm && awaitingConfirmation[activePath] === activeBuffer?.edited;
   const saveState = !activeBuffer
     ? null
     : saving[activePath]
     ? "saving"
-    : isAwaitingConfirmation
-    ? "awaiting-confirmation"
     : conflicts[activePath]
     ? "conflict"
     : saveErrors[activePath]
@@ -2032,15 +1892,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
   saveFileRef.current = saveFile;
   useEffect(() => {
     const timers = autosaveTimersRef.current;
-    // W3.1 part 2: never for a writeNeedsConfirm provider. A proposed
-    // write deliberately leaves the buffer `dirty` (see saveFile()'s own
-    // comment — nothing is actually saved until a human confirms), so
-    // without this guard the very next debounce tick would find the
-    // same file "due" again and propose it a second time, then a third,
-    // for as long as it sits unconfirmed — flooding PendingActionBar
-    // with duplicates of the same edit instead of the occasional retry
-    // planAutosave is meant for.
-    const due = savePrefs.autosave && !provider.capabilities.writeNeedsConfirm
+    const due = savePrefs.autosave
       ? planAutosave({ tabs, buffers, busy: Object.keys(saving), conflicts, failed: failedSavesRef.current })
       : [];
     const dueText = new Map(due.map((d) => [d.path, d.edited]));
@@ -2152,14 +2004,6 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
       onKeyDown={handleWorkbenchKeyDown}
       className="relative flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
     >
-      {/* W3.1: a proposed local action (a terminal command, or — as of
-          part 2 — a proposed write from Save) awaiting Confirm/Deny.
-          Above the whole main row, not just the terminal tab, the same
-          placement LocalWorkspaceTab.jsx already used — a person
-          mid-edit in the explorer/editor column should still see it
-          land. */}
-      {provider.id === "local" && <PendingActionBar workspaceId={workspaceId} onConfirmed={handleActionConfirmed} />}
-
       {/* Main row: explorer | splitter | editor column | splitter |
           preview column. The bottom panel and the status bar sit below
           it. The row keeps a minimum height so a tall bottom panel
@@ -2178,15 +2022,14 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
             flagsKey={flagsKey}
             onOpenFile={openFile}
             onRefresh={handleRefresh}
-            onDownloadZip={provider.id === "local" ? undefined : downloadZip}
+            onDownloadZip={downloadZip}
             downloading={downloading}
             downloadError={downloadError}
             // "Can the tree itself change" (new file/folder, rename,
             // delete, duplicate, drag-move) — deliberately NOT the same
             // question as whether a buffer can be typed into (see
             // EditorPane's readOnly below and fileProviders.js's own
-            // comment on the split). Local's capabilities.write is
-            // false, so these stay hidden there; Save works anyway.
+            // comment on the split).
             canModify={provider.capabilities.write}
             busy={explorerOps.busy}
             onCreateFile={explorerOps.createFile}
@@ -2196,10 +2039,6 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
             onDuplicate={explorerOps.duplicate}
             onMove={explorerOps.move}
             onAddToChat={handleAddToChat}
-            source={source}
-            onChangeSource={requestChangeSource}
-            daemonLive={daemonLive}
-            daemonChecked={daemonChecked}
           />
         </div>
 
@@ -2248,30 +2087,14 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
             onCloseOthers={closeOthers}
             onCloseAll={closeAll}
             onSave={saveActive}
-            // W3.1 part 2: while a proposal is outstanding for the
-            // active path and nothing has changed since (see
-            // isAwaitingConfirmation above), Save is disabled rather
-            // than left clickable — re-proposing identical content
-            // would just pile a second, redundant pending action onto
-            // PendingActionBar next to the one already waiting there.
-            // Editing further makes it dirty again in the ordinary
-            // sense (isAwaitingConfirmation stops matching) and Save
-            // re-enables on its own, no extra bookkeeping needed.
-            canSave={!!activeBuffer?.dirty && !isAwaitingConfirmation}
+            canSave={!!activeBuffer?.dirty}
             saving={!!(activePath && saving[activePath])}
-            saveLabel={provider.capabilities.writeNeedsConfirm ? "Propose write" : "Save"}
-            saveLabelBusy={provider.capabilities.writeNeedsConfirm ? "Proposing…" : "Saving…"}
             onToggleExplorer={isMobile ? toggleExplorer : undefined}
             bottomOpen={layout.bottomOpen}
             onToggleBottom={toggleBottom}
             previewOpen={showPreview}
             onTogglePreview={isMobile ? undefined : togglePreview}
-            // Autosave doesn't apply to a confirm-gated write (see the
-            // autosave effect's own comment) and format-on-save isn't
-            // worth splitting the menu out for on its own — the whole
-            // Save-options control is hidden for Local rather than
-            // offering a toggle that does nothing.
-            savePrefs={provider.capabilities.writeNeedsConfirm ? undefined : savePrefs}
+            savePrefs={savePrefs}
             onToggleAutosave={toggleAutosave}
             onToggleFormatOnSave={toggleFormatOnSave}
           />
@@ -2371,16 +2194,10 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
                   active={path === activePath}
                   visible={!editorColumnHidden}
                   value={buffer.edited}
-                  // W3.1 part 2: a buffer is editable when the provider
-                  // can EITHER write directly (Cloud) OR propose a write
-                  // (Local) — capabilities.write alone would leave Local
-                  // permanently read-only, which was only ever true for
-                  // part 1 before Save had anywhere to send a local
-                  // edit. `truncated` overrides either way: Local's
-                  // read() sets it for a file over the daemon's read
-                  // limit, and saving a partial file would silently
-                  // chop off the rest of it.
-                  readOnly={!(provider.capabilities.write || provider.capabilities.writeNeedsConfirm) || !!buffer.truncated}
+                  // Editable when the provider can write. A `truncated`
+                  // buffer (a partial read) is always read-only: saving
+                  // it would silently chop off the rest of the file.
+                  readOnly={!provider.capabilities.write || !!buffer.truncated}
                   onEdit={handleEdit}
                   onSave={saveFile}
                   onCursor={handleCursor}
@@ -2510,21 +2327,6 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange, onFi
         onCancel={() => setPendingProposalResolve(null)}
       />
 
-      {/* W3.1: switching source is a hard reset of open tabs (see
-          editorStore.js's SWITCH_SOURCE) — same discard-and-confirm
-          shape as closing a dirty tab, just for everything open at once. */}
-      <ConfirmDialog
-        open={!!pendingSourceChange}
-        title={pendingSourceChange === "local" ? "Switch to your local folder?" : "Switch to project files?"}
-        message="Every open tab here has unsaved changes that don't exist under the other source. Switching will close them and discard those changes."
-        confirmLabel="Switch"
-        onConfirm={() => {
-          if (pendingSourceChange) switchSource(pendingSourceChange);
-          setPendingSourceChange(null);
-        }}
-        onCancel={() => setPendingSourceChange(null)}
-      />
-
       {/* W2.5: "Compare" on the conflict bar. The right-hand side is the
           buffer as it is NOW (what "Keep mine" would keep), falling back
           to what the failed save sent. Both decisions are echoed here so
@@ -2596,7 +2398,7 @@ export default function EditorWorkbench({
   apiUrl,
   reserveCorner = false,
   onDirtyChange,
-  initialSourceOverride, // NEW — W3.2: BuildTab's one-time "the old Local Files tab redirected here" signal
+  initialSourceOverride, // W3.2: BuildTab's one-time source signal. Since M2C B10 "cloud" is the only valid value, so it is effectively a no-op; kept so BuildTab's wiring still works (candidate for removal in a follow-up)
   onConsumeInitialSourceOverride, // NEW — W3.2: called once this mount has applied (or ignored) the override above, same consumed-once shape as AppShell's own initialWorkspaceId
   onFixWithAIChat, // NEW — W6.2: Console tab's "Fix with AI" also needs the chat dock visible, which is BuildTab.jsx's own state, not something this component (or the CodeContextProvider it sits inside) can reach on its own — see handleFixWithAI's own comment for the rest of what a click does.
 }) {
@@ -2608,16 +2410,14 @@ export default function EditorWorkbench({
   // only so the read is correct if that ever stops being true for the
   // first render.)
   //
-  // W3.2: initialSourceOverride, when it validates against
-  // LOCAL_SOURCE_IDS, wins over whatever this workspace's own persisted
-  // layout says — it's how the retired "local" tab's redirect lands
-  // someone on Local instead of whatever they last had open here. Not
-  // written back through saveLayout: it's a one-time nudge for this
-  // mount, not a new preference: the switch (or lack of one) after this
-  // is the user's own choice again.
+  // W3.2: initialSourceOverride, when it validates against SOURCE_IDS,
+  // wins over whatever this workspace's own persisted layout says. Since
+  // M2C B10 the only valid id is "cloud" (which is also what a stale
+  // saved "local" loads as), so this can no longer change anything; it
+  // stays so BuildTab's forceCloudSourceOnce wiring needs no edit.
   const initialLayout = useMemo(() => {
     const loaded = loadLayout(browserStorage(), workspaceId);
-    if (initialSourceOverride && LOCAL_SOURCE_IDS.has(initialSourceOverride)) {
+    if (initialSourceOverride && SOURCE_IDS.has(initialSourceOverride)) {
       return { ...loaded, source: initialSourceOverride };
     }
     return loaded;
@@ -2628,9 +2428,7 @@ export default function EditorWorkbench({
   // validated — an invalid value shouldn't leave BuildTab re-arming it
   // forever either. `initialSourceOverride` itself is intentionally not
   // a dep: this component is remounted (key={selected.id}) for every
-  // project switch, so "once per mount" already means "once", the same
-  // guarantee LocalWorkspaceTab.jsx's own initialWorkspaceId consumer
-  // used to rely on.
+  // project switch, so "once per mount" already means "once".
   useEffect(() => {
     if (initialSourceOverride) onConsumeInitialSourceOverride?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps

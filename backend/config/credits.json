@@ -1,0 +1,36 @@
+{
+  "_notes": [
+    "S02 per-model price data, read by eo/credits.py. All prices are USD per 1,000,000 tokens.",
+    "The size of one credit is NOT here. It is credits_per_usd in config/plans.json (Decision D5), read through eo/plans.py, so it has exactly one source.",
+    "For a model that is in utils/llm_client.py's _TOKEN_PRICES_PER_MILLION, eo/credits.py takes input and output prices from that table and takes ONLY cached_input from this file. Any input/output written here for such a model is ignored, so the two files cannot drift apart. For a model that is NOT in that table, an entry here must carry all three of input, cached_input and output, or it is treated as unknown.",
+    "cached_input is what the provider charges for a prompt token served from its prompt cache. Where a provider gives no cache discount, or the model is not documented as supporting caching, cached_input is set equal to the input price: no discount is invented. A discount is claimed only where the provider's own documentation states it. Re-check each entry whenever a model or a provider's pricing changes; this file does not update itself.",
+    "Sources (checked 2026-10-24): Groq prompt caching docs (console.groq.com/docs/prompt-caching): cached input tokens cost 50% less, supported only on openai/gpt-oss-20b, openai/gpt-oss-120b and openai/gpt-oss-safeguard-20b, so qwen and llama-3.1-8b-instant get no discount. Mistral prompt caching docs (docs.mistral.ai): cached prompt tokens are billed at 10% of the input price, applied to the table's input prices below. Cloudflare Workers AI pricing page: no cached-input rate is listed for llama-3.3-70b-instruct-fp8-fast.",
+    "UNVERIFIED: Gemini. No official cached-read price for gemini-3.6-flash or gemini-3.1-flash-lite could be confirmed, so both are set to their input price (no discount, which can only over-charge). Replace them once a verified figure exists. Likewise the input/output figures for these two models, and for groq qwen/qwen3.6-27b, live in llm_client.py's table and could not be confirmed against a provider page either; S02 does not edit that table.",
+    "openai/gpt-oss-20b is not in llm_client.py's table, so its full entry is here. Its input/output figures come from a third-party summary of Groq's price list, not from Groq's own page: verify before relying on it.",
+    "default_prices_usd_per_million is what an unknown provider/model is charged (and logged once). It must be at least as expensive as every priced model in each of the three components; a unit test enforces that against the real table and this file. When llm_client.py's table gains a pricier model, raise this default first. It replaces plans.json's flat unpriced_usd_per_million_tokens once usage_ledger delegates to eo/credits.py (follow-up, not part of S02).",
+    "Models in use in the repo today that are in neither llm_client.py's table nor this file, and therefore fall back to the default: mistral-large-latest, @cf/meta/llama-3.1-8b-instruct, groq qwen/qwen3.8-27b. Add a price here only from a provider page."
+  ],
+  "default_prices_usd_per_million": { "input": 1.0, "cached_input": 1.0, "output": 3.0 },
+  "models": {
+    "groq": {
+      "openai/gpt-oss-120b":  { "cached_input": 0.075 },
+      "openai/gpt-oss-20b":   { "input": 0.075, "cached_input": 0.0375, "output": 0.30 },
+      "qwen/qwen3.6-27b":     { "cached_input": 0.29 },
+      "llama-3.1-8b-instant": { "cached_input": 0.05 }
+    },
+    "mistral": {
+      "mistral-medium-latest": { "cached_input": 0.04 },
+      "mistral-small-latest":  { "cached_input": 0.01 }
+    },
+    "gemini": {
+      "gemini-3.6-flash":      { "cached_input": 0.15 },
+      "gemini-3.1-flash-lite": { "cached_input": 0.075 }
+    },
+    "openrouter": {
+      "openrouter/free": { "cached_input": 0.0 }
+    },
+    "cloudflare": {
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast": { "cached_input": 0.29 }
+    }
+  }
+}

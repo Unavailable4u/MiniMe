@@ -9,6 +9,7 @@ import { loadSource } from "./loadSource.mjs";
 
 const {
   BOTTOM_TABS,
+  SOURCE_IDS,
   DEFAULT_LAYOUT,
   normalizeLayout,
   sameLayout,
@@ -77,8 +78,8 @@ assertEqual(normalizeLayout([true, "history"]), DEFAULT_LAYOUT, "an array normal
 assertEqual(normalizeLayout({}), DEFAULT_LAYOUT, "an empty object normalizes to the defaults");
 
 assertEqual(
-  normalizeLayout({ bottomOpen: true, bottomTab: "console", previewOpen: true, source: "local" }),
-  { bottomOpen: true, bottomTab: "console", previewOpen: true, source: "local" },
+  normalizeLayout({ bottomOpen: true, bottomTab: "console", previewOpen: true, source: "cloud" }),
+  { bottomOpen: true, bottomTab: "console", previewOpen: true, source: "cloud" },
   "a valid layout passes through unchanged"
 );
 assertEqual(
@@ -97,13 +98,13 @@ assertEqual(
   "unknown keys are dropped"
 );
 assertEqual(
-  normalizeLayout({ bottomTab: "nope" }, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" }),
-  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" },
+  normalizeLayout({ bottomTab: "nope" }, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" }),
+  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" },
   "with a fallback, invalid/missing fields take the fallback's values instead of the defaults"
 );
 assertEqual(
-  normalizeLayout({ bottomOpen: false }, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" }),
-  { bottomOpen: false, bottomTab: "history", previewOpen: true, source: "local" },
+  normalizeLayout({ bottomOpen: false }, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" }),
+  { bottomOpen: false, bottomTab: "history", previewOpen: true, source: "cloud" },
   "...and valid fields still win over the fallback"
 );
 assertEqual(Object.isFrozen(DEFAULT_LAYOUT) && !Object.isFrozen(normalizeLayout(null)), true, "DEFAULT_LAYOUT is frozen, but normalizeLayout returns a fresh object callers may own");
@@ -111,7 +112,7 @@ assertEqual(Object.isFrozen(DEFAULT_LAYOUT) && !Object.isFrozen(normalizeLayout(
 assertEqual(sameLayout(normalizeLayout(null), DEFAULT_LAYOUT), true, "sameLayout: equal layouts");
 assertEqual(sameLayout({ ...DEFAULT_LAYOUT, bottomTab: "history" }, DEFAULT_LAYOUT), false, "sameLayout: a different tab");
 assertEqual(sameLayout({ ...DEFAULT_LAYOUT, previewOpen: true }, DEFAULT_LAYOUT), false, "sameLayout: a different flag");
-assertEqual(sameLayout({ ...DEFAULT_LAYOUT, source: "local" }, DEFAULT_LAYOUT), false, "sameLayout: a different source");
+assertEqual(sameLayout({ ...DEFAULT_LAYOUT, source: "local" }, DEFAULT_LAYOUT), false, "sameLayout: still a plain field comparison (an un-normalized source differs)");
 
 // --- storage ----------------------------------------------------------
 
@@ -119,10 +120,10 @@ assertEqual(layoutStorageKey("ws-1"), "minime_build_editor_layout:ws-1", "the st
 assertEqual(layoutStorageKey("ws-1") === layoutStorageKey("ws-2"), false, "two workspaces don't share a layout");
 
 let store = fakeStorage();
-saveLayout(store, "ws-1", { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" });
+saveLayout(store, "ws-1", { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" });
 assertEqual(
   loadLayout(store, "ws-1"),
-  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" },
+  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" },
   "a saved layout loads back identically"
 );
 assertEqual(loadLayout(store, "ws-2"), DEFAULT_LAYOUT, "another workspace still gets the defaults");
@@ -180,8 +181,8 @@ assertEqual(browserStorage(), null, "browserStorage() is null outside a browser 
 
 assertEqual(normalizeLayout({ bottomTab: "terminal" }).bottomTab, "problems", "a stale \"terminal\" tab id normalizes to the default tab");
 assertEqual(
-  normalizeLayout({ bottomOpen: true, bottomTab: "terminal", previewOpen: true, source: "local" }),
-  { bottomOpen: true, bottomTab: "problems", previewOpen: true, source: "local" },
+  normalizeLayout({ bottomOpen: true, bottomTab: "terminal", previewOpen: true, source: "cloud" }),
+  { bottomOpen: true, bottomTab: "problems", previewOpen: true, source: "cloud" },
   "...and the other saved fields are kept"
 );
 assertEqual(
@@ -213,12 +214,66 @@ store = fakeStorage({ [layoutStorageKey("ws-1")]: JSON.stringify({ bottomTab: "t
 saveLayout(store, "ws-1", loadLayout(store, "ws-1"));
 assertEqual(Object.keys(store.data), [], "a stale \"terminal\" on an otherwise default layout is cleaned up (saved as defaults, key removed)");
 
-// --- W3.1: source ------------------------------------------------------
+// --- M2C B10: Local folder mode removed — `source` is cloud-only --------
+//
+// The Explorer's Project files / Local folder switch is gone, so "cloud"
+// is the only source the editor knows. A layout saved by an older build
+// can still hold `source: "local"` in localStorage; it must restore as
+// "cloud" — never throw, never leave the workbench without a provider —
+// and the rest of the saved layout must survive.
 
-assertEqual(normalizeLayout({ source: "local" }).source, "local", "a valid source passes through");
+assertEqual([...SOURCE_IDS], ["cloud"], "\"cloud\" is the only valid source id");
+assertEqual(normalizeLayout({ source: "cloud" }).source, "cloud", "\"cloud\" passes through");
+assertEqual(normalizeLayout({ source: "local" }).source, "cloud", "a saved \"local\" source normalizes to \"cloud\"");
 assertEqual(normalizeLayout({ source: "dropbox" }).source, "cloud", "an unknown source falls back to cloud");
-assertEqual(normalizeLayout({ source: "local" }, { ...DEFAULT_LAYOUT, source: "cloud" }).source, "local", "a valid source still wins over the fallback");
-assertEqual(normalizeLayout({}, { ...DEFAULT_LAYOUT, source: "local" }).source, "local", "a missing source takes the fallback's value");
+assertEqual(normalizeLayout({}).source, "cloud", "a missing source is cloud");
+assertEqual(
+  normalizeLayout({ bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" }),
+  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" },
+  "...and the other saved fields are kept"
+);
+assertEqual(
+  normalizeLayout({ source: "local" }, { ...DEFAULT_LAYOUT, source: "cloud" }).source,
+  "cloud",
+  "applying an update that names \"local\" leaves the source on cloud (SET_LAYOUT shape)"
+);
+assertEqual(
+  normalizeLayout({}, { ...DEFAULT_LAYOUT, source: "local" }).source,
+  "cloud",
+  "a fallback that itself holds \"local\" never leaks it: still cloud"
+);
+assertEqual(
+  normalizeLayout({ source: "local" }, { ...DEFAULT_LAYOUT, source: "local" }).source,
+  "cloud",
+  "\"local\" in both the update and the fallback still ends on cloud"
+);
+
+store = fakeStorage({
+  [layoutStorageKey("ws-1")]: JSON.stringify({ bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" }),
+});
+assertEqual(
+  loadLayout(store, "ws-1"),
+  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" },
+  "loadLayout: a saved \"local\" source loads as cloud, with the rest of the layout intact"
+);
+// The workbench re-saves whatever it loaded on mount (EditorWorkbench's
+// persist effect), which must overwrite the stale value rather than keep it.
+saveLayout(store, "ws-1", loadLayout(store, "ws-1"));
+assertEqual(
+  JSON.parse(store.data[layoutStorageKey("ws-1")]).source,
+  "cloud",
+  "re-saving the loaded layout replaces the stale \"local\" value in storage"
+);
+store = fakeStorage({ [layoutStorageKey("ws-1")]: JSON.stringify({ source: "local" }) });
+assertEqual(loadLayout(store, "ws-1"), DEFAULT_LAYOUT, "loadLayout: a saved layout that is only \"local\" loads as the defaults");
+saveLayout(store, "ws-1", loadLayout(store, "ws-1"));
+assertEqual(Object.keys(store.data), [], "a stale \"local\" on an otherwise default layout is cleaned up (saved as defaults, key removed)");
+saveLayout(store, "ws-2", { bottomOpen: true, source: "local" });
+assertEqual(
+  JSON.parse(store.data[layoutStorageKey("ws-2")]),
+  { bottomOpen: true, bottomTab: "problems", previewOpen: false, source: "cloud" },
+  "saveLayout never writes \"local\" back, even when asked to"
+);
 
 // --- size bounds ------------------------------------------------------
 

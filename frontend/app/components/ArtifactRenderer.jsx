@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState, memo } from "react";
-import { Maximize2, Minimize2, Code2, ExternalLink, Play, Loader2 } from "lucide-react";
+import { Maximize2, Minimize2, Code2, ExternalLink, Play, Loader2, Square } from "lucide-react";
 import { usePyodideWorker } from "../hooks/usePyodideWorker";
 import { SandpackProvider, SandpackPreview } from "@codesandbox/sandpack-react";
 
@@ -51,23 +51,47 @@ function wrapAsHtmlDoc(type, code) {
   return code;
 }
 
+// Patch B08 (M2C build plan) -- runner hardening. While code is running the
+// card shows a Stop button; a run that exceeds the timeout (30 s, see
+// usePyodideWorker) is stopped for you. Both end with the same result: the
+// worker is terminated and replaced (Python in a worker cannot be
+// interrupted any other way), the card shows a short notice instead of
+// output, and pressing Run again works on the fresh worker -- the runtime
+// reloads, so that run starts slower. Status values: idle | loading (runtime
+// and packages downloading) | running (code executing) | ok | error |
+// stopped | timeout.
 function PythonArtifact({ code }) {
-  const { run } = usePyodideWorker();
-  const [status, setStatus] = useState("idle"); // idle | loading | ok | error
+  const { run, stop } = usePyodideWorker();
+  const [status, setStatus] = useState("idle");
   const [result, setResult] = useState(null); // { stdout, stderr, images }
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null); // message for a stopped / timed-out run
+  const busy = status === "loading" || status === "running";
 
   async function handleRun() {
     setStatus("loading");
     setError(null);
+    setNotice(null);
     try {
-      const payload = await run(code);
+      const payload = await run(code, { onStart: () => setStatus("running") });
+      if (payload.status === "stopped" || payload.status === "timeout") {
+        setResult(null);
+        setNotice(payload.message);
+        setStatus(payload.status);
+        return;
+      }
       setResult(payload);
       setStatus("ok");
     } catch (err) {
       setError(err?.message || String(err));
       setStatus("error");
     }
+  }
+
+  function handleStop() {
+    // The pending run() resolves with status "stopped", and handleRun above
+    // moves the card to that state.
+    stop();
   }
 
   const hasOutput = result && (result.stdout || result.stderr || (result.images && result.images.length > 0));
@@ -78,19 +102,43 @@ function PythonArtifact({ code }) {
         <code>{code}</code>
       </pre>
       <div className="px-2.5 py-2 space-y-2">
-        <button
-          type="button"
-          onClick={handleRun}
-          disabled={status === "loading"}
-          className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded border border-[var(--neutral-800)] text-[var(--neutral-300)] hover:bg-white/5 disabled:opacity-60 transition-colors"
-        >
-          {status === "loading" ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-          {status === "loading"
-            ? "Starting Python — first run loads the runtime (~10–20s)…"
-            : status === "ok"
-            ? "Run again"
-            : "Run"}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleRun}
+            disabled={busy}
+            className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded border border-[var(--neutral-800)] text-[var(--neutral-300)] hover:bg-white/5 disabled:opacity-60 transition-colors"
+          >
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+            {status === "loading"
+              ? "Starting Python — first run loads the runtime (~10–20s)…"
+              : status === "running"
+              ? "Running…"
+              : status === "ok" || status === "stopped" || status === "timeout"
+              ? "Run again"
+              : "Run"}
+          </button>
+          {busy && (
+            <button
+              type="button"
+              onClick={handleStop}
+              title="Stop this run"
+              className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded border border-red-400/40 text-red-300 hover:bg-red-500/10 transition-colors"
+            >
+              <Square size={11} />
+              Stop
+            </button>
+          )}
+        </div>
+
+        {(status === "stopped" || status === "timeout") && notice && (
+          <div
+            role="status"
+            className={`text-[11px] whitespace-pre-wrap ${status === "timeout" ? "text-amber-400" : "text-[var(--neutral-300)]"}`}
+          >
+            {notice}
+          </div>
+        )}
 
         {status === "error" && (
           <div className="text-[11px] text-red-400 whitespace-pre-wrap">{error}</div>

@@ -131,11 +131,34 @@ exercised for real.
 
 FOR S04 (device socket)
 -----------------------
-verify_device_token(jwt) -> DeviceIdentity(user_id, device_id, expires_at)
-does the whole handshake check: signature, audience, token type, expiry,
-and a live check that the device still exists, belongs to that user and has
-not been revoked. Call it on connect and on each heartbeat/refresh.
-DEVICE_JWT_TTL_SECONDS is the value for `welcome.jwt_ttl`.
+The socket authenticates with the long-lived device credential carried in its
+first message (protocol/v1 hello.device_credential), not with a JWT, and keeps
+the device honest for the life of the connection by asking again, at a fixed
+interval, whether it is still active. Patch S04 adds the two public helpers
+that does that with, and nothing else here changed:
+
+authenticate_credential(credential) -> DeviceIdentity(user_id, device_id,
+expires_at) is the handshake check: the same shape test and SHA-256 hash as
+issue_device_token, the same atomic "not revoked, and stamp last_seen_at"
+statement (PgStore.touch_active_by_credential). It raises InvalidCredential for
+a malformed or unknown credential and DeviceRevoked (a subclass of
+InvalidCredential, so the token endpoint still answers 401 exactly as before)
+for a credential whose device was revoked, which is how the socket tells
+`device_revoked` from `unauthorized`. `expires_at` is the advertised
+authentication lifetime (now + DEVICE_JWT_TTL_SECONDS, the same figure the
+socket puts in welcome.token_ttl_s); it is informational, since a credential
+does not expire -- revocation is what ends it. It does not need
+DEVICE_JWT_SECRET: no JWT is involved.
+
+is_device_active(user_id, device_id) -> bool is the periodic re-check (the
+JWT-free equivalent of the live-device half of verify_device_token). It does
+not stamp last_seen_at, so polling it every 30 seconds writes nothing. A
+malformed id or user is simply "not active". A database fault is NOT turned into
+False: it propagates, so the caller can tell "revoked" from "could not check" and
+still fail closed (the socket closes with `internal`).
+
+verify_device_token(jwt) and DEVICE_JWT_TTL_SECONDS remain for anything that
+presents a device JWT; the S04 socket does not use them.
 """
 import hashlib
 import logging
@@ -219,6 +242,13 @@ class InvalidDeviceCode(DeviceError):
 
 class InvalidCredential(DeviceError):
     """token: the credential is malformed, unknown or revoked."""
+
+
+class DeviceRevoked(InvalidCredential):
+    """authenticate_credential: the credential belongs to a device that was
+    revoked. A subclass of InvalidCredential on purpose -- every caller that
+    treats a bad credential as 401 keeps doing so; only the device socket, which
+    answers `device_revoked` rather than `unauthorized`, looks at the subtype."""
 
 
 class DeviceNotFound(DeviceError):
@@ -515,6 +545,20 @@ class PgStore:
             row = cur.fetchone()
             return {"id": str(row["id"]), "user_id": row["user_id"]} if row else None
 
+    def credential_is_revoked(self, *, credential_hash) -> bool:
+        """True if a device with this credential hash exists and was revoked.
+        Only asked after touch_active_by_credential found nothing, to tell a
+        revoked device from an unknown credential (S04). Reading it is no
+        oracle for a guesser: the hash of a 256-bit credential cannot be guessed,
+        and the caller holding a revoked credential already knows it."""
+        with db.cursor(trusted=True) as cur:
+            cur.execute(
+                "select 1 as ok from devices "
+                "where credential_hash = %s and revoked_at is not null",
+                (credential_hash,),
+            )
+            return cur.fetchone() is not None
+
     def is_active(self, *, user_id, device_id) -> bool:
         with db.cursor(trusted=True) as cur:
             cur.execute(
@@ -700,6 +744,42 @@ def verify_device_token(token: str) -> DeviceIdentity:
     if not _STORE.is_active(user_id=user_id, device_id=device_id):
         raise DeviceAuthError("device is revoked or unknown")
     return DeviceIdentity(user_id=user_id, device_id=device_id, expires_at=int(claims["exp"]))
+
+
+def authenticate_credential(device_credential: str) -> DeviceIdentity:
+    """S04 handshake check: is `device_credential` the credential of a live,
+    unrevoked device? Returns who it is, stamping last_seen_at in the same
+    statement that checks revocation (no window between the two).
+
+    Raises InvalidCredential for a malformed or unknown credential, DeviceRevoked
+    (an InvalidCredential) for a revoked device. Any other exception is an
+    infrastructure fault and propagates: callers must treat it as a refusal.
+    The credential is never logged and never appears in an exception message.
+    """
+    # fullmatch, not match: `$` in _CREDENTIAL_RE would let a trailing newline through.
+    if not isinstance(device_credential, str) or not _CREDENTIAL_RE.fullmatch(device_credential):
+        raise InvalidCredential("invalid credential")
+    credential_hash = _sha256(device_credential)
+    device = _STORE.touch_active_by_credential(credential_hash=credential_hash)
+    if device is None:
+        if _STORE.credential_is_revoked(credential_hash=credential_hash):
+            raise DeviceRevoked("device revoked")
+        raise InvalidCredential("invalid credential")
+    return DeviceIdentity(
+        user_id=device["user_id"],
+        device_id=device["id"],
+        expires_at=int(time.time()) + DEVICE_JWT_TTL_SECONDS,
+    )
+
+
+def is_device_active(user_id: str, device_id: str) -> bool:
+    """S04 periodic re-check: does this device still exist, belong to this user
+    and not carry a revocation? False for a malformed id or user without asking
+    the database. Does not stamp last_seen_at. A store fault propagates (see the
+    module docstring); it is never reported as False."""
+    if not isinstance(user_id, str) or not user_id or not _is_uuid(device_id):
+        return False
+    return bool(_STORE.is_active(user_id=user_id, device_id=device_id))
 
 
 def _device_view(row: dict) -> dict:
