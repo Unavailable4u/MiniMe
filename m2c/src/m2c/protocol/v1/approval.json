@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/approval.json",
+  "title": "approval (client -> server)",
+  "description": "The device's decision on a proposed call. Local policy is final: this message reports it, it cannot widen it.",
+  "x-m2c-data-class": "metadata",
+  "type": "object",
+  "required": [
+    "call_id",
+    "decision",
+    "scope"
+  ],
+  "properties": {
+    "call_id": {
+      "$ref": "common.json#/$defs/call_id"
+    },
+    "decision": {
+      "enum": [
+        "allow",
+        "deny"
+      ]
+    },
+    "scope": {
+      "enum": [
+        "once",
+        "session"
+      ],
+      "description": "session: the device will not ask again for this exact call during the run. The server does not act on it; it is recorded for the audit trail."
+    }
+  },
+  "additionalProperties": false
+}

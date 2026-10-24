@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/run.start.json",
+  "title": "run.start (client -> server)",
+  "description": "Everything the server needs to (re)build a run's context. Carried by run.start, and by run.resume when the server's buffer has expired.",
+  "type": "object",
+  "required": [
+    "profile",
+    "mode",
+    "cwd_label",
+    "instructions",
+    "rules",
+    "memory_index",
+    "tool_catalog_version",
+    "model_pref"
+  ],
+  "properties": {
+    "profile": {
+      "$ref": "common.json#/$defs/profile"
+    },
+    "mode": {
+      "$ref": "common.json#/$defs/mode"
+    },
+    "cwd_label": {
+      "$ref": "common.json#/$defs/cwd_label"
+    },
+    "instructions": {
+      "$ref": "common.json#/$defs/bulk_text",
+      "description": "Instruction text assembled by the client (M2C.md and friends)."
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 64,
+      "description": "Instruction rules the client matched to the files in play (not permission rules: those never leave the device).",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "text"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "text": {
+            "$ref": "common.json#/$defs/bulk_text"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "memory_index": {
+      "$ref": "common.json#/$defs/bulk_text",
+      "description": "The memory index text the client chose to share."
+    },
+    "tool_catalog_version": {
+      "$ref": "common.json#/$defs/tool_catalog_version"
+    },
+    "history": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "$ref": "common.json#/$defs/history_item"
+      },
+      "description": "Optional. The conversation so far, replayed from the device log (resume)."
+    },
+    "model_pref": {
+      "$ref": "common.json#/$defs/model_pref"
+    }
+  },
+  "additionalProperties": false,
+  "x-m2c-data-class": "content"
+}

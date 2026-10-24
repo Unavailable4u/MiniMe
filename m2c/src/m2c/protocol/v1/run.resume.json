@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/run.resume.json",
+  "title": "run.resume (client -> server)",
+  "description": "Reattach to a run after a disconnect. last_seq is the highest seq the device received. If the server's run buffer has expired the device re-sends its state (including history from its own log) and the run continues (O1).",
+  "x-m2c-data-class": "content",
+  "type": "object",
+  "required": [
+    "last_seq"
+  ],
+  "properties": {
+    "last_seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state": {
+      "$ref": "run.start.json"
+    }
+  },
+  "additionalProperties": false
+}

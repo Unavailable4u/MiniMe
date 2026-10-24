@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/tool_result.json",
+  "title": "tool_result (client -> server)",
+  "description": "Outcome of a tool call the device executed. Output is already redacted and truncated by the client. Denied calls get an approval with decision deny instead; no tool_result is sent for them.",
+  "x-m2c-data-class": "content",
+  "type": "object",
+  "required": [
+    "call_id",
+    "ok",
+    "output",
+    "truncated",
+    "trust"
+  ],
+  "properties": {
+    "call_id": {
+      "$ref": "common.json#/$defs/call_id"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "output": {
+      "$ref": "common.json#/$defs/bulk_text"
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "trust": {
+      "$ref": "common.json#/$defs/trust"
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m2c.invalid/protocol/v1/tool_definition.json",
+  "title": "M2C tool definition (meta-schema)",
+  "description": "Shape of every file in protocol/v1/tools/. name, description and input_schema are what a model adapter hands to a provider; version, risk and risk_max are M2C's own.",
+  "type": "object",
+  "required": [
+    "name",
+    "version",
+    "risk",
+    "description",
+    "input_schema"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "version": {
+      "enum": [
+        "v0"
+      ]
+    },
+    "risk": {
+      "$ref": "common.json#/$defs/risk"
+    },
+    "risk_max": {
+      "$ref": "common.json#/$defs/risk",
+      "description": "Present only when a call can be riskier than the tool's usual level (delete_path: R1 inside the project, R4 otherwise). A call carries risk or risk_max, nothing between."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_schema": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}

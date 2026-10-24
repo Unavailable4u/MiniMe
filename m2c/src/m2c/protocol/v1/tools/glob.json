@@ -1,0 +1,30 @@
+{
+  "name": "glob",
+  "version": "v0",
+  "risk": "R0",
+  "description": "Find files in the project whose paths match a glob pattern such as src/**/*.py. Honours ignore files.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string",
+        "description": "Glob pattern, relative to the search directory."
+      },
+      "path": {
+        "type": "string",
+        "description": "Project-relative directory to search from. Default: the project root."
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "Cap on returned paths.",
+        "default": 200,
+        "minimum": 1,
+        "maximum": 2000
+      }
+    },
+    "required": [
+      "pattern"
+    ],
+    "additionalProperties": false
+  }
+}

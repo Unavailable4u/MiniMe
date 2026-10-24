@@ -1,0 +1,24 @@
+{
+  "name": "write_file",
+  "version": "v0",
+  "risk": "R1",
+  "description": "Create a file or overwrite an existing one with the given content. An existing file must have been read first. The write is atomic.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Project-relative path of the file."
+      },
+      "content": {
+        "type": "string",
+        "description": "Complete new content of the file."
+      }
+    },
+    "required": [
+      "path",
+      "content"
+    ],
+    "additionalProperties": false
+  }
+}
