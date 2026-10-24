@@ -4,9 +4,9 @@
 history and settings live on your own machine. This directory is the client
 package. The server side is built separately.
 
-**Status: skeleton.** Today it can report whether your machine is ready
-(`m2c doctor`). `login` and `logout` exist as stubs and exit with an error
-saying they are not implemented yet.
+**Status: early.** It can report whether your machine is ready (`m2c doctor`)
+and sign this device in to your MiniMe account (`m2c login`) and out again
+(`m2c logout`).
 
 ## Requirements
 
@@ -40,8 +40,39 @@ The runtime has **no third-party dependencies** (standard library only);
 |---|---|
 | `m2c --version` | Print the version. |
 | `m2c doctor [--project PATH]` | Check OS (Linux/WSL2), Python, `git`, `rg`, `bwrap`, project location, config directory. |
-| `m2c login`, `m2c logout` | Stubs: print "not implemented yet", exit status 3. |
+| `m2c login [--device-name NAME]` | Sign in with a code you approve in the web app (needs `M2C_SERVER_URL`). |
+| `m2c logout` | Delete this device's local credential. Revoke the device on the web Devices page too. |
 
+## Signing in
+
+```sh
+export M2C_SERVER_URL=https://api.example.com   # your MiniMe server (see below)
+m2c login
+```
+
+`m2c login` prints a short code and a web address. Open the address in a
+browser (on any device, it never tries to open one for you, which fails in
+WSL2), sign in and enter the code. The credential is then stored on this
+machine:
+
+- in your **OS keyring**, if the optional `keyring` package is installed
+  (`pip install 'm2c[keyring]'`) and has a usable backend; otherwise
+- in `credentials.json` inside the config directory, mode `0600`, written
+  atomically. m2c refuses to read the file if its permissions are looser and
+  tells you the `chmod 600` command to fix it. WSL2 normally has no keyring,
+  so the file is the usual place there.
+
+`M2C_SERVER_URL` must be `https://...` (plain `http://` is accepted only for
+`localhost`), with no password in it. After a login the address is remembered
+with the credential, which is only ever sent to the server that issued it.
+
+`m2c logout` deletes the local credential and makes no network call. The
+server does not yet offer a way for a device to revoke itself, so also revoke
+the device on the Devices page of the web app.
+
+The credential, the sign-in code and access tokens are never printed or
+logged. Exit status `4` means the sign-in failed (denied, expired, server
+unreachable) and the message says which.
 `doctor` exit status: `0` when every hard requirement is met (warnings are
 allowed), `1` when one is missing. Hard requirements are the OS, Python
 version, `git`, `rg` and a writable config directory. A missing `bwrap` or a
@@ -67,6 +98,8 @@ M2C_HOME=/tmp/m2c-test m2c doctor
   refuses to use it and `doctor` reports the failure.
 - The test suite sets `M2C_HOME` (and `HOME`) to a temporary directory for
   every test, so tests never touch your real `~/.m2c`.
+
+`M2C_SERVER_URL` is described under "Signing in" above.
 
 `M2C_LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`)
 controls logging on stderr. Logs never contain message content: nothing you

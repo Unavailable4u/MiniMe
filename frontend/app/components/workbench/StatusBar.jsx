@@ -5,23 +5,21 @@
 // state, its language and caret position, and the "Pending changes (N)"
 // chip (W5.4 feeds it).
 //
-// Presentational only. Everything comes in as props, which is what
-// keeps this correct over both Cloud and Local files: the local
-// provider just passes a different `providerId` ("Local folder" vs
-// "Project files") and, as of W3.1 part 2, its own "awaiting-
-// confirmation" save state alongside the ones Cloud already used.
+// Presentational only. Everything comes in as props.
+//
+// Patch B10: the Local folder file source was removed from the editor,
+// so there is one provider label ("Project files") and the Local-only
+// "awaiting-confirmation" save state is gone.
 //
 // W8.3b: the problem counts (errors / warnings, plus info when there is
 // any) sit next to "Pending changes". Omitting `problemCounts` leaves
-// the slot out entirely — that is how a file source with no findings
-// (a local folder) opts out instead of showing a permanent "0 0".
+// the slot out entirely instead of showing a permanent "0 0".
 import { memo } from "react";
 import { AlertTriangle, Info, Loader2, XCircle } from "lucide-react";
 import { summarizeProblems } from "../../lib/workbench/problems";
 
 const PROVIDER_LABELS = {
   cloud: "Project files",
-  local: "Local folder",
 };
 
 // The "Pending changes" slot (W2.3b). Pending changes = AI-proposed
@@ -97,8 +95,8 @@ function ProblemCounts({ counts, onClick }) {
 
 /**
  * @param {object} props
- * @param {string} props.providerId - FileProvider.id ("cloud" | "local")
- * @param {"saved"|"dirty"|"saving"|"awaiting-confirmation"|"error"|"conflict"|null} props.saveState - null when no file is active; "conflict" (W2.5) = the server rejected the save because the file changed underneath it and the person hasn't chosen Reload theirs / Keep mine yet; "awaiting-confirmation" (W3.1 part 2, Local only) = proposed but not yet confirmed on PendingActionBar
+ * @param {string} props.providerId - FileProvider.id ("cloud")
+ * @param {"saved"|"dirty"|"saving"|"error"|"conflict"|null} props.saveState - null when no file is active; "conflict" (W2.5) = the server rejected the save because the file changed underneath it and the person hasn't chosen Reload theirs / Keep mine yet
  * @param {string} [props.saveError] - shown as the tooltip on "Save failed"
  * @param {number} [props.version] - the active buffer's server version
  * @param {string|null} [props.language]
@@ -149,11 +147,6 @@ function StatusBar({
           {saveState === "conflict" && (
             <span className="text-amber-300" title="The server has a newer version of this file">
               Save conflict
-            </span>
-          )}
-          {saveState === "awaiting-confirmation" && (
-            <span className="text-amber-300" title="Confirm or deny it above to finish saving">
-              Waiting for confirmation
             </span>
           )}
           {saveState === "dirty" && <span className="text-amber-300">Unsaved changes</span>}

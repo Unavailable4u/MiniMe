@@ -150,11 +150,12 @@ export function editorReducer(state, action) {
     // A provider.read(path) resolved. `file` is the FileProvider's
     // file shape (content/language/version/updated_at). `saved` and
     // `edited` start equal — nothing to save until the user types.
-    // `truncated` (W3.1): only Local's read() ever sets this (a file
-    // over the daemon's read limit) — the workbench treats a truncated
-    // buffer as read-only regardless of the provider's own
-    // capabilities.write, since saving a partial file would silently
-    // chop off the rest of it.
+    // `truncated` (W3.1): a partial read (a file over a read limit) —
+    // the workbench treats a truncated buffer as read-only regardless of
+    // the provider's own capabilities.write, since saving a partial file
+    // would silently chop off the rest of it. Only the Local provider
+    // (removed in M2C B10) ever set this; the cloud provider never does,
+    // so it stays false there. Kept as a generic safety guard.
     case "FILE_LOADED": {
       const { path, file } = action;
       return {
@@ -430,23 +431,13 @@ export function editorReducer(state, action) {
       return { ...state, review: null };
     }
 
-    // W3.1: switching the Explorer's source (Project files / Local
-    // folder). A path under one source means nothing under the other,
-    // so this resets tabs/buffers/activePath back to empty at the same
-    // time it flips `layout.source` — a caller (EditorWorkbench) is
-    // expected to have already confirmed discarding any unsaved edits
-    // BEFORE dispatching this, the same way closing a dirty tab already
-    // asks first (see EditorWorkbench.jsx's requestClose()); this
-    // action itself doesn't know or care whether anything was dirty.
-    // A no-op (same state returned) when the source isn't actually
-    // changing, so clicking the already-active source doesn't wipe the
-    // open tabs.
-    case "SWITCH_SOURCE": {
-      const { source } = action;
-      const current = normalizeLayout(state.layout);
-      if (current.source === source) return state;
-      return { ...initialState, layout: normalizeLayout({ ...current, source }, current) };
-    }
+    // (M2C B10: the SWITCH_SOURCE action that used to live here — flip
+    // the Explorer between Project files and a Local folder, resetting
+    // tabs/buffers on the way — was removed with Local folder mode.
+    // "cloud" is the only source, so there is nothing to switch to; a
+    // stray SWITCH_SOURCE now falls through to `default` like any
+    // unknown action, and SET_LAYOUT can't move `layout.source` off
+    // "cloud" either — see layoutPrefs.js's normalizeLayout().)
 
     // W5.4: the cross-session pending tray's own source of truth.
     // `proposals` is populated once at mount from GET
@@ -599,7 +590,6 @@ export function EditorStoreProvider({ children, initialLayout }) {
       closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
       closeTabs: (paths) => dispatch({ type: "CLOSE_TABS", paths }),
       setLayout: (layout) => dispatch({ type: "SET_LAYOUT", layout }),
-      switchSource: (source) => dispatch({ type: "SWITCH_SOURCE", source }),
       renamePaths: (renames, versions) => dispatch({ type: "RENAME_PATHS", renames, versions }),
       // W5.3
       reviewOpen: (proposal) => dispatch({ type: "REVIEW_OPEN", proposal }),

@@ -115,6 +115,7 @@ from api.routes.system import router as system_router
 from api.routes.tasks import router as tasks_router
 from api.routes.usage import router as usage_router  # NEW — S01: GET /api/usage
 from api.routes.devices import router as devices_router  # NEW — S03: device pairing (/v1/code/devices/*, /api/devices*)
+from codeagent.ws import router as codeagent_ws_router  # NEW — S04: WS /v1/code/device
 from api.routes.user_profile import router as user_profile_router  # NEW — Patch B6
 from api.routes.workspace_data import router as workspace_data_router
 from api.routes.workspaces import router as workspaces_router
@@ -385,6 +386,7 @@ app.include_router(mcp_router)  # Patch A8: /api/mcp/servers, /api/mcp/servers/{
 app.include_router(user_profile_router)  # NEW — Patch B6: /api/profile/*
 app.include_router(usage_router)  # NEW — S01: /api/usage
 app.include_router(devices_router)  # NEW — S03: /v1/code/devices/*, /api/devices*
+app.include_router(codeagent_ws_router)  # NEW — S04: WS /v1/code/device
 
 
 # NEW — Data Layer architecture §9b: the real transport behind

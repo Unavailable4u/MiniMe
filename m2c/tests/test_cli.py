@@ -67,24 +67,12 @@ def test_help_documents_m2c_home(capsys):
 
 
 # --------------------------------------------------------------------------
-# login / logout stubs
+# login / logout (C01 had stubs here; C03 made them real -- the behaviour is
+# tested in tests/auth/test_auth_cli.py)
 # --------------------------------------------------------------------------
-@pytest.mark.parametrize("command", ["login", "logout"])
-def test_login_and_logout_are_stubs_that_exit_non_zero(command, capsys):
-    code = cli.main([command])
-    captured = capsys.readouterr()
-    assert code == cli.EXIT_NOT_IMPLEMENTED != 0
-    assert "not implemented yet" in captured.err
-    assert command in captured.err
-    assert captured.out == ""
-
-
-def test_stubs_do_not_create_the_config_dir(tmp_path, monkeypatch):
-    target = tmp_path / "must-not-exist"
-    monkeypatch.setenv("M2C_HOME", str(target))
-    cli.main(["login"])
-    cli.main(["logout"])
-    assert not target.exists()
+def test_login_and_logout_are_no_longer_stubs(capsys):
+    cli.main(["--help"])
+    assert "not implemented" not in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------

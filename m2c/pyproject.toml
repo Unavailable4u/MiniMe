@@ -19,6 +19,8 @@ readme = "README.md"
 requires-python = ">=3.11"            # decision D1
 # Runtime dependencies: the standard library only. tests/test_cli.py fails if
 # one is added here (or imported) without that test being changed on purpose.
+# (C03's OS-keyring support is an OPTIONAL extra below, imported lazily and
+# never required.)
 dependencies = []
 # No `license` field yet: whether the client is open-sourced is decision D11,
 # still open. Set it (and the license headers) when that is decided.
@@ -30,6 +32,12 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+# Patch C03: store the device credential in the OS keyring instead of a 0600
+# file (`pip install 'm2c[keyring]'`, or `uv tool install 'm2c[keyring]'`).
+# Optional and never required: m2c imports it lazily and falls back to the
+# file when it is missing or has no usable backend, which is the normal case on
+# WSL2 (no Secret Service). Pinned exactly like the other tools here.
+keyring = ["keyring==25.6.0"]
 # Same pin as daemon/requirements.txt.
 dev = ["pytest==8.4.1"]
 

@@ -49,16 +49,25 @@ const BOTTOM_TAB_IDS = new Set(BOTTOM_TABS.map((t) => t.id));
 // it stays discoverable.
 //
 // `source` (W3.1): which FileProvider the Explorer/tabs/search/history
-// are all currently pointed at — "cloud" (workspace_code_files) or
-// "local" (a paired daemon folder). Persisted here rather than as its
-// own storage key for the same reason the panel flags are: it's a
-// sticky per-workspace UI preference, not buffer state, so it belongs
-// wherever bottomOpen/previewOpen already live rather than a second
-// read/write path doing the same job. Switching it is NOT a plain
-// SET_LAYOUT, though — see editorStore.js's SWITCH_SOURCE, which resets
-// tabs/buffers at the same time (a path under one source means nothing
-// under the other).
-export const LOCAL_SOURCE_IDS = new Set(["cloud", "local"]);
+// are all currently pointed at. Persisted here rather than as its own
+// storage key for the same reason the panel flags are: it's a sticky
+// per-workspace UI preference, not buffer state, so it belongs wherever
+// bottomOpen/previewOpen already live rather than a second read/write
+// path doing the same job.
+//
+// M2C B10: the browser editor's Local folder mode (a paired daemon
+// folder, source "local") was removed, so "cloud" (workspace_code_files)
+// is the only source. The field stays in the layout — it is part of the
+// persisted shape — but "cloud" is the only value it can hold. A layout
+// saved by an older build can still contain `source: "local"` in
+// localStorage; it is not a known id any more, so normalizeLayout()
+// below turns it into "cloud" (loading a saved value) or ignores it
+// (applying an update), and keeps the rest of the saved layout. The next
+// save overwrites the stale value (and a layout that is otherwise the
+// defaults removes the key). Nothing here needs a migration: the
+// "unknown id degrades to one default" rule already covers it, the same
+// way it covers the stale "terminal" bottom tab (M2C B09).
+export const SOURCE_IDS = new Set(["cloud"]);
 
 export const DEFAULT_LAYOUT = Object.freeze({
   bottomOpen: false,
@@ -93,7 +102,7 @@ export const STATUS_BAR_HEIGHT = 24; // StatusBar's `h-6`
  *
  * @param {unknown} raw
  * @param {unknown} [fallback]
- * @returns {{bottomOpen: boolean, bottomTab: string, previewOpen: boolean}}
+ * @returns {{bottomOpen: boolean, bottomTab: string, previewOpen: boolean, source: "cloud"}}
  */
 export function normalizeLayout(raw, fallback) {
   const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -102,7 +111,7 @@ export function normalizeLayout(raw, fallback) {
     bottomOpen: typeof src.bottomOpen === "boolean" ? src.bottomOpen : base.bottomOpen,
     bottomTab: BOTTOM_TAB_IDS.has(src.bottomTab) ? src.bottomTab : base.bottomTab,
     previewOpen: typeof src.previewOpen === "boolean" ? src.previewOpen : base.previewOpen,
-    source: LOCAL_SOURCE_IDS.has(src.source) ? src.source : base.source,
+    source: SOURCE_IDS.has(src.source) ? src.source : base.source,
   };
 }
 

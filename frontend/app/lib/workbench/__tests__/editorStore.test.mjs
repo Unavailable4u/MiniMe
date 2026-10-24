@@ -374,22 +374,26 @@ assertEqual(laid.layout.bottomTab, "problems", "...and the missing fields are fi
 const opened = editorReducer(withLayout, { type: "SET_ACTIVE_PATH", path: "a.js" });
 assertEqual(opened.layout, withLayout.layout, "unrelated actions leave layout untouched");
 
-// --- W3.1: SWITCH_SOURCE ------------------------------------------------
+// --- M2C B10: no source switching (Local folder mode removed) ------------
+//
+// SWITCH_SOURCE existed only to flip the editor between Project files and
+// a Local folder, wiping tabs/buffers on the way. With Local gone there is
+// nothing to switch to, so the action is gone: a stray dispatch must be an
+// ordinary unknown action (same state object back — open tabs and buffers
+// survive), and SET_LAYOUT must not be a back door onto a "local" source.
 
 const cloudSession = editorReducer(
   { ...initialState, layout: { ...defaultLayout, bottomOpen: true, bottomTab: "history" } },
   { type: "SET_ACTIVE_PATH", path: "a.js" }
 );
-const toLocal = editorReducer(cloudSession, { type: "SWITCH_SOURCE", source: "local" });
-assertEqual(toLocal.layout.source, "local", "SWITCH_SOURCE flips layout.source");
-assertEqual(toLocal.layout.bottomOpen, true, "...while leaving other layout fields (bottomOpen) alone");
-assertEqual(toLocal.layout.bottomTab, "history", "...and (bottomTab) alone");
-assertEqual(toLocal.tabs, [], "SWITCH_SOURCE clears open tabs — a cloud path means nothing under local");
-assertEqual(toLocal.activePath, null, "...and the active path");
-assertEqual(Object.keys(toLocal.buffers).length, 0, "...and every buffer");
+const strayLocalSwitch = editorReducer(cloudSession, { type: "SWITCH_SOURCE", source: "local" });
+assertEqual(strayLocalSwitch === cloudSession, true, "SWITCH_SOURCE is no longer an action: state comes back untouched (same object)");
+assertEqual(strayLocalSwitch.layout.source, "cloud", "...so the source is still cloud");
+assertEqual(strayLocalSwitch.tabs.length > 0 && strayLocalSwitch.activePath === "a.js", true, "...and the open tab and active path survive");
 
-const same = editorReducer(toLocal, { type: "SWITCH_SOURCE", source: "local" });
-assertEqual(same === toLocal, true, "SWITCH_SOURCE to the already-active source is a no-op (same state object)");
+const asksForLocal = editorReducer(cloudSession, { type: "SET_LAYOUT", layout: { source: "local" } });
+assertEqual(asksForLocal.layout.source, "cloud", "SET_LAYOUT naming \"local\" leaves the source on cloud");
+assertEqual(asksForLocal.activePath, "a.js", "...and does not touch the open tabs");
 
 // --- W3.1: FILE_LOADED / SAVE_SUCCESS carry `truncated` -----------------
 

@@ -29,6 +29,25 @@
 // Pyodide itself is only loaded the first time run() is called, not on
 // worker startup -- so creating the worker is instant, and the ~10 MB
 // WASM runtime download only happens once someone actually clicks Run.
+//
+// Patch B08 (runner hardening) changes three things here, all in the
+// per-run path at the bottom of this file; the loading code above is
+// untouched:
+//   1. Python tracebacks are written to sys.stderr instead of print()ed to
+//      stdout, so they arrive in the `stderr` field and get the card's
+//      error styling.
+//   2. input() / sys.stdin reads raise one clear RuntimeError. The browser
+//      has no keyboard prompt inside a worker (Pyodide's default stdin would
+//      call prompt(), which does not exist here), so before this change
+//      input() failed with an obscure error.
+//   3. Just before the user's code executes -- after the runtime AND any
+//      packages are loaded -- the worker posts { type: "started", runId }.
+//      The hook (lib/pyodideRunner.js) starts its run timeout on that
+//      message, so downloading the runtime is never counted as "the code
+//      ran too long". The message deliberately has no `id` field, so the
+//      result message stays the only one carrying the run's id.
+// A run that never ends (`while True: pass`) cannot be interrupted from
+// inside this worker; the hook terminates the whole worker instead.
 const PYODIDE_VERSION = "314.0.2"; // Python 3.14.x. Keep in lockstep with the "pyodide" dependency in package.json -- scripts/vendor-pyodide.mjs fails the install if they differ.
 const LOCAL_BASE = "/pyodide/";
 const CDN_BASE = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
@@ -38,6 +57,12 @@ const CORE_SOURCES = [
   { label: "self-hosted", base: LOCAL_BASE },
   { label: "jsdelivr CDN", base: CDN_BASE },
 ];
+
+// Shown when code reads from stdin. Single source of truth: it is handed to
+// the Python wrapper below as a global, so the text exists only here.
+const INPUT_UNSUPPORTED_MESSAGE =
+  "input() is not supported in the browser runner: there is no keyboard prompt here. " +
+  "Put the value in a variable in the code instead, for example name = \"Ada\".";
 
 let pyodideReadyPromise = null;
 
@@ -132,9 +157,28 @@ self.onmessage = async (event) => {
     // escaping problem of interpolating it into a Python string literal.
     pyodide.globals.set("_artifact_code", code || "");
     pyodide.globals.set("_uses_plots", !!pyodide.loadedPackages.matplotlib);
+    pyodide.globals.set("_input_unsupported_message", INPUT_UNSUPPORTED_MESSAGE);
 
     const wrapper = `
-import traceback, base64, io, json as _json
+import sys, builtins, traceback, base64, io, json as _json
+
+# B08: no stdin in the browser runner. Replace input() and sys.stdin with
+# one clear error instead of Pyodide's default (a prompt() call that does not
+# exist inside a worker). Set on every run; harmless to repeat.
+def _input_unsupported(*_args, **_kwargs):
+    raise RuntimeError(_input_unsupported_message)
+
+class _NoStdin:
+    def read(self, *_args, **_kwargs):
+        raise RuntimeError(_input_unsupported_message)
+    readline = readlines = read
+    def __iter__(self):
+        raise RuntimeError(_input_unsupported_message)
+    def isatty(self):
+        return False
+
+builtins.input = _input_unsupported
+sys.stdin = _NoStdin()
 
 _globals = {"__name__": "__main__"}
 if _uses_plots:
@@ -146,7 +190,9 @@ if _uses_plots:
 try:
     exec(_artifact_code, _globals)
 except Exception:
-    print(traceback.format_exc())
+    # B08: to stderr (was print() -> stdout) so it gets the error styling.
+    sys.stderr.write(traceback.format_exc())
+    sys.stderr.flush()
 
 _images = []
 if _uses_plots:
@@ -159,6 +205,8 @@ if _uses_plots:
     plt.close("all")
 _json.dumps(_images)
 `;
+    // Runtime and packages are loaded; execution begins now. See header note 3.
+    self.postMessage({ type: "started", runId: id });
     const imagesJson = await pyodide.runPythonAsync(wrapper);
     const images = JSON.parse(imagesJson);
 
