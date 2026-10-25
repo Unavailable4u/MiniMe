@@ -4,6 +4,7 @@ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, Responsi
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useUsageStats } from "../../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2
 import { useIsVisible } from "../../hooks/useIsVisible";   // FIX — defer chart mount until this tab is actually shown (see hook's own comment)
+import UsagePanel from "../UsagePanel";   // Patch X02 — the account's credit pool (GET /api/usage), shared by the web app and M2C
 
 // Kept as distinct, saturated per-provider colors on purpose — these
 // identify DATA series in charts, not chrome, so they stay separate from
@@ -458,6 +459,7 @@ function TokenUsageTab() {
   if (providers.length === 0) {
     return (
       <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto space-y-4">
+        <UsagePanel apiUrl={API_URL} />
         <p className="text-cyber-dim text-sm">
           No usage events yet this session. Send a task from Chat — accounts
           light up here as soon as they make their first call today.
@@ -471,6 +473,7 @@ function TokenUsageTab() {
 
   return (
     <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto space-y-6">
+      <UsagePanel apiUrl={API_URL} />
       <QuotaPanel apiUrl={API_URL} />
       <OverallRollup byProvider={byProvider} />
       {combinedUsageHistory.length > 0 && (

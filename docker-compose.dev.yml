@@ -29,8 +29,23 @@ services:
     # backend_data / backend_apps named volumes would be mounted on top of
     # ./backend/data and ./backend/apps -- hiding them from your editor and
     # git. In dev those directories live in your working tree.
+    #
+    # ./protocol is mounted back in at /app/protocol (S04b). The image copies
+    # protocol/ there (backend.Dockerfile), but the ./backend bind mount above
+    # hides everything the image put under /app, protocol/ included, and
+    # codeagent.ws.load_protocol() -- the device socket's validator -- looks
+    # for <backend>/protocol, i.e. /app/protocol. Without this line the dev
+    # socket refuses every connection (`internal`, close 1011). Read-only
+    # because nothing writes there: it is the shared wire contract, edited on
+    # the host. The validator is loaded once, on the first connection, so a
+    # change to protocol/ needs a restart of the backend container, and it is
+    # deliberately not in the --reload-dir list below. Docker may create an
+    # empty ./backend/protocol directory on the host to use as the mount
+    # point; it is harmless (load_protocol() skips a candidate that has no
+    # validate.py) and git does not track empty directories.
     volumes: !override
       - ./backend:/app
+      - ./protocol:/app/protocol:ro
 
     # The image's non-root `app` user can't write to a bind-mounted host
     # directory on Linux (the files belong to your uid), and the backend

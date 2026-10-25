@@ -745,6 +745,9 @@ def test_protocol_requirements_are_pinned_and_separate_from_backend():
     lines = [ln for ln in reqs.splitlines() if ln.strip() and not ln.startswith("#")]
     assert any(ln.startswith("jsonschema==") for ln in lines)
     assert all("==" in ln for ln in lines), "every protocol requirement is pinned"
+    # S04b: P00 left jsonschema out of backend/requirements.txt (this assertion used to
+    # say so); the device socket now needs it at runtime, so backend pins it. That the two
+    # files carry the SAME pins is guarded by tests/static/test_protocol_runtime.py.
     backend = (ROOT / "backend" / "requirements.txt").read_text()
-    assert "jsonschema" not in backend, \
-        "P00 must not widen backend/requirements.txt (recommend it in a later patch)"
+    assert any(ln.startswith("jsonschema==") for ln in backend.splitlines()), \
+        "backend/requirements.txt must pin jsonschema (S04b): the device socket validates with it"
