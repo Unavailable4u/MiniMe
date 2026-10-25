@@ -25,6 +25,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ .
 
+# S04b -- protocol/ is the wire contract between the device client (m2c/) and
+# the server: protocol/validate.py plus the schemas in protocol/v1/*.json.
+# codeagent/ws.py validates every device message with it, and
+# codeagent.ws.load_protocol() looks for it at <backend>/protocol, which in
+# this image is /app/protocol (WORKDIR /app holds the contents of backend/).
+# Without this line the image has no protocol/ and the device socket fails
+# closed (answers `internal`, closes 1011) on every connection. The build
+# context is the repo root (docker-compose.yml: context: .), so protocol/ is
+# reachable here, and .dockerignore does not exclude it. Copied AFTER
+# `COPY backend/ .` (nothing under backend/ may shadow it) and BEFORE the
+# chown below, so the non-root `app` user owns it like everything else.
+# docker-compose.dev.yml mounts ./protocol at the same path for the same reason.
+COPY protocol/ /app/protocol/
+
 # data/exports is where NOTES_EXPORTS_DIR (api/server.py) writes generated
 # reports/decks/scripts — needs to exist and be writable in the container,
 # not just on your local disk.

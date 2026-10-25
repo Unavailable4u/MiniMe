@@ -71,6 +71,17 @@ imageio-ffmpeg==0.6.0
 iniconfig==2.3.0
 jiter==0.16.0
 joblib==1.5.3
+# S04b -- the device socket (codeagent/ws.py) validates every message with
+# protocol/validate.py at runtime, and that imports jsonschema (with referencing).
+# A backend install used to get jsonschema only transitively (guardrails-ai
+# 0.10.2 needs jsonschema>=4.22,<5, litellm needs it too), which is not a
+# guarantee anyone controls; it is now named here, at the SAME pins as
+# protocol/requirements.txt (tests/static/test_protocol_runtime.py fails if the
+# two files drift). jsonschema-specifications, referencing and rpds-py (below)
+# are its own required dependencies, pinned for the same reason. 4.26.0 is inside
+# guardrails-ai's <5 ceiling.
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
 jusText==3.0.2
 # Laya migration audit (2026-09-27) — eo/laya_gate.py, replacing the
 # Groq round trips in eo/output_guard.py, eo/injection_guard.py,
@@ -158,6 +169,8 @@ python-multipart==0.0.32
 python-pptx==1.0.2
 pytz==2026.2
 PyYAML==6.0.3
+# S04b: jsonschema's own dependency, see the jsonschema note above.
+referencing==0.37.0
 regex==2026.7.10
 reportlab==5.0.0
 requests==2.34.2
@@ -166,6 +179,8 @@ requests==2.34.2
 # each package's own PyPI metadata) -- the only version satisfying both
 # constraints is the 14.x line, and 14.3.4 is the newest release in it.
 rich==14.3.4
+# S04b: jsonschema's own dependency (via referencing), see the jsonschema note above.
+rpds-py==2026.9.1
 scikit-learn==1.9.0
 # Same issue and same fix as the numpy pin above: scipy 1.18.0's own
 # PyPI wheel metadata requires_python >=3.12 (confirmed directly, not

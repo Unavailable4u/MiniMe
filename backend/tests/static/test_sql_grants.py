@@ -76,6 +76,7 @@ APP_ROLE = "minime_app"
 SQL_MODULES = [
     "eo/workspace_code_files.py",
     "eo/devices.py",
+    "codeagent/runs.py",
 ]
 
 _DML = ("select", "insert", "update", "delete")

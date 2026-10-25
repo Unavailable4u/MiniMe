@@ -1,13 +1,16 @@
-# protocol/requirements.txt -- Patch P00 (M2C Wave 1).
+# protocol/requirements.txt -- Patch P00 (M2C Wave 1); header updated by S04b.
 #
 # Everything protocol/validate.py and backend/tests/unit/test_protocol_contract.py
-# need, pinned, and nothing else. jsonschema is deliberately NOT added to
-# backend/requirements.txt by P00 (that file is shared by every backend job and
-# patch; widening it is a separate, reviewed change). The backend test file uses
-# pytest.importorskip("jsonschema"), so the normal backend CI job keeps passing
-# without it; the `protocol` job in .github/workflows/ci.yml installs this file.
-# Recommended follow-up (not done here): add jsonschema==4.26.0 and its pins
-# below to backend/requirements.txt once S04/S05 import the schemas at runtime.
+# need, pinned, and nothing else. P00 deliberately did not add jsonschema to
+# backend/requirements.txt (that file is shared by every backend job and patch;
+# widening it is a separate, reviewed change). The follow-up P00 recommended is
+# now DONE (S04b): the device socket (backend/codeagent/ws.py) imports these
+# schemas at runtime, so backend/requirements.txt pins jsonschema,
+# jsonschema-specifications, referencing and rpds-py at exactly the versions
+# below, and backend.Dockerfile / docker-compose.dev.yml provide protocol/ at
+# /app/protocol. backend/tests/static/test_protocol_runtime.py fails if any pin
+# the two files share ever differs. The `protocol` job in .github/workflows/ci.yml
+# still installs this smaller file on its own, without the rest of the backend.
 #
 # All of these support Python 3.11 (ci.yml's pin); versions that overlap with
 # backend/requirements.txt (attrs, typing_extensions, pytest and its deps) use

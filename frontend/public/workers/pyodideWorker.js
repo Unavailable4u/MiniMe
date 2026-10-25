@@ -48,7 +48,7 @@
 //      result message stays the only one carrying the run's id.
 // A run that never ends (`while True: pass`) cannot be interrupted from
 // inside this worker; the hook terminates the whole worker instead.
-const PYODIDE_VERSION = "314.0.2"; // Python 3.14.x. Keep in lockstep with the "pyodide" dependency in package.json -- scripts/vendor-pyodide.mjs fails the install if they differ.
+const PYODIDE_VERSION = "314.0.7"; // Python 3.14.x. Keep in lockstep with the "pyodide" dependency in package.json -- scripts/vendor-pyodide.mjs fails the install if they differ.
 const LOCAL_BASE = "/pyodide/";
 const CDN_BASE = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 const PACKAGES_FROM_LOCAL = false;

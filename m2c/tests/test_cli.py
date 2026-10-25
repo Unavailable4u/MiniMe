@@ -206,16 +206,22 @@ def test_requires_python_is_3_11_or_newer():
 
 
 def test_runtime_has_no_third_party_dependencies():
-    """Decision for C01: the standard library only.  Dev extras are allowed."""
+    """Decision for C01: the standard library only.  Dev extras are allowed.
+
+    Patch C04 adds exactly one runtime dependency, on purpose: ``websockets``
+    (pinned like daemon/requirements.txt), used only by m2c/link.  Adding any
+    other still fails here."""
     reqs = _distribution().requires or []
     runtime = [r for r in reqs if "extra ==" not in r.replace('"', "").replace("'", "")]
-    assert runtime == []
+    assert runtime == ["websockets==16.0"]
 
 
 def test_runtime_modules_import_only_the_standard_library():
     """Same promise, checked on the source: no module under src/m2c imports
     anything outside the stdlib or m2c itself (works without installing)."""
     stdlib = set(sys.stdlib_module_names)
+    # Patch C04: the device link (m2c/link) may import websockets; nothing else may.
+    allowed_in_link = {"websockets"}
     offenders = []
     for py in sorted(SRC.rglob("*.py")):
         tree = ast.parse(py.read_text(encoding="utf-8"))
@@ -226,5 +232,10 @@ def test_runtime_modules_import_only_the_standard_library():
                 names = [(node.module or "").split(".")[0]]
             else:
                 continue
-            offenders += [f"{py.name}: {n}" for n in names if n not in stdlib and n != "m2c"]
+            in_link = py.relative_to(SRC).parts[0] == "link"
+            offenders += [
+                f"{py.name}: {n}"
+                for n in names
+                if n not in stdlib and n != "m2c" and not (in_link and n in allowed_in_link)
+            ]
     assert offenders == []
