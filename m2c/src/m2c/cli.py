@@ -1,6 +1,7 @@
 """
 m2c/src/m2c/cli.py -- Patch C01: the ``m2c`` command (Patch C03: login/logout).
 
+    m2c                           after login, a prompt: type a message, read the reply (I01)
     m2c --version
     m2c login [--device-name N]   sign in with a code you approve in the web app
     m2c logout                    delete this device's local credential
@@ -20,7 +21,9 @@ Exit statuses (stable, scripts may rely on them):
         M2C_SERVER_URL missing or unsafe, unusable --device-name)
     3   reserved: C01 used it for "not implemented yet"; nothing returns it now
     4   sign-in failed: login was denied, expired or could not reach the server,
-        or logout could not delete the credential (the message says which)
+        or logout could not delete the credential (the message says which); for
+        the bare ``m2c`` prompt: not signed in, or the device was revoked
+    5   the bare ``m2c`` prompt could not reach the server
     130 login was cancelled with Ctrl+C
 
 Side effects, deliberately minimal: ``--version`` and ``--help`` do not touch
@@ -54,6 +57,7 @@ EXIT_FAILURE = 1
 EXIT_USAGE = 2
 EXIT_NOT_IMPLEMENTED = 3  # reserved: C01's stubs used it; nothing returns it since C03
 EXIT_AUTH = 4
+EXIT_UNREACHABLE = 5  # the prompt could not reach the server (I01)
 EXIT_INTERRUPTED = 130  # the shell convention for "ended by Ctrl+C"
 
 logger = logging.getLogger("m2c.cli")
@@ -99,7 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"m2c {__version__}")
-    sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
+    # Not required (I01): `m2c` with no command opens the prompt after login.
+    sub = parser.add_subparsers(dest="command", metavar="<command>", required=False)
     login_parser = sub.add_parser(
         "login",
         help="sign in with a code you approve in the web app",
@@ -207,6 +212,40 @@ def _run_doctor(project: Path | None) -> int:
     return EXIT_OK if report.ok else EXIT_FAILURE
 
 
+def _run_prompt() -> int:
+    """`m2c` with no command (patch I01): after login, open the prompt loop (m2c/repl.py)."""
+    import asyncio
+
+    from . import repl
+    from .auth.credentials import NotLoggedInError, load_credential
+    from .store import open_db
+
+    try:
+        load_credential()
+    except NotLoggedInError:
+        print("m2c: not signed in. Run `m2c login` first.", file=sys.stderr)
+        return EXIT_AUTH
+    except AuthError as exc:  # fixed text (auth/credentials.py)
+        print(f"m2c: {exc}", file=sys.stderr)
+        return EXIT_AUTH
+    try:
+        store = open_db()
+    except ConfigDirError as exc:
+        print(f"m2c: {exc}.", file=sys.stderr)
+        return EXIT_FAILURE
+    except Exception as exc:
+        return _unexpected("prompt", exc)
+    try:
+        status = asyncio.run(repl.run_prompt(store, project_path=str(Path.cwd())))
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+    except Exception as exc:
+        return _unexpected("prompt", exc)
+    finally:
+        store.close()
+    return status
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     try:
@@ -219,6 +258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(log_level_from_env())
     log_event(logger, logging.DEBUG, "cli.start", version=__version__)
 
+    if args.command is None:
+        return _run_prompt()
     if args.command == "login":
         return _run_login(args.device_name)
     if args.command == "logout":

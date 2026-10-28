@@ -48,9 +48,30 @@ def test_version_has_no_side_effects(tmp_path, monkeypatch):
     assert not target.exists()
 
 
-def test_no_command_is_a_usage_error(capsys):
-    assert cli.main([]) == cli.EXIT_USAGE
-    assert "usage:" in capsys.readouterr().err
+def test_no_command_when_signed_out_asks_for_login(capsys):
+    """Patch I01 changed this: `m2c` with no command is no longer a usage error, it opens the
+    prompt after login. Signed out (the hermetic environment has no credential), it says so
+    and exits with the sign-in status; nothing is created on disk and no network is touched."""
+    assert cli.main([]) == cli.EXIT_AUTH
+    err = capsys.readouterr().err
+    assert "m2c login" in err and "usage:" not in err
+
+
+def test_no_command_when_signed_in_runs_the_prompt(monkeypatch, tmp_path):
+    from m2c import repl
+    from m2c.auth import credentials
+
+    seen = {}
+
+    async def fake_run_prompt(store, *, project_path=None, **kwargs):
+        seen["project_path"] = project_path
+        seen["store"] = store
+        return 0
+
+    monkeypatch.setattr(credentials, "load_credential", lambda *a, **k: object())
+    monkeypatch.setattr(repl, "run_prompt", fake_run_prompt)
+    assert cli.main([]) == cli.EXIT_OK
+    assert seen["project_path"] == str(__import__("pathlib").Path.cwd())
 
 
 def test_unknown_command_is_a_usage_error(capsys):
