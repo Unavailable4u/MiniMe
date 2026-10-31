@@ -44,17 +44,18 @@ from m2c.tools import ARG_SPECS, Caps, ToolContext, ToolResult, paths, run_tool,
 PROTOCOL_DIR = Path(m2c.__file__).resolve().parent / "protocol" / "v1"
 TOOLS_SRC = Path(m2c.__file__).resolve().parent / "tools"
 EXECUTED = ["read_file", "list_dir", "glob", "grep", "edit_file", "write_file", "delete_path"]
+SHELL_TOOLS = ["bash"]  # Patch C07
 
 
 # ==========================================================================
 # The tool table and the protocol schemas
 # ==========================================================================
-def test_the_executor_knows_exactly_the_seven_c05_tools():
-    assert sorted(tool_names()) == sorted(EXECUTED)
-    assert sorted(ARG_SPECS) == sorted(EXECUTED)
+def test_the_executor_knows_exactly_the_seven_c05_tools_and_the_c07_shell_tool():
+    assert sorted(tool_names()) == sorted(EXECUTED + SHELL_TOOLS)
+    assert sorted(ARG_SPECS) == sorted(EXECUTED + SHELL_TOOLS)
 
 
-@pytest.mark.parametrize("name", EXECUTED)
+@pytest.mark.parametrize("name", EXECUTED + SHELL_TOOLS)
 def test_the_argument_table_matches_the_protocol_schema(name):
     schema = json.loads((PROTOCOL_DIR / "tools" / f"{name}.json").read_text())["input_schema"]
     spec = ARG_SPECS[name]
@@ -129,7 +130,7 @@ def test_an_oversized_output_is_clamped_below_the_wire_limit(proj):
 # ==========================================================================
 # Fail-closed dispatch
 # ==========================================================================
-@pytest.mark.parametrize("name", ["bash", "plan_exit", "rm", "delete", "glob_search", "READ_FILE", "", " read_file", "read_file\n",
+@pytest.mark.parametrize("name", ["plan_exit", "rm", "delete", "glob_search", "READ_FILE", "", " read_file", "read_file\n",
                                   "mcp__x__y", "../read_file", None, 5, ["read_file"]])
 def test_unknown_tools_are_refused(ctx, name):
     r = run_tool(ctx, name, {})

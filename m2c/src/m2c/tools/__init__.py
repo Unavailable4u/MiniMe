@@ -6,17 +6,19 @@ What this package is
 --------------------
 The code that touches the user's files.  When the server proposes a tool call
 (protocol/v1 ``tool_proposed``) and the approval flow allows it, the client
-runs it here and sends back a ``tool_result``.  This patch implements the seven
-file and search tools; C07 adds the shell tool, I02 wires the device link to
-``run_tool``, and C06 turns the user's settings into the ``user_denylist``
-argument.  Nothing here reads settings, talks to the network, or imports
-``daemon/``.
+runs it here and sends back a ``tool_result``.  Patch C05 implemented the seven
+file and search tools; Patch C07 added the shell tool (``bash``); I02 wires the
+device link to ``run_tool``, and C06 turns the user's settings into the
+``user_denylist`` argument.  Nothing here reads settings, talks to the network,
+or imports ``daemon/``.
 
     paths.py    the path guard: containment, symlinks, the two-form denylist,
                 no-follow opening.  Ported from daemon/path_guard.py.
     files.py    read_file, list_dir, edit_file, write_file, delete_path.
                 Ported from daemon/tools.py (the file tools only).
     search.py   glob and grep (a hardened ripgrep wrapper).
+    shell.py    bash (Patch C07): a command run with the user's full
+                privileges, no sandbox yet.  Read its docstring first.
     __init__.py ``Caps``, ``ToolContext``, ``ToolResult``, the argument table
                 and ``run_tool``.
 
@@ -35,18 +37,25 @@ How a call runs
    schemas, and that a test compares with them): unknown, missing, mistyped and
    out-of-range arguments are refused, and the message never repeats a value the
    model supplied;
-3. calls the executor, which returns ``(output, truncated)`` or raises
-   ``ToolError`` (a stable ``code`` and a fixed message);
+3. calls the executor, which returns ``(output, truncated)``, or a
+   ``ToolOutcome`` (Patch C07: a result that can be a failure and still carry its
+   output, a trust label and an ``exit_code``), or raises ``ToolError`` (a stable
+   ``code`` and a fixed message).  An executor that declares a ``call_env``
+   parameter is also given the keyword-only ``call_env`` that the caller passed
+   to ``run_tool`` (the per-call authorization, cancel handle and streaming
+   callback; no other tool is given it, and the model can never supply it);
 4. turns anything else that was raised into ``internal_error`` with no text;
 5. clamps the output to the protocol's 200000-character ``bulk_text`` limit;
 6. logs the tool name, status, error code, output size and duration, and
    nothing else (never a path, pattern, argument or file content).
 
 The result is a ``ToolResult``; ``to_payload(call_id)`` gives the exact
-``tool_result`` object.  Trust is always ``local_project``: the text came from
-files under the project root, so it is data, never instructions.  The
-per-tool error ``code`` is local (protocol v1 has no such field) and travels
-only in the text of a failed result.
+``tool_result`` object.  Trust is ``local_project`` for the file and search
+tools: the text came from files under the project root, so it is data, never
+instructions.  (The shell tool labels its output ``external``.)  The per-tool
+error ``code`` is local (protocol v1 has no such field) and travels only in the
+text of a failed result.  ``exit_code`` is on the wire only when it is set (the
+shell tool sets it).
 
 ``delete_path`` has no ``recursive`` argument at this layer, because the
 protocol's schema has none; ``files.delete_path`` supports it for code that
@@ -54,8 +63,10 @@ calls it directly.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,12 +74,13 @@ from typing import Any, Callable
 
 from ..logging_setup import log_event
 from ..paths import ConfigDirError, config_dir
-from . import files, paths, search
+from . import files, paths, search, shell
 from .files import SeenFiles
 from .paths import ERROR_CODES, Denylist, ToolError, assert_safe_root
+from .shell import CallEnv, ToolOutcome
 
 __all__ = [
-    "ARG_SPECS", "Caps", "ToolContext", "ToolError", "ToolResult", "TOOLS",
+    "ARG_SPECS", "CallEnv", "Caps", "ToolContext", "ToolError", "ToolOutcome", "ToolResult", "TOOLS",
     "paths", "run_tool", "tool_names",
 ]
 
@@ -76,6 +88,9 @@ logger = logging.getLogger("m2c.tools")
 
 # protocol/v1 common.json bulk_text.maxLength
 MAX_WIRE_CHARS = 200_000
+# protocol/v1 common.json trust enum.  An executor that returns anything else is treated as the most distrusted value.
+_TRUSTS = ("local_project", "local_other", "external")
+_LOCAL_CODE = re.compile(r"[a-z_]{1,32}")
 # Output caps are kept a little under the wire limit so a marker always fits.
 _MAX_OUTPUT_CAP = 190_000
 
@@ -205,10 +220,11 @@ class ToolResult:
     trust: str = "local_project"
     code: str | None = None  # local error code; never sent on the wire
     duration_ms: int = 0
+    exit_code: int | None = None  # Patch C07: the shell tool's exit status; on the wire only when set
 
     def to_payload(self, call_id: str) -> dict[str, Any]:
         """The ``tool_result`` payload (a closed object: no ``code`` here)."""
-        return {
+        payload: dict[str, Any] = {
             "call_id": call_id,
             "ok": self.ok,
             "output": self.output,
@@ -216,6 +232,9 @@ class ToolResult:
             "trust": self.trust,
             "duration_ms": self.duration_ms,
         }
+        if self.exit_code is not None:
+            payload["exit_code"] = self.exit_code
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +289,13 @@ ARG_SPECS: dict[str, dict[str, ArgSpec]] = {
     "delete_path": {
         "path": ArgSpec(str, required=True),
     },
+    # Patch C07.  Mirrors protocol/v1/tools/bash.json.  The schema's maxLength of 200 on "reason" is checked by the
+    # executor (an ArgSpec has no length); "reason" is for the approval prompt and is otherwise unused.
+    "bash": {
+        "command": ArgSpec(str, required=True),
+        "timeout_s": ArgSpec(int, minimum=1, maximum=3600, default=120),
+        "reason": ArgSpec(str),
+    },
 }
 
 TOOLS: dict[str, Callable[..., tuple[str, bool]]] = {
@@ -280,11 +306,12 @@ TOOLS: dict[str, Callable[..., tuple[str, bool]]] = {
     "edit_file": files.edit_file,
     "write_file": files.write_file,
     "delete_path": files.delete_path,
+    "bash": shell.bash,  # Patch C07: needs call_env (nothing runs without an authorization)
 }
 
 
 def tool_names() -> list[str]:
-    """The tools this executor implements (the shell tool is C07)."""
+    """The tools this executor implements."""
     return sorted(TOOLS)
 
 
@@ -350,9 +377,33 @@ def _clamp(output: str, truncated: bool) -> tuple[str, bool]:
     return output[: MAX_WIRE_CHARS - len(marker)] + marker, True
 
 
-def run_tool(context: ToolContext, name: Any, args: Any) -> ToolResult:
+def _wants_call_env(executor: Callable[..., Any]) -> bool:
+    """True when the executor explicitly declares a ``call_env`` parameter (``**kwargs`` does not count)."""
+    try:
+        param = inspect.signature(executor).parameters.get("call_env")
+    except (TypeError, ValueError):
+        return False
+    return param is not None and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+
+
+def _from_outcome(raw: ToolOutcome, started: float) -> ToolResult:
+    """A ``ToolResult`` from an executor's ``ToolOutcome``.  Whatever an executor says is checked, not trusted:
+    an unknown trust label becomes ``external``, a non-integer exit code and an odd local code are dropped."""
+    output, truncated = _clamp(str(raw.output), bool(raw.truncated))
+    trust = raw.trust if raw.trust in _TRUSTS else "external"
+    exit_code = raw.exit_code if type(raw.exit_code) is int else None
+    code = raw.code if isinstance(raw.code, str) and _LOCAL_CODE.fullmatch(raw.code) else None
+    return ToolResult(bool(raw.ok), output, truncated, trust, code, _elapsed_ms(started), exit_code)
+
+
+def run_tool(context: ToolContext, name: Any, args: Any, *, call_env: Any = None) -> ToolResult:
     """Run one tool call.  Never raises (except for KeyboardInterrupt and other
     control-flow exceptions); every failure is a ``ToolResult`` with a code.
+
+    ``call_env`` (Patch C07) is what only the caller knows about this one call:
+    the authorization, the cancel handle and the streaming callback (see
+    ``m2c.tools.shell.CallEnv``).  It is passed only to an executor that declares
+    a ``call_env`` parameter, so every other tool behaves exactly as before.
 
     Security checks fail closed; the log line fails open (``log_event`` never
     raises).
@@ -364,9 +415,14 @@ def run_tool(context: ToolContext, name: Any, args: Any) -> ToolResult:
         return result
     try:
         clean = _validate(name, args)
-        output, truncated = TOOLS[name](context, **clean)
-        output, truncated = _clamp(str(output), bool(truncated))
-        result = ToolResult(True, output, truncated, "local_project", None, _elapsed_ms(started))
+        executor = TOOLS[name]
+        raw = executor(context, **clean, call_env=call_env) if _wants_call_env(executor) else executor(context, **clean)
+        if isinstance(raw, ToolOutcome):
+            result = _from_outcome(raw, started)
+        else:
+            output, truncated = raw
+            output, truncated = _clamp(str(output), bool(truncated))
+            result = ToolResult(True, output, truncated, "local_project", None, _elapsed_ms(started))
     except ToolError as exc:
         result = _failure(exc.code, exc.message, started)
     except Exception as exc:  # noqa: BLE001 -- anything unexpected is a fixed, content-free error

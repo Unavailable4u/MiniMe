@@ -116,6 +116,15 @@ The v1 schema, table by table
     to remove it (the guide's "tombstone"); ``ts`` UTC text.  Not append-only:
     C08 owns pruning and rewind semantics.
 
+    **v2 (Patch C08)** adds ``mode INTEGER``, nullable: the file's permission
+    bits (``stat.S_IMODE``) at the time of the snapshot, so a rewind can give
+    the file back exactly the mode it had.  It is NULL exactly when
+    ``blob_hash`` is NULL (nothing existed, so there is no mode); a v1 row that
+    has a blob but no mode is something no client wrote, and checkpoints.py
+    treats it as corrupt and refuses to restore from it rather than guess.  An
+    ``ALTER TABLE ... ADD COLUMN`` was chosen over a second table so that the
+    index stays one table, in this store.
+
 Unknown-but-useful things deliberately *not* here: a hash chain on events,
 user-visible deletion and retention, session forking (``parent`` column), and
 helper functions for approvals and checkpoints.  Each is a later work package
@@ -250,8 +259,18 @@ def _v1_initial_schema(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# --------------------------------------------------------------------------
+# v2: the file mode of a checkpointed file (Patch C08)
+# --------------------------------------------------------------------------
+def _v2_checkpoint_file_mode(conn: sqlite3.Connection) -> None:
+    # One statement, nullable, no default: existing rows keep their data and
+    # read back mode NULL.  See the ``checkpoints`` paragraph above.
+    conn.execute("ALTER TABLE checkpoints ADD COLUMN mode INTEGER")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _v1_initial_schema),
+    Migration(2, "checkpoints: add file mode", _v2_checkpoint_file_mode),
 )
 LATEST_VERSION: int = MIGRATIONS[-1].version
 

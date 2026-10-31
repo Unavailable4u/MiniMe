@@ -379,7 +379,38 @@ def test_approvals_columns(conn):
 
 
 def test_checkpoints_columns(conn):
-    assert _columns(conn, "checkpoints") == ["session_id", "step", "path", "blob_hash", "ts"]
+    # v1 had the first five; ``mode`` is the forward migration added by Patch C08.
+    assert _columns(conn, "checkpoints") == ["session_id", "step", "path", "blob_hash", "ts", "mode"]
+
+
+def test_checkpoints_mode_column_is_a_nullable_integer(conn):
+    info = {r[1]: r for r in conn.execute("PRAGMA table_info(checkpoints)")}
+    assert info["mode"][2] == "INTEGER" and info["mode"][3] == 0  # type, notnull
+
+
+def test_v2_adds_the_checkpoint_file_mode_and_keeps_the_rows_that_were_there(raw):
+    """Data-preserving case for the C08 migration: a v1 database with checkpoint rows."""
+    assert migrations.migrate(raw, target=1) == [1]
+    assert "mode" not in _columns(raw, "checkpoints")
+    sid = _session_v1(raw)
+    stamp = db.utc_now_iso()
+    # The v1 shape, written positionally on purpose: this is what an older client's rows look like.
+    raw.execute("INSERT INTO checkpoints VALUES (?, 1, 'a.py', 'h1', ?)", (sid, stamp))
+    raw.execute("INSERT INTO checkpoints VALUES (?, 2, 'b.py', NULL, ?)", (sid, stamp))
+
+    assert migrations.migrate(raw) == list(range(2, migrations.LATEST_VERSION + 1))
+
+    assert migrations.current_version(raw) == migrations.LATEST_VERSION
+    got = raw.execute("SELECT step, path, blob_hash, ts, mode FROM checkpoints ORDER BY step").fetchall()
+    assert got == [(1, "a.py", "h1", stamp, None), (2, "b.py", None, stamp, None)]  # nothing lost, mode unknown
+    raw.execute("UPDATE checkpoints SET mode = 420 WHERE path = 'a.py'")
+    assert raw.execute("SELECT mode FROM checkpoints WHERE path = 'a.py'").fetchone() == (420,)
+    assert raw.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    assert raw.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def _session_v1(c) -> str:
+    return sessions.create_session(c, project_path="/home/u/proj", mode="ask").id
 
 
 def test_schema_version_columns(conn):
@@ -423,21 +454,24 @@ def test_approval_values_are_constrained_to_the_protocol_enums(conn, decision, s
         )
 
 
+_CKPT_INSERT = "INSERT INTO checkpoints (session_id, step, path, blob_hash, ts) VALUES (?, ?, ?, ?, ?)"
+
+
 def test_checkpoint_blob_hash_may_be_null_for_a_path_that_did_not_exist(conn):
     sid = _session(conn)
-    conn.execute("INSERT INTO checkpoints VALUES (?, 1, 'src/new.py', NULL, ?)", (sid, db.utc_now_iso()))
-    conn.execute("INSERT INTO checkpoints VALUES (?, 1, 'src/old.py', 'ab' || hex(zeroblob(31)), ?)", (sid, db.utc_now_iso()))
+    conn.execute(_CKPT_INSERT, (sid, 1, "src/new.py", None, db.utc_now_iso()))
+    conn.execute(_CKPT_INSERT, (sid, 1, "src/old.py", "ab" + "00" * 31, db.utc_now_iso()))
     assert conn.execute("SELECT count(*) FROM checkpoints").fetchone()[0] == 2
 
 
 def test_checkpoint_primary_key_is_session_step_path(conn):
     sid = _session(conn)
-    conn.execute("INSERT INTO checkpoints VALUES (?, 1, 'a.py', 'h1', ?)", (sid, db.utc_now_iso()))
+    conn.execute(_CKPT_INSERT, (sid, 1, "a.py", "h1", db.utc_now_iso()))
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO checkpoints VALUES (?, 1, 'a.py', 'h2', ?)", (sid, db.utc_now_iso()))
-    conn.execute("INSERT INTO checkpoints VALUES (?, 2, 'a.py', 'h2', ?)", (sid, db.utc_now_iso()))
+        conn.execute(_CKPT_INSERT, (sid, 1, "a.py", "h2", db.utc_now_iso()))
+    conn.execute(_CKPT_INSERT, (sid, 2, "a.py", "h2", db.utc_now_iso()))
 
 
 def test_checkpoint_needs_a_real_session(conn):
     with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
-        conn.execute("INSERT INTO checkpoints VALUES ('nope', 1, 'a.py', 'h', ?)", (db.utc_now_iso(),))
+        conn.execute(_CKPT_INSERT, ("nope", 1, "a.py", "h", db.utc_now_iso()))
