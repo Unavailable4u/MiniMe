@@ -2,6 +2,8 @@
 m2c/src/m2c/cli.py -- Patch C01: the ``m2c`` command (Patch C03: login/logout).
 
     m2c                           after login, a prompt: type a message, read the reply (I01)
+    m2c -p "task"                 headless: run one task, no prompts, no terminal needed (C10)
+          [--output-format text|json] [--mode plan|ask|accept-edits]
     m2c --version
     m2c login [--device-name N]   sign in with a code you approve in the web app
     m2c logout                    delete this device's local credential
@@ -26,6 +28,12 @@ Exit statuses (stable, scripts may rely on them):
     5   the bare ``m2c`` prompt could not reach the server
     130 login was cancelled with Ctrl+C
 
+``m2c -p`` (headless.py, Patch C10) has its OWN exit statuses, a different table: 0 success, 1 general failure,
+2 usage error, 3 policy denial, 4 quota exhausted, 5 not logged in or device revoked, 130 / 143 ended by Ctrl-C /
+SIGTERM.  (4 and 5 mean something else for the commands above: scripts that run ``m2c -p`` read the headless table.)
+This module only parses the options and calls ``headless.run_headless``; -p is not a command, so it cannot be combined
+with one, and --output-format / --mode are options of -p only.
+
 Side effects, deliberately minimal: ``--version`` and ``--help`` do not touch
 the filesystem, and neither does ``logout`` when there is nothing to delete.
 ``doctor`` and ``login`` create the config directory (``~/.m2c``, mode 0700,
@@ -45,7 +53,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, doctor
+from . import __version__, doctor, headless
 from .auth import login as login_mod
 from .auth.credentials import AuthError
 from .config import ServerUrlError, log_level_from_env, server_url_from_env
@@ -73,8 +81,17 @@ environment variables:
                   localhost). Needed by `m2c login`; afterwards it is remembered
                   with the credential.
 
-exit status: 0 ok, 1 doctor found a missing hard requirement (or an unexpected
-error), 2 usage error, 4 sign-in failed (login or logout), 130 login cancelled.
+exit status of login, logout, doctor and the prompt: 0 ok, 1 doctor found a
+missing hard requirement (or an unexpected error), 2 usage error, 4 sign-in
+failed (login or logout) or not signed in, 5 the prompt could not reach the
+server, 130 login cancelled.
+
+exit status of `m2c -p` (headless mode; a different table):
+""" + headless.EXIT_CODES_HELP + """\
+ 130  interrupted (Ctrl-C), run cancelled first
+ 143  terminated (SIGTERM), run cancelled first
+In --output-format json mode the same status is also in the one JSON object
+printed on stdout.
 """
 
 _LOGIN_DESCRIPTION = """\
@@ -104,6 +121,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"m2c {__version__}")
     # Not required (I01): `m2c` with no command opens the prompt after login.
+    headless_group = parser.add_argument_group(
+        "headless mode",
+        "Run one task without any prompt or terminal: m2c -p \"fix the failing test\".\n"
+        "Use -p - to read the task from stdin (also for a task that starts with a dash).\n"
+        "Text mode writes the reply to stdout and progress to stderr; json mode writes one\n"
+        "JSON object to stdout. Only tools an explicit allow rule permits run; anything\n"
+        "that would ask fails the run (exit 3). Exit statuses are listed at the end.",
+    )
+    headless_group.add_argument(
+        "-p", "--print", dest="print_task", metavar="TASK",
+        help="run TASK headlessly and print the result ('-' reads the task from stdin)",
+    )
+    headless_group.add_argument(
+        "--output-format", choices=headless.OUTPUT_FORMATS, default=None, metavar="{text,json}",
+        help="with -p: text (default) streams the reply; json prints one JSON object at the end",
+    )
+    headless_group.add_argument(
+        "--mode", default=None, metavar="{" + ",".join(headless.MODES) + "}",
+        help="with -p: the permission mode the run starts in (default: " + headless.DEFAULT_MODE + ")",
+    )
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=False)
     login_parser = sub.add_parser(
         "login",
@@ -212,6 +249,19 @@ def _run_doctor(project: Path | None) -> int:
     return EXIT_OK if report.ok else EXIT_FAILURE
 
 
+def _run_headless(args: argparse.Namespace) -> int:
+    """`m2c -p` (patch C10): everything, including usage errors and the json object, is headless.py's."""
+    options = headless.HeadlessOptions(
+        task=args.print_task,
+        mode=headless.DEFAULT_MODE if args.mode is None else args.mode,
+        output_format="text" if args.output_format is None else args.output_format,
+    )
+    try:
+        return headless.run_headless(options)
+    except Exception as exc:  # run_headless reports its own failures; this is a last resort, never a traceback
+        return _unexpected("-p", exc)
+
+
 def _run_prompt() -> int:
     """`m2c` with no command (patch I01): after login, open the prompt loop (m2c/repl.py)."""
     import asyncio
@@ -258,6 +308,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(log_level_from_env())
     log_event(logger, logging.DEBUG, "cli.start", version=__version__)
 
+    if args.print_task is not None:
+        if args.command is not None:
+            print(f"m2c: -p/--print runs a task; it cannot be combined with the {args.command!r} command.", file=sys.stderr)
+            return EXIT_USAGE
+        return _run_headless(args)
+    if args.mode is not None or args.output_format is not None:
+        print("m2c: --mode and --output-format only apply to -p/--print.", file=sys.stderr)
+        return EXIT_USAGE
     if args.command is None:
         return _run_prompt()
     if args.command == "login":
