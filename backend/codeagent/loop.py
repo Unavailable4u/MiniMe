@@ -188,6 +188,16 @@ NOTICE_FAILURE_BREAKER = "repeated_failures"
 NOTICE_MODEL_PREF = "model_preference_not_applied"
 MSG_MODEL_PREF = "The model you asked for cannot be chosen yet, so the default model is used."
 MSG_FAILURE_BREAKER = "Several tool calls in a row failed, so the run paused."
+# Patch S08: AssembledContext.notes are fixed machine codes from the context assembler; each one the loop knows
+# becomes one notice with this fixed text (never any conversation content). An unknown code is not forwarded.
+NOTICE_CONTEXT_COMPACTED = "context_compacted"
+NOTICE_CONTEXT_THRASH = "context_thrash"
+MSG_CONTEXT_COMPACTED = ("Older tool output in this conversation was cleared or condensed to keep it within the "
+                         "model's context window.")
+MSG_CONTEXT_THRASH = ("The conversation keeps filling the model's context window, so automatic compaction was "
+                      "stopped for this run. Start a new session or narrow the task.")
+CONTEXT_NOTICES = {NOTICE_CONTEXT_COMPACTED: ("info", MSG_CONTEXT_COMPACTED),
+                   NOTICE_CONTEXT_THRASH: ("warning", MSG_CONTEXT_THRASH)}
 
 # state_changed reasons (protocol: ^[a-z][a-z0-9_]{0,63}$)
 REASON_STEP_LIMIT = "step_limit"
@@ -806,6 +816,10 @@ class AgentLoop:
     async def _model_step(self, ctx: _Ctx) -> _Reply:
         tools = self.catalog.visible(ctx.mode)
         assembled = await call_assembler(self._assembler, ctx.state, ctx.items, tools, ctx.mode)
+        for note in assembled.notes:
+            known = CONTEXT_NOTICES.get(note) if isinstance(note, str) else None
+            if known is not None:
+                await self._notice(ctx, note, *known)
         request = ModelRequest(messages=assembled.messages, tools=assembled.tools, max_tokens=assembled.max_tokens,
                                provider_options=assembled.provider_options, timeout_s=self.config.model_timeout_s)
         retries = 0

@@ -115,6 +115,7 @@ from api.routes.system import router as system_router
 from api.routes.tasks import router as tasks_router
 from api.routes.usage import router as usage_router  # NEW — S01: GET /api/usage
 from api.routes.devices import router as devices_router  # NEW — S03: device pairing (/v1/code/devices/*, /api/devices*)
+from api.routes.code_runs import router as code_runs_router  # NEW — S10: POST /v1/code/runs/{run_id}/grant
 from codeagent.ws import router as codeagent_ws_router  # NEW — S04: WS /v1/code/device
 from codeagent import run_handlers as codeagent_run_handlers  # NEW — S14: the device socket's message handlers
 from codeagent import hello as codeagent_hello  # NEW — I01: the walking skeleton's turn runner
@@ -389,6 +390,7 @@ app.include_router(mcp_router)  # Patch A8: /api/mcp/servers, /api/mcp/servers/{
 app.include_router(user_profile_router)  # NEW — Patch B6: /api/profile/*
 app.include_router(usage_router)  # NEW — S01: /api/usage
 app.include_router(devices_router)  # NEW — S03: /v1/code/devices/*, /api/devices*
+app.include_router(code_runs_router)  # NEW — S10: POST /v1/code/runs/{run_id}/grant (grant more credits)
 app.include_router(codeagent_ws_router)  # NEW — S04: WS /v1/code/device
 codeagent_run_handlers.install()  # NEW — S14: router + run handlers behind WS /v1/code/device (idempotent)
 codeagent_hello.install()  # NEW — I01: text-only turn runner + resume/cancel hooks for S14 (idempotent)

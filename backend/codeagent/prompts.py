@@ -28,13 +28,14 @@ THE CONTRACT S08 CODES AGAINST
                   {"role": "tool", "call_id", "ok", "output", "truncated"?, "trust"?}
         tools   the ToolSpecs visible this step (already filtered for plan mode)
         mode    "plan" | "ask" | "accept-edits"
-    AssembledContext(messages, tools, max_tokens=None, provider_options=None)
+    AssembledContext(messages, tools, max_tokens=None, provider_options=None, notes=())
 
 Everything that goes through here is CONTENT in the protocol's sense (protocol README 6): it is held in memory
 for the length of one call and never logged. This module has no logger on purpose.
 
-NOT HERE. Token budgets, compaction, cache planning, instruction precedence (S08, L03), the injection fence
-around tool output (C17: the broker already labels every result `untrusted`; fencing is that patch's job).
+NOT HERE. Token budgets, compaction and cache planning (S08: codeagent/context.py), model-written summaries and
+instruction precedence (L03 and later), the injection fence around tool output (C17: the broker already labels
+every result `untrusted`; fencing is that patch's job).
 """
 from __future__ import annotations
 
@@ -88,10 +89,15 @@ class AssembledContext:
     tools: "tuple[ToolSpec, ...]" = ()
     max_tokens: "int | None" = None
     provider_options: "Mapping[str, Any] | None" = field(default=None)
+    # Patch S08: fixed machine codes about what the assembler did ("context_compacted", "context_thrash"), never
+    # text and never content. The loop turns each into a `notice` run_event with fixed text; an assembler that
+    # has nothing to say leaves it empty (the default assembler does).
+    notes: "tuple[str, ...]" = ()
 
     def __post_init__(self):
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "tools", tuple(self.tools))
+        object.__setattr__(self, "notes", tuple(self.notes))
 
 
 class ContextAssembler:
