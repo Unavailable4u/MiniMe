@@ -17,14 +17,18 @@ dynamic = ["version"]
 description = "M2C (Minime to Code): a local-first coding agent client for Linux and WSL2."
 readme = "README.md"
 requires-python = ">=3.11"            # decision D1
-# Runtime dependencies: the standard library only, plus ONE exception.
+# Runtime dependencies: the standard library only, plus THREE exceptions.
 # tests/test_cli.py fails if another is added here (or imported) without that
 # test being changed on purpose.  The exception (Patch C04): ``websockets``, the
 # WebSocket client of the device link (m2c/link), pinned exactly like
 # daemon/requirements.txt so the two packages cannot drift; only m2c/link may
-# import it.  (C03's OS-keyring support is an OPTIONAL extra below, imported
-# lazily and never required.)
-dependencies = ["websockets==16.0"]
+# import it.  Patch C09 adds ``prompt_toolkit`` and ``rich``, the terminal chat
+# (decision D2); only m2c/tui/app.py imports them, and cli.py imports that
+# module lazily, so headless mode and every other command never load them.
+# Both are pinned exactly (each release is more than two weeks old).  (C03's
+# OS-keyring support is an OPTIONAL extra below, imported lazily and never
+# required.)
+dependencies = ["websockets==16.0", "prompt_toolkit==3.0.53", "rich==15.0.0"]
 # No `license` field yet: whether the client is open-sourced is decision D11,
 # still open. Set it (and the license headers) when that is decided.
 classifiers = [

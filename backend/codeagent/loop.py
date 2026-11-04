@@ -25,16 +25,21 @@ broker, the run manager / runs / buffer modules (S06), `emit` (S14's RunEmitter.
 sends stream messages, so this module never assigns a seq), a Metering hook, a ContextAssembler hook, the
 tool catalog, run_guard and tool_budget, and a LoopConfig. Tests pass fakes for all of it.
 
-NOT WIRED. install() (bottom of this file) registers the loop with S14, and nothing calls it: server.py is
-not edited by this patch. Switching the loop on now would (a) propose tools to a device that cannot run them
-yet (the device-side tool runner is a later patch) and (b) turn off hello.py's quota check and ledger write,
-because the real Metering is S10. Wiring is a later one-line change in server.py (replace the
-`codeagent_hello.install()` line with `codeagent_loop.install()`), after those two exist.
+WIRING. install() (bottom of this file) registers the loop with S14. Patch S15 (codeagent/wiring.py) builds the process
+loop from the real parts (broker, emitter, S08's assembler, S10's metering) and calls it from server.py in place of
+hello.py's install; this module only gained `offer_tools` (below) for that patch.
+
+TOOLS ONLY FOR CLIENTS THAT CAN ANSWER THEM (patch S15). `offer_tools(conn) -> bool` is asked ONCE per turn, with the
+connection the turn runs on. False (or an exception: fail closed) means the turn offers NO tools to the model, and a
+call the model makes anyway is answered with MSG_NO_TOOLS and never forwarded, so a client that cannot answer
+(`hello.capabilities` without "tools") never receives a tool_proposed. The gate can only remove tools: plan mode still
+filters what is left. With no predicate (the default) nothing changes.
 
 THE STEP
     1. cancel check (run_guard flag). Step limit. Metering.before_call() (may raise BudgetPause).
     2. assemble the context (hook) with the tools VISIBLE in this mode: every protocol/v1/tools definition,
-       and in plan mode only risk R0 tools (which includes plan_exit).
+       and in plan mode only risk R0 tools (which includes plan_exit). "This mode" is the run's CURRENT mode:
+       Patch S07b changes it once, when the person approves plan_exit (LEAVING PLAN MODE, below).
     3. call the model, walking the chain on provider errors (below). Every TextDelta becomes a `text_delta`
        event as it arrives; the reply ends with `text_done` (stop_reason tool_use or end_turn/max_tokens).
        The usage event goes to Metering.after_call and nothing about credits is emitted here (S10 owns it).
@@ -103,6 +108,27 @@ the loop. If the last thing in the conversation is a finished assistant reply th
 S14 gives hooks HOOK_TIMEOUT_SECONDS (10 s), so the hook that is registered (on_resume) starts resume() as a
 tracked task per run and returns; the cancel and disconnect hooks stop that task.
 
+LEAVING PLAN MODE (Patch S07b). A run's mode reaches the server once, in run.start. In plan mode the model sees
+only the read-only tools and plan_exit; when the person approves plan_exit the DEVICE leaves plan mode and answers
+the call with a successful tool_result, and nothing in the protocol tells the server more than that. So the loop
+reads that answer: a plan_exit that comes back with status ok AND ok true, in a run whose mode is plan, switches
+the run to `ask` for the rest of its life. The very next model call in the same turn then gets the full tool set and
+the normal system prompt. The server cannot know whether the person chose ask or accept-edits on the device; the two
+differ only in the device's policy, so `ask` is the right word for the server, and it is the ONLY word this path
+can write (never a stricter one, never one the device names: the answer's text is not read).
+    * Nothing else switches it. A plan_exit that is denied, fails, times out, is refused before it is sent, or
+      comes back ok false changes nothing; so does a plan_exit in a run that is not in plan mode (an accept-edits
+      run stays accept-edits); and so does every other tool, whatever its output says.
+    * The new mode is STORED, in the run row (runs.set_mode, a conditional UPDATE: plan -> ask, open runs only),
+      BEFORE the result is appended to the conversation. The buffer's state record is sealed once when the buffer
+      is created and has no update, so it keeps saying `plan`; every turn and every resume therefore starts from
+      _settle_mode, which lets a stored mode that has left plan win over a state that still says plan. (A buffer
+      rebuilt from a device's state is read the same way: once the server has left plan mode, a device cannot put
+      it back. The device's own policy still decides what is allowed on the device.)
+    * If the row cannot be written the switch is NOT made (fail closed, like every other run-store fault): the run
+      pauses paused_error and the plan_exit result is left unanswered, so the resume tells the model it may or may
+      not have worked and the model asks again. The log holds the run id and the two mode words, nothing else.
+
 DECISIONS THIS PATCH HAD TO MAKE (each is a small change if you disagree)
     * notice severity is `warning`, not the work package's `warn`: protocol/v1/run_event.json has info|warning.
     * The consecutive-failure LIMIT is run_guard's (TASK_MAX_CONSECUTIVE_FAILURES, 3), not LoopConfig's: the
@@ -164,6 +190,7 @@ MSG_TOOL_FAILED = "The tool reported an error."
 MSG_NOT_RUN_BUDGET = "This call was not run because the run reached its tool-call budget."
 MSG_TOO_MANY_IN_FLIGHT = "Too many tool calls were in flight at once. Call fewer tools at a time."
 MSG_CALL_NOT_SENT = "The call could not be sent to the device. Try again."
+MSG_NO_TOOLS = "No tools are available in this session. Answer from the conversation alone."
 MSG_HIDDEN_IN_PLAN_MODE = "This tool is not available in plan mode. Only read-only tools are."
 MSG_UNKNOWN_TOOL = "That tool does not exist. Use one of the tools you were given."
 MSG_MALFORMED = {
@@ -223,6 +250,10 @@ FALL_THROUGH = frozenset({ErrorBucket.RATE_LIMIT_WINDOW, ErrorBucket.TRANSIENT_N
 FAILING = frozenset({"error", "timeout", "denied"})
 # Outcomes that leave the call unanswered in the conversation (resume tells the model).
 DANGLING = frozenset({"disconnected", "cancelled"})
+# Patch S07b: the one mode change the loop makes. Fixed words, not read from the device or the model.
+MODE_PLAN = "plan"
+MODE_AFTER_PLAN_EXIT = "ask"
+PLAN_EXIT_TOOL = "plan_exit"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -497,6 +528,7 @@ class _Ctx:
         self.cancel_sent = False
         self.identical: dict = {}
         self.breaker: "str | None" = None
+        self.tools_on: "bool | None" = None          # patch S15: the offer_tools answer, asked once per turn (_tools_for)
 
 
 @dataclass
@@ -574,6 +606,7 @@ class AgentLoop:
     catalog            ToolCatalog; default ToolCatalog.from_protocol() on first use
     run_manager, runs, buffer      the S06 modules (or twins with the same functions)
     guard, tool_budget run_guard / tool_budget modules (or twins); defaults are the real ones
+    offer_tools        optional callable(conn) -> bool (patch S15): may this connection be offered tools? default: yes
     """
 
     def __init__(self, *, chain: "Sequence[ModelChoice]", broker, emit, adapter: "ModelAdapter | None" = None,
@@ -581,7 +614,8 @@ class AgentLoop:
                  metering: "Metering | None" = None, metering_factory: "Callable[[Any], Metering] | None" = None,
                  assembler=None, config: "LoopConfig | None" = None, catalog: "ToolCatalog | None" = None,
                  run_manager=run_manager_module, runs=runs_module, buffer=buffer_module, guard=None,
-                 tool_budget=None, emit_final=None, unbind=None, classify=classify_error, clock=time.monotonic):
+                 tool_budget=None, emit_final=None, unbind=None, classify=classify_error, clock=time.monotonic,
+                 offer_tools: "Callable[[Any], bool] | None" = None):
         if adapter is not None and adapter_factory is not None:
             raise ValueError("give an adapter or an adapter_factory, not both")
         for name, fn in (("emit", emit), ("emit_final", emit_final)):
@@ -603,6 +637,7 @@ class AgentLoop:
         self._rm, self._runs, self._buffer = run_manager, runs, buffer
         self._guard, self._tool_budget = guard, tool_budget
         self._classify, self._clock = classify, clock
+        self._offer_tools = offer_tools
         self._locks: "weakref.WeakValueDictionary" = weakref.WeakValueDictionary()
         self._tasks: "dict[str, asyncio.Task]" = {}
         # S14 compares hooks by identity: one object per hook, made once (a bound method is new every time).
@@ -640,6 +675,20 @@ class AgentLoop:
         if key not in self._adapters:
             self._adapters[key] = self._factory(choice)
         return self._adapters[key]
+
+    def _tools_for(self, ctx: "_Ctx") -> bool:
+        """Patch S15: may this turn's connection be offered tools? The offer_tools gate is asked ONCE per turn (the answer
+        is kept on the turn's context). No gate: yes. A gate that raises: no (fail closed); only the exception's type is
+        logged."""
+        if ctx.tools_on is None:
+            ctx.tools_on = True
+            if self._offer_tools is not None:
+                try:
+                    ctx.tools_on = bool(self._offer_tools(ctx.conn))
+                except Exception as exc:
+                    ctx.tools_on = False
+                    logger.warning("[loop] offer_tools failed, offering no tools error=%s", type(exc).__name__)
+        return ctx.tools_on
 
     def _lock(self, run_id: str) -> asyncio.Lock:
         lock = self._locks.get(run_id)
@@ -711,6 +760,7 @@ class AgentLoop:
         try:
             conversation = await _blocking(self._buffer.read_conversation, run.id)
             ctx = _Ctx(conn, run, msg, dict(conversation.state), list(conversation.items), self._metering_for(run))
+            await self._settle_mode(ctx)
             await self._heal(ctx)
             if resuming:
                 if not self._should_continue(ctx.items):
@@ -742,6 +792,47 @@ class AgentLoop:
 
     def _result(self, ctx, outcome: str, reason: "str | None" = None) -> TurnResult:
         return TurnResult(outcome, reason, ctx.steps if ctx else 0, ctx.tool_calls if ctx else 0)
+
+    def _adopt_mode(self, ctx: _Ctx, mode: str) -> None:
+        """The turn's mode, and the copy of it the assembler is handed in `state` (a private dict: the buffer
+        itself is never written)."""
+        ctx.mode = mode
+        if "mode" in ctx.state:
+            ctx.state["mode"] = mode
+
+    async def _settle_mode(self, ctx: _Ctx) -> None:
+        """Patch S07b. The mode this turn (or resume) starts in. The buffer's state is sealed once and still says
+        `plan` after a run has left plan mode, so when it says plan the stored row is asked, and a row that has
+        moved on wins. Only a `plan` state is ever looked up (every other run reads exactly what it read before),
+        and the lookup can only RELAX plan, never tighten anything. If the row cannot be read the run stays in
+        plan mode (the stricter side); the next call to the run store will report the fault itself."""
+        if ctx.mode != MODE_PLAN:
+            return
+        try:
+            current = await _blocking(self._runs.get_run, ctx.user_id, ctx.run_id)
+        except runs_module.RunError as exc:
+            logger.warning("[loop] could not read the stored mode, staying in plan mode run=%s error=%s",
+                           ctx.run_id, type(exc).__name__)
+            return
+        if current.mode != MODE_PLAN:
+            self._adopt_mode(ctx, current.mode)
+
+    async def _leave_plan_mode(self, ctx: _Ctx, batch: "list[_Result]") -> None:
+        """Patch S07b: the person approved plan_exit, so the run leaves plan mode (module docstring, LEAVING PLAN
+        MODE). Called with a batch of results BEFORE they are appended, so a result is never recorded as an
+        answer whose effect was not stored. Only an OK result of plan_exit (status ok and ok true) in a run that
+        is in plan mode does anything; the target is the fixed word `ask`. A fault of the run store propagates
+        (the turn pauses paused_error; see _turn)."""
+        if ctx.mode != MODE_PLAN:
+            return
+        if not any(r.planned.name == PLAN_EXIT_TOOL and r.status == "ok" and r.ok is True for r in batch):
+            return
+        moved = await _blocking(self._runs.set_mode, ctx.user_id, ctx.run_id, MODE_AFTER_PLAN_EXIT,
+                                expected=MODE_PLAN)
+        if moved.mode != MODE_AFTER_PLAN_EXIT:             # not made: the run ended (or was changed) meanwhile
+            return
+        self._adopt_mode(ctx, moved.mode)
+        logger.info("[loop] left plan mode run=%s mode=%s", ctx.run_id, ctx.mode)
 
     async def _heal(self, ctx: _Ctx) -> None:
         """Every tool call without a result gets one telling the model the device disconnected (P00). A
@@ -814,7 +905,7 @@ class AgentLoop:
     # -- the model call, walking the chain -------------------------------------------------------
 
     async def _model_step(self, ctx: _Ctx) -> _Reply:
-        tools = self.catalog.visible(ctx.mode)
+        tools = self.catalog.visible(ctx.mode) if self._tools_for(ctx) else ()
         assembled = await call_assembler(self._assembler, ctx.state, ctx.items, tools, ctx.mode)
         for note in assembled.notes:
             known = CONTEXT_NOTICES.get(note) if isinstance(note, str) else None
@@ -947,6 +1038,8 @@ class AgentLoop:
                 planned.append(_Planned(call_id, name, {}, refusal=refusal))
             elif name not in catalog.names:
                 planned.append(_Planned(call_id, name, call.arguments, refusal=MSG_UNKNOWN_TOOL))
+            elif not self._tools_for(ctx):
+                planned.append(_Planned(call_id, name, call.arguments, refusal=MSG_NO_TOOLS))
             elif name not in visible:
                 planned.append(_Planned(call_id, name, call.arguments, refusal=MSG_HIDDEN_IN_PLAN_MODE))
             else:
@@ -991,6 +1084,7 @@ class AgentLoop:
                         batch.append(results[flushed])
                         flushed += 1
                 if batch:
+                    await self._leave_plan_mode(ctx, batch)
                     await self._record(ctx, batch)
                     await self._append(ctx, *[r.item() for r in batch])
                     appended.update(r.planned.call_id for r in batch)
@@ -1337,8 +1431,8 @@ async def run_turn(conn, run, msg) -> TurnResult:
 
 def install(replace: bool = True, *, handlers=None, loop: "AgentLoop | None" = None) -> AgentLoop:
     """Register the loop with S14: the turn runner (replace=True, so it may take hello.py's place), and the
-    loop's resume, cancel and disconnect hooks. Idempotent. NOT CALLED by anything in this patch (module
-    docstring, "NOT WIRED"). `handlers` defaults to the process-wide run_handlers."""
+    loop's resume, cancel and disconnect hooks. Idempotent. Patch S15's wiring.install() is what server.py
+    calls (module docstring, "WIRING"). `handlers` defaults to the process-wide run_handlers."""
     if loop is not None:
         set_loop(loop)
     active = get_loop()

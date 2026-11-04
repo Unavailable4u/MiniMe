@@ -128,6 +128,17 @@ class FakeRunStore:
             row["updated_at"] = self.clock.dt()
             return self._view(row)
 
+    def set_mode(self, *, user_id, run_id, from_mode, to_mode):
+        """The conditional UPDATE of Patch S07b: only an OPEN run of this account whose mode is still
+        `from_mode`; None otherwise. Nothing but the mode and updated_at changes."""
+        with self.lock:
+            row = self.rows.get(run_id)
+            if (row is None or row["user_id"] != user_id or row["mode"] != from_mode
+                    or row["ended_at"] is not None):
+                return None
+            row.update(mode=to_mode, updated_at=self.clock.dt())
+            return self._view(row)
+
     def list_open(self, *, user_id, device_id):
         with self.lock:
             rows = [self._view(r) for r in self.rows.values()
@@ -150,4 +161,4 @@ class BoomStore:
     def _boom(self, *a, **k):
         raise RuntimeError(f"connection to {CANARY} failed")
 
-    insert = get = move = add_counters = list_open = _boom
+    insert = get = move = add_counters = list_open = set_mode = _boom

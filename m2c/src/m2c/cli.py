@@ -1,7 +1,7 @@
 """
 m2c/src/m2c/cli.py -- Patch C01: the ``m2c`` command (Patch C03: login/logout).
 
-    m2c                           after login, a prompt: type a message, read the reply (I01)
+    m2c [--mode M] [--plain]      after login, the terminal chat (C09); --plain, or no terminal: the plain prompt (I01)
     m2c -p "task"                 headless: run one task, no prompts, no terminal needed (C10)
           [--output-format text|json] [--mode plan|ask|accept-edits]
     m2c --version
@@ -32,7 +32,10 @@ Exit statuses (stable, scripts may rely on them):
 2 usage error, 3 policy denial, 4 quota exhausted, 5 not logged in or device revoked, 130 / 143 ended by Ctrl-C /
 SIGTERM.  (4 and 5 mean something else for the commands above: scripts that run ``m2c -p`` read the headless table.)
 This module only parses the options and calls ``headless.run_headless``; -p is not a command, so it cannot be combined
-with one, and --output-format / --mode are options of -p only.
+with one, and --output-format is an option of -p only.  --mode also starts the interactive terminal chat in that mode
+(plan, ask or accept-edits; plan can only be chosen here, it is left through the plan_exit tool); --plain forces the
+plain prompt of I01, which has no modes, so --mode with it (or without a terminal) is a usage error rather than a
+silently ignored safety option.
 
 Side effects, deliberately minimal: ``--version`` and ``--help`` do not touch
 the filesystem, and neither does ``logout`` when there is nothing to delete.
@@ -139,7 +142,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     headless_group.add_argument(
         "--mode", default=None, metavar="{" + ",".join(headless.MODES) + "}",
-        help="with -p: the permission mode the run starts in (default: " + headless.DEFAULT_MODE + ")",
+        help="the permission mode a headless run (-p) or the terminal chat starts in (default: "
+        + headless.DEFAULT_MODE + "); plan can only be chosen here",
+    )
+    parser.add_argument(
+        "--plain", action="store_true",
+        help="use the plain prompt (no colours, no keys) instead of the terminal chat; it is also used when stdin or "
+        "stdout is not a terminal",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=False)
     login_parser = sub.add_parser(
@@ -262,14 +271,29 @@ def _run_headless(args: argparse.Namespace) -> int:
         return _unexpected("-p", exc)
 
 
-def _run_prompt() -> int:
-    """`m2c` with no command (patch I01): after login, open the prompt loop (m2c/repl.py)."""
+def _run_prompt(mode: str | None = None, plain: bool = False) -> int:
+    """`m2c` with no command: after login, open the terminal chat (m2c/tui, patch C09), or the plain prompt loop
+    (m2c/repl.py, patch I01) with --plain or when stdin or stdout is not a terminal."""
     import asyncio
 
     from . import repl
     from .auth.credentials import NotLoggedInError, load_credential
     from .store import open_db
 
+    interactive = (not plain) and sys.stdin.isatty() and sys.stdout.isatty()
+    if mode is not None and not interactive:
+        print("m2c: --mode needs the terminal chat; it cannot be used with --plain or without a terminal.",
+              file=sys.stderr)
+        return EXIT_USAGE
+    chat = None
+    if interactive:
+        try:  # the terminal libraries are imported only here, so every other command stays free of them
+            from .tui import app as chat
+        except ImportError:
+            if mode is not None:
+                print("m2c: the terminal chat needs prompt_toolkit and rich; install them to use --mode.", file=sys.stderr)
+                return EXIT_FAILURE
+            print("m2c: the terminal chat needs prompt_toolkit and rich; using the plain prompt.", file=sys.stderr)
     try:
         load_credential()
     except NotLoggedInError:
@@ -286,7 +310,16 @@ def _run_prompt() -> int:
     except Exception as exc:
         return _unexpected("prompt", exc)
     try:
-        status = asyncio.run(repl.run_prompt(store, project_path=str(Path.cwd())))
+        if chat is not None:
+            from .tui.session import StartupError
+
+            try:
+                status = asyncio.run(chat.run_chat(store, project_path=str(Path.cwd()), mode=mode or headless.DEFAULT_MODE))
+            except StartupError as exc:  # fixed text
+                print(f"m2c: {exc}.", file=sys.stderr)
+                return EXIT_USAGE
+        else:
+            status = asyncio.run(repl.run_prompt(store, project_path=str(Path.cwd())))
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
     except Exception as exc:
@@ -312,12 +345,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command is not None:
             print(f"m2c: -p/--print runs a task; it cannot be combined with the {args.command!r} command.", file=sys.stderr)
             return EXIT_USAGE
+        if args.plain:
+            print("m2c: --plain applies to the chat, not to -p/--print.", file=sys.stderr)
+            return EXIT_USAGE
         return _run_headless(args)
-    if args.mode is not None or args.output_format is not None:
-        print("m2c: --mode and --output-format only apply to -p/--print.", file=sys.stderr)
+    if args.output_format is not None:
+        print("m2c: --output-format only applies to -p/--print.", file=sys.stderr)
+        return EXIT_USAGE
+    if args.command is not None and (args.mode is not None or args.plain):
+        print(f"m2c: --mode and --plain apply to the chat (no command) and --mode to -p, not to the {args.command!r} "
+              "command.", file=sys.stderr)
+        return EXIT_USAGE
+    if args.mode is not None and args.mode not in headless.MODES:
+        print(f"m2c: --mode must be one of {', '.join(headless.MODES)}.", file=sys.stderr)
         return EXIT_USAGE
     if args.command is None:
-        return _run_prompt()
+        return _run_prompt(args.mode, args.plain)
     if args.command == "login":
         return _run_login(args.device_name)
     if args.command == "logout":

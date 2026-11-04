@@ -229,12 +229,15 @@ def test_requires_python_is_3_11_or_newer():
 def test_runtime_has_no_third_party_dependencies():
     """Decision for C01: the standard library only.  Dev extras are allowed.
 
-    Patch C04 adds exactly one runtime dependency, on purpose: ``websockets``
-    (pinned like daemon/requirements.txt), used only by m2c/link.  Adding any
-    other still fails here."""
+    Patch C04 adds one runtime dependency, on purpose: ``websockets`` (pinned
+    like daemon/requirements.txt), used only by m2c/link.  Patch C09b adds two
+    more, on purpose (decision D2): ``prompt_toolkit`` and ``rich``, the terminal
+    chat, used only by m2c/tui/app.py.  Adding any other still fails here."""
     reqs = _distribution().requires or []
     runtime = [r for r in reqs if "extra ==" not in r.replace('"', "").replace("'", "")]
-    assert runtime == ["websockets==16.0"]
+    # the installed metadata normalizes names and sorts them
+    assert sorted(r.lower().replace("_", "-") for r in runtime) == [
+        "prompt-toolkit==3.0.53", "rich==15.0.0", "websockets==16.0"]
 
 
 def test_runtime_modules_import_only_the_standard_library():
@@ -242,7 +245,9 @@ def test_runtime_modules_import_only_the_standard_library():
     anything outside the stdlib or m2c itself (works without installing)."""
     stdlib = set(sys.stdlib_module_names)
     # Patch C04: the device link (m2c/link) may import websockets; nothing else may.
+    # Patch C09b: the terminal layer (m2c/tui/app.py) may import prompt_toolkit and rich; nothing else may.
     allowed_in_link = {"websockets"}
+    allowed_in_app = {"prompt_toolkit", "rich"}
     offenders = []
     for py in sorted(SRC.rglob("*.py")):
         tree = ast.parse(py.read_text(encoding="utf-8"))
@@ -254,9 +259,11 @@ def test_runtime_modules_import_only_the_standard_library():
             else:
                 continue
             in_link = py.relative_to(SRC).parts[0] == "link"
+            in_app = py.relative_to(SRC).parts == ("tui", "app.py")
             offenders += [
                 f"{py.name}: {n}"
                 for n in names
                 if n not in stdlib and n != "m2c" and not (in_link and n in allowed_in_link)
+                and not (in_app and n in allowed_in_app)
             ]
     assert offenders == []

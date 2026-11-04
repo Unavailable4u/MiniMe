@@ -936,11 +936,15 @@ def test_the_module_level_run_turn_is_the_s14_contract_and_uses_the_process_loop
     assert result.outcome == "finished"
 
 
-def test_server_py_does_not_install_the_loop_in_this_patch():
+def test_server_py_installs_the_loop_only_through_the_s15_wiring():
+    """S07 left the loop unwired and pinned that. Patch S15 wires it, with ONE line in server.py that goes through
+    codeagent/wiring.py (which builds the loop from the real parts and owns the M2C_LOOP=hello kill switch): server.py
+    itself still never touches the loop module, and hello's runner is no longer installed by it."""
     from pathlib import Path
     text = (Path(__file__).resolve().parents[2] / "api" / "server.py").read_text(encoding="utf-8")
     assert "codeagent import loop" not in text and "codeagent_loop" not in text
-    assert "codeagent_hello.install()" in text                        # hello's runner is still the one in use
+    assert "codeagent_wiring.install()" in text
+    assert "codeagent_hello" not in text
 
 
 def test_config_rejects_nonsense():

@@ -85,12 +85,15 @@ def test_install_keeps_the_openai_sdk_from_logging_prompts():
         sdk.setLevel(before)
 
 
-def test_server_installs_hello_right_after_the_run_handlers():
+def test_server_installs_the_wiring_not_hello_right_after_the_run_handlers():
+    """Patch S15 replaced the line: hello.py is no longer installed by server.py. M2C_LOOP=hello (wiring.install) is the
+    only way it is, tests/unit/test_codeagent_wiring.py::test_kill_switch_*."""
     text = SERVER.read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if ln.strip()]
     i = next(n for n, ln in enumerate(lines) if ln.startswith("codeagent_run_handlers.install()"))
-    assert lines[i + 1].startswith("codeagent_hello.install()")
-    assert "from codeagent import hello as codeagent_hello" in text
+    assert lines[i + 1].startswith("codeagent_wiring.install()")
+    assert "from codeagent import wiring as codeagent_wiring" in text
+    assert "codeagent_hello" not in text and "from codeagent import hello" not in text
 
 
 def test_the_lock_registry_does_not_keep_locks_alive():

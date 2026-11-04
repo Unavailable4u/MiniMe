@@ -18,9 +18,11 @@ from link_fakes import *  # noqa: F401,F403  (autouse fixtures; see link_fakes.p
 PYPROJECT = PKG_DIR.parent.parent / "pyproject.toml"
 
 
-def test_websockets_is_the_one_runtime_dependency_and_is_pinned_exactly():
+def test_websockets_is_pinned_exactly_among_the_runtime_dependencies():
+    """C04 added websockets.  Patch C09b adds prompt_toolkit and rich on purpose (the terminal chat, decision D2); the
+    exact list is also guarded in tests/test_cli.py."""
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    assert data["project"]["dependencies"] == ["websockets==16.0"]
+    assert data["project"]["dependencies"] == ["websockets==16.0", "prompt_toolkit==3.0.53", "rich==15.0.0"]
 
 
 def test_the_pin_matches_the_daemons_and_the_installed_version():

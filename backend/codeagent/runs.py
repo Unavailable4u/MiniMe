@@ -99,6 +99,10 @@ DECISIONS THIS PATCH HAD TO MAKE (each is a one-line change if you disagree)
 * Counters (add_progress) keep working after a run has ended: a model call in flight
   when the run was cancelled still gets recorded. usage_ledger remains the metering truth.
 * The cap counts SLOT states per device, not per account.
+* Patch S07b adds set_mode(): a run's mode is stored once, from run.start, and the loop changes it exactly once
+  (plan -> ask, when the person approves plan_exit). It is a conditional UPDATE like a state move (only an OPEN run
+  that still has the expected mode) and it is a mechanism only: which change is allowed is the caller's rule. The
+  migration's trigger leaves `mode` writable, so no migration is needed.
 """
 from __future__ import annotations
 
@@ -383,6 +387,15 @@ _COUNTERS_SQL = (
     "returning " + _COLUMNS
 )
 
+# Patch S07b. One conditional UPDATE, like _MOVE_SQL: it changes the mode only while the row still HAS the mode
+# the caller read, and only while the run is open (ended_at is null, which the migration ties to the state).
+_SET_MODE_SQL = (
+    "update runs "
+    "set mode = %s, updated_at = now() "
+    "where id = %s and user_id = %s and mode = %s and ended_at is null "
+    "returning " + _COLUMNS
+)
+
 _LIST_OPEN_SQL = (
     "select " + _COLUMNS + " from runs "
     "where user_id = %s and device_id = %s::uuid and ended_at is null "
@@ -438,6 +451,15 @@ class PgRunStore:
     def add_counters(self, *, user_id, run_id, steps, credits) -> "dict | None":
         with db.cursor(user_id=user_id) as cur:
             cur.execute(_COUNTERS_SQL, (steps, Decimal(str(round(credits, 6))), run_id, user_id))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def set_mode(self, *, user_id, run_id, from_mode, to_mode) -> "dict | None":
+        """The conditional UPDATE of Patch S07b. None when the run is gone, is not this account's, has ended or
+        no longer has `from_mode`. Nothing but `mode` (and `updated_at`) changes; the migration's trigger leaves
+        `mode` free on purpose (it guards identity, a terminal state and the counters)."""
+        with db.cursor(user_id=user_id) as cur:
+            cur.execute(_SET_MODE_SQL, (to_mode, run_id, user_id, from_mode))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -553,6 +575,33 @@ def add_progress(user_id: str, run_id: str, *, steps: int = 0, credits: float = 
     steps = _count(steps, "steps", integer=True)
     credits = _count(credits, "credits", integer=False)
     row = _call(_STORE.add_counters, user_id=user_id, run_id=run_id, steps=steps, credits=credits)
+    if row is None:
+        raise RunNotFound()
+    return _to_run(row)
+
+
+def set_mode(user_id: str, run_id: str, to_mode: str, *, expected: str) -> Run:
+    """Change a run's mode from `expected` to `to_mode`, atomically, and return the run as it is afterwards.
+
+    Patch S07b. A run's mode is stored once, from run.start, and the loop needs to change it exactly once in a
+    run's life: plan -> ask, when the person approves plan_exit. The change is CONDITIONAL, like a state move:
+    it is made only while the run is open and its mode is still `expected`, so a stale caller can never
+    overwrite a mode somebody else set, and an ended run is never touched. When it is not made the run comes
+    back unchanged and the caller compares `.mode` with what it asked for; that is not an error. (Making the
+    same change twice is therefore harmless: the second call finds the mode already moved.)
+
+    This is a mechanism, not a policy: which mode may follow which is the CALLER'S rule (loop.py only ever asks
+    for plan -> ask). The words are shape-checked like create_run's. Nothing is changed but `mode` and
+    `updated_at`; the run's state, its counters and its error code are left alone.
+
+    Raises InvalidRun, RunNotFound (no such run for this account), RunStoreUnavailable."""
+    user_id, run_id = _user_id(user_id), _run_id(run_id)
+    to_mode, expected = _word(to_mode, "mode"), _word(expected, "mode")
+    row = _call(_STORE.set_mode, user_id=user_id, run_id=run_id, from_mode=expected, to_mode=to_mode)
+    if row is not None:
+        logger.info("[runs] run=%s mode %s -> %s", run_id, expected, to_mode)
+        return _to_run(row)
+    row = _call(_STORE.get, user_id=user_id, run_id=run_id)      # not changed: say why by returning what is there
     if row is None:
         raise RunNotFound()
     return _to_run(row)

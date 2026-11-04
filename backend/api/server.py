@@ -118,7 +118,7 @@ from api.routes.devices import router as devices_router  # NEW — S03: device p
 from api.routes.code_runs import router as code_runs_router  # NEW — S10: POST /v1/code/runs/{run_id}/grant
 from codeagent.ws import router as codeagent_ws_router  # NEW — S04: WS /v1/code/device
 from codeagent import run_handlers as codeagent_run_handlers  # NEW — S14: the device socket's message handlers
-from codeagent import hello as codeagent_hello  # NEW — I01: the walking skeleton's turn runner
+from codeagent import wiring as codeagent_wiring  # NEW — S15: installs the agent loop (or hello.py's runner when M2C_LOOP=hello)
 from codeagent import broker as codeagent_broker  # NEW — S09: the server tool broker
 from api.routes.user_profile import router as user_profile_router  # NEW — Patch B6
 from api.routes.workspace_data import router as workspace_data_router
@@ -393,7 +393,7 @@ app.include_router(devices_router)  # NEW — S03: /v1/code/devices/*, /api/devi
 app.include_router(code_runs_router)  # NEW — S10: POST /v1/code/runs/{run_id}/grant (grant more credits)
 app.include_router(codeagent_ws_router)  # NEW — S04: WS /v1/code/device
 codeagent_run_handlers.install()  # NEW — S14: router + run handlers behind WS /v1/code/device (idempotent)
-codeagent_hello.install()  # NEW — I01: text-only turn runner + resume/cancel hooks for S14 (idempotent)
+codeagent_wiring.install()  # NEW — S15: the agent loop's turn runner + hooks for S14; M2C_LOOP=hello is the kill switch (idempotent)
 codeagent_broker.install()  # NEW — S09: tool_result/tool_stream/approval handlers + disconnect/cancel hooks (idempotent)
 
 

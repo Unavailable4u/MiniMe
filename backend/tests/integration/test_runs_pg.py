@@ -140,6 +140,28 @@ def test_progress_accumulates_exactly_and_still_lands_after_the_run_ended(pg, us
     assert after.credits == 0.55                           # numeric, so no 0.1 + 0.2 float noise
 
 
+def test_set_mode_is_one_conditional_update_on_open_runs_of_this_account(pg, user, device):
+    """Patch S07b: plan -> ask is a conditional UPDATE. The trigger of migration 0014 leaves `mode` free (it
+    guards identity, a terminal state and the counters), so the app role may write it; nothing else moves."""
+    from codeagent import runs
+    run = make(user, device, mode="plan")
+    moved = runs.set_mode(user, run.id, "ask", expected="plan")
+    assert (moved.mode, moved.state, moved.profile, moved.steps, moved.credits) == ("ask", "created", "code", 0, 0.0)
+    assert moved.updated_at >= run.updated_at
+    assert runs.get_run(user, run.id).mode == "ask"
+    # the wrong expectation (somebody else already moved it) writes nothing and says what is there
+    assert runs.set_mode(user, run.id, "plan", expected="accept-edits").mode == "ask"
+    # another account's run is a missing run, and is left as it was
+    other = f"pg_user_{uuid.uuid4().hex[:10]}"
+    with pytest.raises(runs.RunNotFound):
+        runs.set_mode(other, run.id, "plan", expected="ask")
+    assert runs.get_run(user, run.id).mode == "ask"
+    # an ended run is never touched (no row matches; the terminal trigger is not what stops it)
+    runs.transition(user, run.id, "cancelled")
+    ended = runs.set_mode(user, run.id, "plan", expected="ask")
+    assert (ended.mode, ended.state) == ("ask", "cancelled")
+
+
 def test_list_open_runs_is_scoped_and_leaves_out_finished_runs(pg, user, device):
     from codeagent import runs
     a, b = make(user, device), make(user, device)

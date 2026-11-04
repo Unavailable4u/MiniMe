@@ -157,7 +157,7 @@ def test_a_usage_error_in_json_mode_still_leaves_the_one_json_object(capsys, pro
 @pytest.mark.parametrize("args", [
     ["-p"],                                                        # -p needs its task (argparse)
     ["-p", TASK, "--output-format", "yaml"],                       # not text or json (argparse)
-    ["--mode", "plan"],                                            # headless options without -p
+    ["--mode", "plan"],                                            # C09b: --mode opens the terminal chat; without a terminal it is refused
     ["--output-format", "json"],
     ["-p", TASK, "doctor"],                                        # -p is not a command's option
     ["-p", TASK, "login"],
