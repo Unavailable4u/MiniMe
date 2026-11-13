@@ -106,6 +106,16 @@ The runner, the store connection and ``ask`` live on the event loop's thread (a 
 only ``run_tool`` and its ``on_chunk`` run in worker threads.  ``snapshot`` runs on the loop thread (a file of up to 10 MB
 is read there; calls that change files are serialized anyway).  ``cancel_run`` must be called from the loop thread.
 
+Secrets (Patch C15)
+-------------------
+Everything that leaves for the server is redacted FIRST, with ``m2c.secrets.redact``: the output of every
+``tool_result`` (so also the "edited call" line, which echoes what the person typed), and every ``tool_stream`` chunk
+(one ``StreamRedactor`` per stream, so a secret split across two chunks cannot leak; the held tail is flushed when the
+call ends).  The headless ``execute`` goes through the same ``_execute``.  What the tools produced and what ``on_chunk``
+was given stay raw: the person's own terminal is not redacted, only the copy that leaves.  A result that changed ends
+with one fixed line naming kinds and counts; if redaction itself fails the output is replaced by a fixed text (the
+status, exit code and trust are kept).  The log gets kinds and counts, never text.
+
 Headless adapter
 ----------------
 ``decide(proposal)`` and ``execute(proposal)`` are shaped for ``headless.install_tool_hooks`` (C10): ``decide`` answers
@@ -136,6 +146,7 @@ from .headless import ToolOutcome as HeadlessOutcome
 from .link import LinkError, LinkMessageTooLargeError
 from .policy import MODES, TOOLS as POLICY_TOOLS, Context, Decision, Request
 from .policy.decide import decide as policy_decide
+from .secrets.redact import FAIL_CLOSED_TEXT, StreamRedactor, redact, redaction_note
 from .store import append_event
 from .store.db import normalize_ts, transaction
 from .tools import MAX_WIRE_CHARS, CallEnv, ToolContext, run_tool
@@ -331,24 +342,36 @@ class _Streamer:
             self._queue.put_nowait((stream, text))
 
     async def _pump(self) -> None:
+        # Patch C15: one redactor per stream; what is sent is the redacted text, never the raw chunk.
+        redactors = {"stdout": StreamRedactor(), "stderr": StreamRedactor()}
         while True:
             item = await self._queue.get()
             if item is None:
+                for stream, redactor in redactors.items():
+                    await self._send(stream, redactor.flush())
+                    for finding in redactor.findings:
+                        _log(logging.INFO, "runner.stream_redacted", call_id=self._call_id, code=finding.kind,
+                             count=finding.count)
                 return
             if self._dead:
                 continue
             stream, text = item
-            for start in range(0, len(text), STREAM_PIECE_CHARS):
-                piece = text[start:start + STREAM_PIECE_CHARS]
-                self._bytes += len(piece.encode("utf-8", "replace"))
-                if self._bytes > MAX_STREAM_BYTES:
-                    self._dead = True
-                    break
-                try:
-                    await self._link.send_tool_stream(self._run_id, self._call_id, stream=stream, chunk=piece)
-                except (LinkError, ValueError):
-                    self._dead = True
-                    break
+            await self._send(stream, redactors[stream].feed(text))
+
+    async def _send(self, stream: str, text: str) -> None:
+        if self._dead or not text:
+            return
+        for start in range(0, len(text), STREAM_PIECE_CHARS):
+            piece = text[start:start + STREAM_PIECE_CHARS]
+            self._bytes += len(piece.encode("utf-8", "replace"))
+            if self._bytes > MAX_STREAM_BYTES:
+                self._dead = True
+                return
+            try:
+                await self._link.send_tool_stream(self._run_id, self._call_id, stream=stream, chunk=piece)
+            except (LinkError, ValueError):
+                self._dead = True
+                return
 
     async def close(self) -> None:
         self._closed = True
@@ -727,6 +750,36 @@ class ToolRunner:
     # -- execution ----------------------------------------------------------------------------------------------------
     async def _execute(self, call: _Call, args: Any, authorization: str, context: Context | None, edited: bool,
                        *, stream: bool) -> _Outcome:
+        """Run the call and return what may LEAVE the device: the outcome after redaction (Patch C15).  Every path
+        that sends or returns an output (the live runner and the headless adapter) goes through here."""
+        outcome = await self._execute_raw(call, args, authorization, context, edited, stream=stream)
+        return self._protect(call, outcome)
+
+    def _protect(self, call: _Call, outcome: _Outcome) -> _Outcome:
+        """Redact the output; add one fixed note when something changed; fail closed.  Never raises."""
+        try:
+            result = redact(outcome.output)
+            if result.failed:
+                _log(logging.WARNING, "runner.redaction_failed", tool=_safe_tool(call.tool), call_id=call.call_id,
+                     code="redaction_error")
+                return dataclasses.replace(outcome, output=FAIL_CLOSED_TEXT, truncated=False)
+            if not result.changed:
+                return outcome
+            for finding in result.findings:
+                _log(logging.INFO, "runner.redacted", tool=_safe_tool(call.tool), call_id=call.call_id, code=finding.kind,
+                     count=finding.count)
+            note = "\n\n" + redaction_note(result.findings)
+            output, truncated = result.text, outcome.truncated
+            if len(output) + len(note) > MAX_WIRE_CHARS:           # a marker can be longer than the secret it replaced
+                cut = "\n[truncated: output exceeded the size limit]"
+                output, truncated = output[: MAX_WIRE_CHARS - len(note) - len(cut)] + cut, True
+            return dataclasses.replace(outcome, output=output + note, truncated=truncated)
+        except Exception as exc:  # noqa: BLE001 - security check: if it cannot run, nothing is sent
+            _log(logging.WARNING, "runner.redaction_failed", code=type(exc).__name__)
+            return dataclasses.replace(outcome, output=FAIL_CLOSED_TEXT, truncated=False)
+
+    async def _execute_raw(self, call: _Call, args: Any, authorization: str, context: Context | None, edited: bool,
+                           *, stream: bool) -> _Outcome:
         if call.tool == "plan_exit":
             outcome = self._plan_exit(context)
         elif call.tool in CHECKPOINTED_TOOLS and not self._checkpoint(args):
@@ -776,6 +829,7 @@ class ToolRunner:
         else:
             shown, label = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str), "input: "
         if len(shown) > MAX_ECHO_CHARS:
+            shown = redact(shown).text                  # C15: redact BEFORE cutting, so a cut cannot leave half a token
             shown = shown[:MAX_ECHO_CHARS] + f" [... {len(shown) - MAX_ECHO_CHARS} more characters not shown]"
         head = f"{EDITED_NOTICE}\n{label}{shown}\n\n"
         output, truncated = outcome.output, outcome.truncated

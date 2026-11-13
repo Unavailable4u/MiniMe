@@ -1,0 +1,42 @@
+# .github/scripts/skip-allowlist.txt -- Patch Q01.
+#
+# The ONLY reasons a CI test may be skipped.  check_skips.py reads the JUnit
+# report of each test job and fails the job for any skip whose reason is not
+# matched here.  Keep this list short: every line is a hole in the safety net,
+# so every line says why it is acceptable, and "install the tool in the job"
+# is always preferred to adding a line.
+#
+# Format (see check_skips.py):   scope | text found in the skip reason [| when=ENV_VAR]
+#   scope     m2c, backend, protocol, or * for every job
+#   when=VAR  the entry is active only while environment variable VAR is "1"
+#
+# Deliberately NOT here, because the jobs install what those tests need and a
+# skip for them means the install broke:
+#   - ripgrep / "rg"             (m2c job: apt install ripgrep)
+#   - jsonschema                 (m2c job: pinned from protocol/requirements.txt;
+#                                 backend job: pinned in requirements.txt; the
+#                                 protocol job: protocol/requirements.txt)
+#   - "root ignores file permissions" (the hosted runner is not root; a root
+#                                 runner would silently drop the permission tests)
+
+# --- m2c --------------------------------------------------------------------
+# The real sandbox tests (WP C11a) need bubblewrap to create a user namespace.
+# The m2c job probes this on the runner and sets M2C_CI_NO_USERNS=1 only when it
+# is NOT possible (Ubuntu 24.04 restricts unprivileged user namespaces through
+# AppArmor; the probe step tries to lift that first).  So this entry can only
+# excuse the skip on a runner where the sandbox really cannot work: if
+# bubblewrap works there and a sandbox test still skips, the job fails.
+# C11a's tests must use exactly this wording as their skip reason (or change the
+# line here in the same patch).
+m2c | bubblewrap user namespaces unavailable on the runner | when=M2C_CI_NO_USERNS
+
+# --- backend ----------------------------------------------------------------
+# Real-Postgres tests (tests/integration/test_*_pg.py).  They need a scratch
+# database with the minime_app role and every migration applied; the hosted
+# runner has no Postgres service in this workflow, so they cannot run here.
+# They are the one large block of tests CI does NOT exercise; run them by hand
+# (README.md, "Real-database tests") before a change that touches SQL.
+backend | MINIME_TEST_DATABASE_URL not set
+# FreeCAD geometry-kernel tests (tests/unit/test_mech_validator.py).  FreeCAD is
+# not pip-installable and is not installed on the runner.
+backend | real FreeCAD install required for geometry-kernel tests

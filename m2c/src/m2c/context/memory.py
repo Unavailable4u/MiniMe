@@ -55,8 +55,8 @@ Detection works on the text after Unicode NFKC normalisation with invisible
 format characters (zero-width spaces ...) removed, so those cannot be used to
 slip a token past the patterns.  It is deliberately simple and errs towards
 refusing: ``password: required`` is refused, which costs the user one rewording.
-C15 (secrets, redaction and environment) will generalise secret detection for
-the whole client; ``find_secrets`` is the one function to replace or extend then.
+C15 (secrets, redaction and environment) generalised secret detection for the
+whole client: ``find_secrets`` now calls the shared detector in ``m2c.secrets``.
 Detection runs again inside ``apply_memory_write``, because a
 ``PreparedMemoryWrite`` is a plain dataclass that a caller could build by hand;
 for the same reason apply re-validates the project key and the target name and
@@ -83,11 +83,11 @@ import os
 import re
 import stat
 import tempfile
-import unicodedata
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
 
+from ..secrets.redact import KIND_TEXT, scan_lines
 from .instructions import (
     NOTE_TRUNCATED,
     REASONS,
@@ -201,80 +201,21 @@ class SecretFinding:
     line: int
 
 
-_I = re.IGNORECASE
-_NAME_TAIL = r"[A-Za-z0-9_.-]*"
-_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("private_key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")),
-    ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
-    ("gitlab_token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}")),
-    ("api_key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}")),
-    ("stripe_key", re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}")),
-    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b")),
-    ("slack_token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
-    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}")),
-    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
-    ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{16,}")),
-    ("authorization_header", re.compile(
-        r"\bAuthorization\s*[:=]\s*[\"']?(?:(?:Bearer|Basic|Token|Digest|Negotiate)\s+\S{8,}"
-        r"|[A-Za-z0-9._~+/=-]{16,})", _I)),
-    ("url_credentials", re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@")),
-)
-_PASSWORD_RE = re.compile(
-    r"(?:passw(?:or)?d|pwd|passphrase)" + _NAME_TAIL + r"\s*[:=]\s*(?P<value>\"[^\"]+\"|'[^']+'|[^\s,;]+)", _I)
-_SECRET_NAME_RE = re.compile(
-    r"(?:secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth[_-]?key|credential)s?" + _NAME_TAIL
-    + r"\s*[:=]\s*[\"']?(?P<value>[A-Za-z0-9+/=_.-]{16,})", _I)
-_ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?[A-Z][A-Z0-9_]+=\S")
-_PLACEHOLDER_RE = re.compile(r"^(?:<.*>|\$\{.*\}|\$\(.*\)|\$[A-Za-z_][A-Za-z0-9_]*|\{\{.*\}\}|%\(.*\)s?|[*x.•]{3,})$", _I)
-
-
-def _normalise_for_scan(text: str) -> str:
-    folded = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
-    return "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
-
-
 def find_secrets(text: str) -> list[SecretFinding]:
     """Everything in ``text`` that looks like a secret, as (kind, line) pairs.
 
-    Never returns or logs the matched text.  Simple and deliberately cautious;
-    C15 (secrets, redaction and environment) will generalise client-wide secret
-    detection and should replace or extend this function.
+    Never returns or logs the matched text.  Patch C15 (secrets, redaction and
+    environment) replaced the small detector that used to live here with the
+    shared one in ``m2c.secrets.redact`` (``scan_lines``, its STRICT profile):
+    same kinds and refusal rules as before, broader coverage (cloud keys, more
+    token prefixes, high-entropy strings next to a credential word), and it fails
+    closed: a detector that breaks yields a ``detector_error`` finding, so the
+    write is refused rather than allowed.
     """
-    found: set[tuple[int, str]] = set()
-    for number, line in enumerate(_normalise_for_scan(text).split("\n"), 1):
-        for kind, pattern in _SECRET_PATTERNS:
-            if pattern.search(line):
-                found.add((number, kind))
-        for match in _PASSWORD_RE.finditer(line):
-            value = match.group("value").strip("\"'")
-            if value and not _PLACEHOLDER_RE.match(value):
-                found.add((number, "password_assignment"))
-        for match in _SECRET_NAME_RE.finditer(line):
-            value = match.group("value")
-            if any(c.isdigit() for c in value) and any(c.isalpha() for c in value):
-                found.add((number, "secret_assignment"))
-        if _ENV_LINE_RE.match(line):
-            found.add((number, "env_line"))
-    return [SecretFinding(kind=kind, line=number) for number, kind in sorted(found)]
+    return [SecretFinding(kind=kind, line=number) for number, kind in scan_lines(text)]
 
 
-_KIND_TEXT = {
-    "private_key": "a private key block",
-    "github_token": "a GitHub access token",
-    "gitlab_token": "a GitLab access token",
-    "api_key": "an API key",
-    "stripe_key": "a Stripe key",
-    "aws_access_key": "an AWS access key ID",
-    "slack_token": "a Slack token",
-    "google_api_key": "a Google API key",
-    "jwt": "a JSON Web Token",
-    "bearer_token": "a Bearer token",
-    "authorization_header": "an Authorization header value",
-    "password_assignment": "a password assignment",
-    "secret_assignment": "a secret, token or API key assignment",
-    "env_line": "a .env style NAME=value line",
-    "url_credentials": "a URL with a user name and password",
-}
+_KIND_TEXT = KIND_TEXT
 
 
 def _refusal_message(findings: tuple[SecretFinding, ...]) -> str:

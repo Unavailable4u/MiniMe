@@ -1,0 +1,751 @@
+diff --git a/.github/scripts/check_skips.py b/.github/scripts/check_skips.py
+new file mode 100644
+index 0000000..bc24060
+--- /dev/null
++++ b/.github/scripts/check_skips.py
+@@ -0,0 +1,179 @@
++#!/usr/bin/env python3
++"""
++.github/scripts/check_skips.py -- Patch Q01: fail a CI job on an unexpected skip.
++
++Why this exists.  pytest reports a skipped test as neither a pass nor a
++failure, so a suite can go green while a whole group of tests quietly stops
++running: the m2c job used to skip 3 schema-validation tests because
++``jsonschema`` was not installed, and would have skipped about 22 grep tests
++on any runner without ripgrep, and nobody would have been told.  This script
++reads the JUnit XML report pytest writes (``--junitxml``), prints every skip
++reason with a count, and exits non-zero unless every reason is on the allow
++list in ``skip-allowlist.txt`` (same directory).
++
++Usage (from a job, after pytest has written its report; the job must still
++run this step when pytest failed or skipped, so use ``if: ${{ !cancelled() }}``):
++
++    python .github/scripts/check_skips.py --scope m2c report.xml [report2.xml ...]
++
++Options:
++    --scope NAME       which allow-list entries apply: "m2c", "backend", or any
++                       name.  Entries whose scope is "*" always apply.
++    --allowlist FILE   default: skip-allowlist.txt next to this script.
++
++Allow-list format (one entry per line, ``#`` starts a comment):
++
++    scope | text that must appear in the skip reason [| when=ENV_VAR]
++
++``when=ENV_VAR`` makes the entry active only while that environment variable is
++exactly "1".  The m2c job uses it for the sandbox entry: the job probes whether
++bubblewrap can create a user namespace on the runner and sets the variable only
++when it cannot, so a sandbox test that skips on a runner where bubblewrap
++works is still a failure.
++
++Exit status:
++    0  every skip is on the list (they are still printed)
++    1  a skip is not on the list, or no test ran at all
++    2  the gate itself could not do its job: a report is missing or is not
++       XML, the allow list is missing or has a line this script does not
++       understand.  Fails closed: if it cannot prove the skips are fine, the
++       job is red.
++
++What counts as a skip: a ``<skipped>`` element of type ``pytest.skip`` (or one
++with no type).  An expected failure (``pytest.xfail``) is also written by
++pytest as ``<skipped>``; it is a deliberate marker, not a test that did not
++run, so it is not counted here.
++
++Standard library only.  Tests: test_check_skips.py (same directory).
++"""
++from __future__ import annotations
++
++import argparse
++import os
++import sys
++import xml.etree.ElementTree as ET
++from collections import Counter
++from collections.abc import Mapping, Sequence
++from dataclasses import dataclass
++from pathlib import Path
++
++DEFAULT_ALLOWLIST = Path(__file__).resolve().parent / "skip-allowlist.txt"
++
++EXIT_OK, EXIT_UNEXPECTED, EXIT_BROKEN = 0, 1, 2
++
++
++class GateError(Exception):
++    """The gate cannot do its job (exit 2); the message says what to fix."""
++
++
++@dataclass(frozen=True)
++class Entry:
++    scope: str
++    match: str
++    when: str | None = None
++
++
++def load_allowlist(path: Path) -> list[Entry]:
++    try:
++        lines = Path(path).read_text(encoding="utf-8").splitlines()
++    except OSError as exc:
++        raise GateError(f"cannot read the allow list {path}: {exc}") from exc
++    entries: list[Entry] = []
++    for number, raw in enumerate(lines, start=1):
++        line = raw.split("#", 1)[0].strip()
++        if not line:
++            continue
++        where = f"{path}:{number}"
++        fields = [f.strip() for f in line.split("|")]
++        if len(fields) not in (2, 3):
++            raise GateError(f"{where}: expected 'scope | reason text [| when=ENV_VAR]', got {raw.strip()!r}")
++        scope, match = fields[0], fields[1]
++        if not scope or not match:
++            raise GateError(f"{where}: both the scope and the reason text are required")
++        when = None
++        if len(fields) == 3:
++            key, _, var = fields[2].partition("=")
++            if key != "when" or not var.strip():
++                raise GateError(f"{where}: the optional third field must be 'when=ENV_VAR', got {fields[2]!r}")
++            when = var.strip()
++        entries.append(Entry(scope=scope, match=match, when=when))
++    return entries
++
++
++def read_skips(report: Path) -> tuple[int, Counter]:
++    """Return (number of test cases, Counter of skip reasons) for one report."""
++    try:
++        root = ET.parse(report).getroot()
++    except (OSError, ET.ParseError) as exc:
++        raise GateError(f"cannot read the JUnit report {report}: {exc}") from exc
++    total = 0
++    reasons: Counter = Counter()
++    for case in root.iter("testcase"):
++        total += 1
++        for skipped in case.findall("skipped"):
++            if skipped.get("type", "pytest.skip") == "pytest.xfail":
++                continue
++            reasons[(skipped.get("message") or (skipped.text or "")).strip() or "(no reason given)"] += 1
++    return total, reasons
++
++
++def is_allowed(reason: str, entries: Sequence[Entry], scope: str, environ: Mapping[str, str]) -> Entry | None:
++    for entry in entries:
++        if entry.scope not in ("*", scope):
++            continue
++        if entry.when is not None and environ.get(entry.when) != "1":
++            continue
++        if entry.match in reason:
++            return entry
++    return None
++
++
++def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
++    environ = os.environ if environ is None else environ
++    ap = argparse.ArgumentParser(description="Fail when pytest skipped a test for a reason that is not allow-listed.")
++    ap.add_argument("reports", nargs="+", type=Path, help="JUnit XML file(s) written by pytest --junitxml")
++    ap.add_argument("--scope", required=True, help='allow-list scope for this job, e.g. "m2c" or "backend"')
++    ap.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST)
++    args = ap.parse_args(argv)
++
++    try:
++        entries = load_allowlist(args.allowlist)
++        total, reasons = 0, Counter()
++        for report in args.reports:
++            n, r = read_skips(report)
++            total += n
++            reasons.update(r)
++    except GateError as exc:
++        print(f"::error title=skip gate::{exc}")
++        print(f"skip gate: {exc}")
++        return EXIT_BROKEN
++
++    skipped = sum(reasons.values())
++    print(f"skip gate [{args.scope}]: {total} test cases, {skipped} skipped")
++    if total == 0:
++        print("::error title=skip gate::no tests ran: pytest collected nothing, so nothing was checked")
++        print("skip gate: no tests ran at all")
++        return EXIT_UNEXPECTED
++
++    unexpected = 0
++    for reason, count in reasons.most_common():
++        entry = is_allowed(reason, entries, args.scope, environ)
++        if entry is not None:
++            print(f"  allowed     {count} x {reason}")
++        else:
++            unexpected += count
++            print(f"  NOT ALLOWED {count} x {reason}")
++            # One annotation per distinct reason (not per test) so the run summary stays readable.
++            print(f"::error title=unexpected skip::{count} test(s) skipped: {reason}")
++    if unexpected:
++        print(
++            f"skip gate: {unexpected} test(s) were skipped for a reason that is not allow-listed. "
++            f"Fix the cause (install the tool, set the variable), or, if the skip is legitimate here, add the reason "
++            f"to {args.allowlist.name} with a comment saying why."
++        )
++        return EXIT_UNEXPECTED
++    return EXIT_OK
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/.github/scripts/skip-allowlist.txt b/.github/scripts/skip-allowlist.txt
+new file mode 100644
+index 0000000..03d2b09
+--- /dev/null
++++ b/.github/scripts/skip-allowlist.txt
+@@ -0,0 +1,42 @@
++# .github/scripts/skip-allowlist.txt -- Patch Q01.
++#
++# The ONLY reasons a CI test may be skipped.  check_skips.py reads the JUnit
++# report of each test job and fails the job for any skip whose reason is not
++# matched here.  Keep this list short: every line is a hole in the safety net,
++# so every line says why it is acceptable, and "install the tool in the job"
++# is always preferred to adding a line.
++#
++# Format (see check_skips.py):   scope | text found in the skip reason [| when=ENV_VAR]
++#   scope     m2c, backend, protocol, or * for every job
++#   when=VAR  the entry is active only while environment variable VAR is "1"
++#
++# Deliberately NOT here, because the jobs install what those tests need and a
++# skip for them means the install broke:
++#   - ripgrep / "rg"             (m2c job: apt install ripgrep)
++#   - jsonschema                 (m2c job: pinned from protocol/requirements.txt;
++#                                 backend job: pinned in requirements.txt; the
++#                                 protocol job: protocol/requirements.txt)
++#   - "root ignores file permissions" (the hosted runner is not root; a root
++#                                 runner would silently drop the permission tests)
++
++# --- m2c --------------------------------------------------------------------
++# The real sandbox tests (WP C11a) need bubblewrap to create a user namespace.
++# The m2c job probes this on the runner and sets M2C_CI_NO_USERNS=1 only when it
++# is NOT possible (Ubuntu 24.04 restricts unprivileged user namespaces through
++# AppArmor; the probe step tries to lift that first).  So this entry can only
++# excuse the skip on a runner where the sandbox really cannot work: if
++# bubblewrap works there and a sandbox test still skips, the job fails.
++# C11a's tests must use exactly this wording as their skip reason (or change the
++# line here in the same patch).
++m2c | bubblewrap user namespaces unavailable on the runner | when=M2C_CI_NO_USERNS
++
++# --- backend ----------------------------------------------------------------
++# Real-Postgres tests (tests/integration/test_*_pg.py).  They need a scratch
++# database with the minime_app role and every migration applied; the hosted
++# runner has no Postgres service in this workflow, so they cannot run here.
++# They are the one large block of tests CI does NOT exercise; run them by hand
++# (README.md, "Real-database tests") before a change that touches SQL.
++backend | MINIME_TEST_DATABASE_URL not set
++# FreeCAD geometry-kernel tests (tests/unit/test_mech_validator.py).  FreeCAD is
++# not pip-installable and is not installed on the runner.
++backend | real FreeCAD install required for geometry-kernel tests
+diff --git a/.github/scripts/test_check_skips.py b/.github/scripts/test_check_skips.py
+new file mode 100644
+index 0000000..fac38bd
+--- /dev/null
++++ b/.github/scripts/test_check_skips.py
+@@ -0,0 +1,270 @@
++"""
++.github/scripts/test_check_skips.py -- Patch Q01: tests for the skip gate.
++
++check_skips.py is the CI step that turns "a test was skipped" from something a
++person has to notice in a log into something that fails the job unless the
++reason is on the allow list kept next to it (skip-allowlist.txt).  A gate that
++can never fail is worse than no gate, so these tests pin the behaviour that
++matters: an unlisted reason FAILS, and so does every input that would let a
++problem pass quietly (a missing or unreadable report, a run in which no test
++ran at all, an allow-list line the script cannot understand).
++
++Standard library only, so it runs under the plain interpreter of any CI job:
++
++    python -m pytest .github/scripts -q          (from the repository root)
++
++Nothing here builds a secret-shaped string; every value is plain prose.
++"""
++from __future__ import annotations
++
++import importlib.util
++import sys
++import textwrap
++from pathlib import Path
++
++import pytest
++
++HERE = Path(__file__).resolve().parent
++_spec = importlib.util.spec_from_file_location("check_skips", HERE / "check_skips.py")
++check_skips = importlib.util.module_from_spec(_spec)
++sys.modules["check_skips"] = check_skips
++_spec.loader.exec_module(check_skips)
++
++
++# --------------------------------------------------------------------------
++# helpers
++# --------------------------------------------------------------------------
++def junit(tmp_path: Path, cases: list[tuple[str, str | None, str]], name: str = "report.xml") -> Path:
++    """Write a JUnit report shaped like pytest's.
++
++    ``cases`` is [(test name, skip reason or None, skip type)]; a reason of
++    None means the test passed.  Skip type is pytest's own: "pytest.skip" for a
++    real skip, "pytest.xfail" for an expected failure (which pytest also writes
++    as a <skipped> element).
++    """
++    rows = []
++    for test, reason, kind in cases:
++        if reason is None:
++            rows.append(f'<testcase classname="t" name="{test}"/>')
++        else:
++            rows.append(
++                f'<testcase classname="t" name="{test}">'
++                f'<skipped type="{kind}" message="{reason}">tests/x.py:1: {reason}</skipped>'
++                f"</testcase>"
++            )
++    path = tmp_path / name
++    path.write_text(
++        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest">'
++        + "".join(rows)
++        + "</testsuite></testsuites>",
++        encoding="utf-8",
++    )
++    return path
++
++
++def allowlist(tmp_path: Path, body: str) -> Path:
++    path = tmp_path / "allow.txt"
++    path.write_text(textwrap.dedent(body), encoding="utf-8")
++    return path
++
++
++def run(tmp_path, cases, allow_body, scope="m2c", env=None, capsys=None):
++    report = junit(tmp_path, cases)
++    allow = allowlist(tmp_path, allow_body)
++    argv = ["--scope", scope, "--allowlist", str(allow), str(report)]
++    code = check_skips.main(argv, environ=env or {})
++    out = capsys.readouterr() if capsys is not None else None
++    return code, out
++
++
++# --------------------------------------------------------------------------
++# the gate itself
++# --------------------------------------------------------------------------
++def test_a_run_with_no_skips_passes(tmp_path, capsys):
++    code, out = run(tmp_path, [("a", None, ""), ("b", None, "")], "", capsys=capsys)
++    assert code == 0
++    assert "0 skipped" in out.out
++
++
++def test_a_skip_that_is_not_on_the_list_fails_and_names_its_reason(tmp_path, capsys):
++    cases = [("a", None, ""), ("b", "ripgrep (rg) is not installed", "pytest.skip")]
++    code, out = run(tmp_path, cases, "", capsys=capsys)
++    assert code == 1
++    assert "ripgrep (rg) is not installed" in out.out
++    assert "::error" in out.out  # a GitHub annotation, so it shows on the run summary
++
++
++def test_a_listed_skip_passes_but_is_still_printed(tmp_path, capsys):
++    code, out = run(
++        tmp_path,
++        [("a", None, ""), ("b", "bubblewrap user namespaces unavailable on the runner", "pytest.skip")],
++        "m2c | bubblewrap user namespaces unavailable on the runner\n",
++        capsys=capsys,
++    )
++    assert code == 0
++    assert "bubblewrap user namespaces unavailable on the runner" in out.out
++    assert "allowed" in out.out
++
++
++def test_a_listed_reason_is_matched_as_a_substring_of_the_real_one(tmp_path, capsys):
++    code, _ = run(
++        tmp_path,
++        [("a", "/usr/share/foo does not exist here", "pytest.skip")],
++        "m2c | does not exist here\n",
++        capsys=capsys,
++    )
++    assert code == 0
++
++
++def test_one_unlisted_reason_among_listed_ones_still_fails(tmp_path, capsys):
++    code, out = run(
++        tmp_path,
++        [("a", "listed reason", "pytest.skip"), ("b", "some new reason", "pytest.skip")],
++        "m2c | listed reason\n",
++        capsys=capsys,
++    )
++    assert code == 1
++    assert "some new reason" in out.out
++
++
++def test_an_expected_failure_is_not_a_skip(tmp_path, capsys):
++    code, _ = run(tmp_path, [("a", None, ""), ("b", "known bug", "pytest.xfail")], "", capsys=capsys)
++    assert code == 0
++
++
++def test_several_skips_with_one_reason_are_counted_together(tmp_path, capsys):
++    code, out = run(
++        tmp_path,
++        [("a", "same reason", "pytest.skip"), ("b", "same reason", "pytest.skip"), ("c", None, "")],
++        "",
++        capsys=capsys,
++    )
++    assert code == 1
++    assert "2 x" in out.out or "2 tests" in out.out
++
++
++# --------------------------------------------------------------------------
++# scope and conditions
++# --------------------------------------------------------------------------
++def test_an_entry_for_another_scope_does_not_apply(tmp_path, capsys):
++    code, _ = run(
++        tmp_path,
++        [("a", "needs a database", "pytest.skip")],
++        "backend | needs a database\n",
++        scope="m2c",
++        capsys=capsys,
++    )
++    assert code == 1
++
++
++def test_a_star_scope_applies_everywhere(tmp_path, capsys):
++    cases = [("a", "everywhere reason", "pytest.skip")]
++    code, _ = run(tmp_path, cases, "* | everywhere reason\n", scope="m2c", capsys=capsys)
++    assert code == 0
++
++
++def test_a_conditional_entry_is_ignored_when_its_variable_is_not_set(tmp_path, capsys):
++    body = "m2c | no user namespaces | when=M2C_CI_NO_USERNS\n"
++    code, _ = run(tmp_path, [("a", "no user namespaces", "pytest.skip")], body, env={}, capsys=capsys)
++    assert code == 1
++
++
++def test_a_conditional_entry_applies_when_its_variable_is_1(tmp_path, capsys):
++    body = "m2c | no user namespaces | when=M2C_CI_NO_USERNS\n"
++    code, _ = run(
++        tmp_path, [("a", "no user namespaces", "pytest.skip")], body, env={"M2C_CI_NO_USERNS": "1"}, capsys=capsys
++    )
++    assert code == 0
++
++
++@pytest.mark.parametrize("value", ["", "0", "true", "yes"])
++def test_a_conditional_entry_needs_exactly_1(tmp_path, capsys, value):
++    body = "m2c | no user namespaces | when=M2C_CI_NO_USERNS\n"
++    code, _ = run(
++        tmp_path, [("a", "no user namespaces", "pytest.skip")], body, env={"M2C_CI_NO_USERNS": value}, capsys=capsys
++    )
++    assert code == 1
++
++
++# --------------------------------------------------------------------------
++# fail closed
++# --------------------------------------------------------------------------
++def test_a_missing_report_fails(tmp_path, capsys):
++    allow = allowlist(tmp_path, "")
++    code = check_skips.main(["--scope", "m2c", "--allowlist", str(allow), str(tmp_path / "nope.xml")], environ={})
++    assert code == 2
++    assert "nope.xml" in capsys.readouterr().out
++
++
++def test_an_unreadable_report_fails(tmp_path, capsys):
++    bad = tmp_path / "bad.xml"
++    bad.write_text("this is not xml", encoding="utf-8")
++    allow = allowlist(tmp_path, "")
++    assert check_skips.main(["--scope", "m2c", "--allowlist", str(allow), str(bad)], environ={}) == 2
++
++
++def test_a_run_in_which_no_test_ran_fails(tmp_path, capsys):
++    code, out = run(tmp_path, [], "", capsys=capsys)
++    assert code == 1
++    assert "no tests" in out.out.lower()
++
++
++def test_a_missing_allow_list_fails(tmp_path, capsys):
++    report = junit(tmp_path, [("a", None, "")])
++    code = check_skips.main(["--scope", "m2c", "--allowlist", str(tmp_path / "nope.txt"), str(report)], environ={})
++    assert code == 2
++
++
++@pytest.mark.parametrize(
++    "line",
++    [
++        "just a reason with no scope",
++        "m2c |",
++        "m2c |    ",
++        " | reason with no scope",
++        "m2c | reason | when=",
++        "m2c | reason | unless=SOMETHING",
++        "m2c | reason | when=A | extra field",
++    ],
++)
++def test_a_malformed_allow_list_line_fails_instead_of_being_ignored(tmp_path, capsys, line):
++    report = junit(tmp_path, [("a", None, "")])
++    allow = allowlist(tmp_path, line + "\n")
++    assert check_skips.main(["--scope", "m2c", "--allowlist", str(allow), str(report)], environ={}) == 2
++
++
++def test_comments_and_blank_lines_in_the_allow_list_are_ignored(tmp_path, capsys):
++    body = """
++        # a comment
++
++        m2c | listed reason   # why it is fine
++    """
++    code, _ = run(tmp_path, [("a", "listed reason", "pytest.skip")], body, capsys=capsys)
++    assert code == 0
++
++
++def test_several_reports_are_read_together(tmp_path, capsys):
++    one = junit(tmp_path, [("a", None, "")], name="one.xml")
++    two = junit(tmp_path, [("b", "unlisted", "pytest.skip")], name="two.xml")
++    allow = allowlist(tmp_path, "")
++    code = check_skips.main(["--scope", "m2c", "--allowlist", str(allow), str(one), str(two)], environ={})
++    assert code == 1
++
++
++# --------------------------------------------------------------------------
++# the real allow list
++# --------------------------------------------------------------------------
++def test_the_real_allow_list_parses_and_stays_short():
++    entries = check_skips.load_allowlist(HERE / "skip-allowlist.txt")
++    assert 1 <= len(entries) <= 6, "the allow list is meant to stay short; justify each entry in its comment"
++    for entry in entries:
++        assert entry.match.strip()
++        assert entry.scope in {"m2c", "backend", "protocol", "*"}
++
++
++def test_the_real_allow_list_does_not_allow_the_skips_this_patch_exists_to_remove():
++    """ripgrep and jsonschema are installed by the job, so skipping for them is a failure."""
++    entries = check_skips.load_allowlist(HERE / "skip-allowlist.txt")
++    for entry in entries:
++        for banned in ("ripgrep", "jsonschema", "protocol/requirements.txt"):
++            assert banned not in entry.match
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 22fac57..ebcf2d7 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -20,7 +20,34 @@ permissions:
+ 
+ jobs:
+   test:
++    # Q01 -- one pytest run over tests/unit, tests/integration AND tests/static.
++    #
++    #   - The codeagent tests (tests/unit/test_codeagent_*.py, the run-manager,
++    #     router, loop, broker, wiring and socket tests, plus the *_pg files in
++    #     tests/integration) live in unit/ and integration/, so they were always
++    #     collected here. What was missing was tests/static (SQL-vs-grants, the
++    #     logging AST checks, the protocol-at-runtime test, the call-site
++    #     inventories): it is not in backend/pytest.ini's default testpaths, so
++    #     it only ever ran by hand. It needs no database and no network
++    #     (verified: 120 passed, 0 skipped, with no proxy and no DATABASE_URL).
++    #   - Python stays 3.11 here (the version this job always used; the floor
++    #     requirements.txt installs on, and backend/pyproject.toml's ruff
++    #     target). The m2c client is the package that is matrixed. Note that
++    #     backend.Dockerfile builds on python:3.12-slim, so the version the
++    #     backend ships on is not the one this job tests; adding "3.12" is a
++    #     one-line matrix change if that gap should be closed.
++    #   - Many codeagent test modules start with pytest.importorskip("jsonschema").
++    #     They run here only because requirements.txt pins jsonschema; if that pin
++    #     were ever dropped they would all skip and the job would stay green.
++    #     The skip gate below turns that into a failure. Its allow list (see
++    #     .github/scripts/skip-allowlist.txt) holds the two skips this runner
++    #     cannot avoid: the real-Postgres tests (no database service here) and
++    #     the FreeCAD tests (FreeCAD is not installed).
++    #   - permissions narrowed to contents: read for this job: nothing here
++    #     needs the workflow-level security-events: write.
+     runs-on: ubuntu-latest
++    permissions:
++      contents: read
+     defaults:
+       run:
+         working-directory: backend
+@@ -29,7 +56,12 @@ jobs:
+       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+         with: { python-version: "3.11" }
+       - run: pip install -r requirements.txt
+-      - run: pytest tests/unit tests/integration -v
++      - name: Backend tests (unit, integration, static)
++        run: pytest tests/unit tests/integration tests/static -v -rs --junitxml="$RUNNER_TEMP/backend-junit.xml"
++      - name: Skip gate (backend)
++        # Runs even when the tests failed, so the skip list is in the log too.
++        if: ${{ !cancelled() }}
++        run: python ../.github/scripts/check_skips.py --scope backend "$RUNNER_TEMP/backend-junit.xml"
+   lint:
+     runs-on: ubuntu-latest
+     defaults:
+@@ -89,24 +121,110 @@ jobs:
+     # directory for every test, so nothing here touches the runner's real
+     # home.
+     #
+-    # Blocking (no continue-on-error), same reasoning as daemon-test: a
+-    # small deterministic unit-test suite in which every environment probe is
+-    # mocked, so the runner needs no ripgrep or bubblewrap. `m2c --version`
+-    # is a smoke test that the console entry point was generated and runs.
+-    # `m2c doctor` is deliberately NOT run here: its exit status depends on
+-    # which tools the runner image happens to ship, not on this code.
++    # Still blocking (no continue-on-error), same reasoning as daemon-test: a
++    # deterministic unit-test suite, so a failure means the code is broken.
++    #
++    # Q01 -- what changed, and why (the paragraphs above are C01's, kept for
++    # the history of the job; where they say the runner needs no ripgrep or
++    # bubblewrap, or that `m2c doctor` is deliberately not run, Q01 reverses
++    # that, as explained below):
++    #
++    #   * Python matrix 3.11 (the package's floor, decision D1) and 3.14 (the
++    #     newest, what the maintainer's WSL runs). fail-fast is off so one
++    #     version's failure does not hide the other's result. NOTE: a matrix
++    #     renames the checks to "m2c-test (3.11)" / "m2c-test (3.14)"; a branch
++    #     protection rule that requires the old name "m2c-test" must be updated.
++    #
++    #   * ripgrep and bubblewrap are installed. The suite was NOT hermetic about
++    #     them after all: about 22 grep tests skip without a real `rg`, and the
++    #     real sandbox tests (C11a) skip without a working `bwrap`. A runner
++    #     that "needs no ripgrep" was a runner that quietly ran fewer tests.
++    #
++    #   * jsonschema (3 tests: tests/link/test_link_deps.py, test_link_requests.py,
++    #     tests/context/test_context_assemble.py) was never installed here, so
++    #     those tests were skipped on every run. It is installed from the pins
++    #     in protocol/requirements.txt (only the schema libraries, not the whole
++    #     file: that file also pins pytest 9.1.1, which would fight this
++    #     package's pytest 8.4.1).
++    #
++    #   * Skips are visible and bounded: pytest -rs prints each reason, and
++    #     .github/scripts/check_skips.py fails the job for any skip whose reason
++    #     is not in .github/scripts/skip-allowlist.txt.
++    #
++    #   * Can the hosted runner run the real sandbox tests? Unknown until the
++    #     first run, and it can change with the runner image. Ubuntu 24.04
++    #     restricts unprivileged user namespaces through AppArmor, which makes
++    #     bubblewrap fail with "setting up uid map: Permission denied". The
++    #     probe step tries bubblewrap as the tests will, lifts that restriction
++    #     with sysctl on this throw-away VM if needed, and only if bubblewrap
++    #     still cannot start sets M2C_CI_NO_USERNS=1, the one thing that lets the
++    #     allow list excuse the sandbox tests' skip. The probe never fails the
++    #     job by itself; it prints the image, the kernel and the outcome.
++    #
++    #   * `m2c doctor` now runs. Its exit status is 1 only for a HARD failure
++    #     (OS, Python, git, ripgrep, config directory), and every one of those is
++    #     under this job's control: Linux, the matrix Python, git preinstalled,
++    #     ripgrep installed above, a config directory in the runner's temp dir.
++    #     So a non-zero exit here is a real regression in doctor (or a broken
++    #     runner), not "which tools the image happens to ship", which is why it
++    #     is not allowed to fail silently (no `|| true`). bubblewrap is only a
++    #     WARN in doctor and only checks the program is on PATH; whether it can
++    #     actually start is the probe step's job, not doctor's.
+     runs-on: ubuntu-latest
+-    timeout-minutes: 10
++    timeout-minutes: 15
++    permissions:
++      contents: read
++    strategy:
++      fail-fast: false
++      matrix:
++        python-version: ["3.11", "3.14"]
+     defaults:
+       run:
+         working-directory: m2c
+     steps:
+       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+-        with: { python-version: "3.11" }
++        with: { python-version: "${{ matrix.python-version }}" }
++      - name: Install ripgrep and bubblewrap (the tests that use the real tools skip without them)
++        run: |
++          sudo apt-get update -qq
++          sudo apt-get install -y --no-install-recommends ripgrep bubblewrap
++          rg --version | head -n 1
++          bwrap --version
++      - name: Probe whether bubblewrap can start on this runner
++        run: |
++          . /etc/os-release
++          echo "runner image: ${PRETTY_NAME}; kernel: $(uname -r)"
++          probe() { bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev true; }
++          if probe; then
++            echo "bubblewrap user namespaces: available"
++            exit 0
++          fi
++          echo "::notice title=sandbox::bubblewrap could not start; trying to lift Ubuntu's AppArmor user-namespace restriction (this VM is discarded after the job)"
++          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
++          if probe; then
++            echo "bubblewrap user namespaces: available after lifting the AppArmor restriction"
++            exit 0
++          fi
++          echo "::warning title=sandbox::bubblewrap cannot create a user namespace on this runner: the real sandbox tests cannot run here, and the skip gate will allow exactly that skip"
++          echo "M2C_CI_NO_USERNS=1" >> "$GITHUB_ENV"
+       - run: pip install -e ".[dev]"
+-      - run: pytest -v
++      - name: Install the protocol schema libraries (jsonschema), pinned from protocol/requirements.txt
++        run: |
++          grep -E '^(jsonschema|jsonschema-specifications|referencing|rpds-py|attrs|typing_extensions)==' ../protocol/requirements.txt > "$RUNNER_TEMP/schema-requirements.txt"
++          cat "$RUNNER_TEMP/schema-requirements.txt"
++          pip install -r "$RUNNER_TEMP/schema-requirements.txt"
++      - name: Tests
++        run: pytest -v -rs --junitxml="$RUNNER_TEMP/m2c-junit.xml"
++      - name: Skip gate (m2c)
++        # Runs even when the tests failed, so the skip list is in the log too.
++        if: ${{ !cancelled() }}
++        run: python ../.github/scripts/check_skips.py --scope m2c "$RUNNER_TEMP/m2c-junit.xml"
+       - run: m2c --version
++      - name: m2c doctor
++        env:
++          M2C_HOME: ${{ runner.temp }}/m2c-home
++        run: m2c doctor
+   frontend-lint:
+     # Was entirely unwired: package.json's own "lint" script (`next lint`)
+     # existed but nothing in CI ever called it, and it wasn't even
+@@ -184,16 +302,46 @@ jobs:
+     # (passes vacuously until then). Step 2 is the pytest suite built on the
+     # same functions. Blocking, like test/lint: a failure means the contract
+     # that client and server are built against is broken.
++    #
++    # Q01 -- two additions, and one finding:
++    #   * Finding: step 1 (`validate.py` with no flag) ALREADY runs the client-copy
++    #     comparison as its fourth check. But that check passes vacuously when
++    #     m2c/src/m2c/protocol/v1 does not exist ("not created yet: nothing to
++    #     compare"), which was right while C01 was in flight and is now a hole: a
++    #     deleted or moved copy would pass. The "Client copy" step below names the
++    #     check on its own line in the run log and refuses the vacuous pass.
++    #   * The contract test now writes a JUnit report and goes through the skip
++    #     gate with an EMPTY allow list for this scope: every test here must run.
++    #     (The contract test skips itself if the m2c/ package is missing, and
++    #     importorskips jsonschema; either would otherwise be a silent skip.)
++    #   * The skip gate has its own unit tests (.github/scripts/test_check_skips.py,
++    #     standard library + pytest). They run here, before the gate is used by
++    #     this job, because this job already has pytest and is the cheapest place.
+     runs-on: ubuntu-latest
+     timeout-minutes: 10
++    permissions:
++      contents: read
+     steps:
+       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+         with: { python-version: "3.11" }
+       - run: pip install -r protocol/requirements.txt
+       - run: python protocol/validate.py
+-      - run: pytest tests/unit/test_protocol_contract.py --noconftest -v
++      - name: Client copy of the schemas exists and is current
++        run: |
++          if [ ! -d m2c/src/m2c/protocol/v1 ]; then
++            echo "::error title=protocol::m2c/src/m2c/protocol/v1 is missing; validate.py would pass vacuously. Run: python protocol/validate.py --sync-client"
++            exit 1
++          fi
++          python protocol/validate.py --check-client-copy
++      - name: Contract test
++        run: pytest tests/unit/test_protocol_contract.py --noconftest -v -rs --junitxml="$RUNNER_TEMP/protocol-junit.xml"
+         working-directory: backend
++      - name: Test the skip gate itself
++        run: python -m pytest .github/scripts -q
++      - name: Skip gate (protocol)
++        if: ${{ !cancelled() }}
++        run: python .github/scripts/check_skips.py --scope protocol "$RUNNER_TEMP/protocol-junit.xml"
+   secrets-scan:
+     runs-on: ubuntu-latest
+     steps:
+diff --git a/README.md b/README.md
+index efecc07..d62f9c9 100644
+--- a/README.md
++++ b/README.md
+@@ -57,6 +57,16 @@ pytest tests/static -v                   # not in pytest.ini's default testpaths
+ pytest tests/unit tests/integration -v   # real-database tests are skipped unless set up below
+ ```
+ 
++**What CI runs.** On every push and pull request `.github/workflows/ci.yml` runs
++all three of those directories in one backend job (Python 3.11), the m2c client
++tests on Python 3.11 and 3.14 with ripgrep and bubblewrap installed, and the
++protocol checks, including that the client's copy of the schemas is current. A
++skipped test no longer passes silently: each test job writes a JUnit report and
++`.github/scripts/check_skips.py` fails the job for any skip whose reason is not in
++`.github/scripts/skip-allowlist.txt` (a short list, each line explaining why).
++The real-Postgres tests below and the FreeCAD tests are on that list, so CI does
++not run them: run them by hand before a change that touches SQL.
++
+ **SQL-versus-grants check (no database needed).**
+ `backend/tests/static/test_sql_grants.py` replays `backend/migrations/*.sql` in
+ order to work out what the app role (`minime_app`) may do to each table, reads

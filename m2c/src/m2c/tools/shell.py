@@ -107,8 +107,10 @@ with ``AWS_``, ``AZURE_``, ``GOOGLE_``, ``GCP_``, ``GCLOUD_``, ``M2C_`` or
 ``KUBECONFIG``, ``DATABASE_URL``, ``BASH_ENV`` or ``ENV``.  ``ShellConfig.
 extra_strip_names`` adds names (exact, or ``PREFIX*``).  ``PATH`` and ``HOME`` are
 always kept.  Then ``TERM=dumb``, ``NO_COLOR=1``, ``PAGER=cat``, ``GIT_PAGER=cat``
-and ``GIT_TERMINAL_PROMPT=0`` are set.  A project cannot name exceptions here;
-per-project exceptions are C15's.  This is hygiene against accidental secret
+and ``GIT_TERMINAL_PROMPT=0`` are set.  Patch C15 moved these rules into
+``m2c.secrets.env`` as their floor and added more deny patterns, a value scan and
+NAMED per-project exceptions that only the person's own user settings can grant (a
+project file cannot).  This is hygiene against accidental secret
 inheritance, not a boundary: the command can still read files that hold secrets
 (``~/.aws/credentials``), which is what the sandbox is for.
 
@@ -145,6 +147,7 @@ from typing import Any, Callable, Mapping
 
 from ..logging_setup import log_event
 from ..policy.decide import Request, decide
+from ..secrets.env import granted_names, sanitize_environment
 from .paths import ToolError
 
 __all__ = [
@@ -333,41 +336,17 @@ def _warn_once(context: Any, cfg: ShellConfig) -> None:
 # ---------------------------------------------------------------------------
 # The environment
 # ---------------------------------------------------------------------------
-_STRIP_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
-_STRIP_PREFIXES = ("AWS_", "AZURE_", "GOOGLE_", "GCP_", "GCLOUD_", "M2C_", "BASH_FUNC_")
-_STRIP_NAMES = frozenset({"SSH_AUTH_SOCK", "KUBECONFIG", "DATABASE_URL", "BASH_ENV", "ENV"})
-_KEEP_NAMES = frozenset({"PATH", "HOME"})
-_FORCED = {"TERM": "dumb", "NO_COLOR": "1", "PAGER": "cat", "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0"}
-
-
-def sanitized_env(environ: Mapping[str, str], extra: Any = ()) -> dict[str, str]:
+# Patch C15: the rules live in m2c.secrets.env now (C07's own rules are its floor there, unchanged: nothing C07 stripped
+# comes back unless the person named it for this project in their own user settings).  This function stays the name the
+# shell tool and its tests know; ``keep`` is the project's named grants (``secrets.env.granted_names``).
+def sanitized_env(environ: Mapping[str, str], extra: Any = (), *, keep: Any = ()) -> dict[str, str]:
     """The environment a command gets: ``environ`` minus credentials, plus the fixed terminal settings.
 
-    See the module docstring for the rules.  ``extra`` is a sequence of names (exact, or ending in ``*`` for a
-    prefix), matched case-insensitively.  ``PATH`` and ``HOME`` are never removed; a ``PATH`` is added if there is none.
+    See the module docstring and ``m2c.secrets.env`` for the rules.  ``extra`` is a sequence of names (exact, or ending
+    in ``*`` for a prefix), matched case-insensitively.  ``PATH`` and ``HOME`` are never removed; a ``PATH`` is added if
+    there is none.
     """
-    exact, prefixes = set(), []
-    for name in _normalize_names(tuple(extra)):
-        if name.endswith("*"):
-            prefixes.append(name.rstrip("*"))
-        else:
-            exact.add(name)
-    prefix_tuple = _STRIP_PREFIXES + tuple(prefixes)
-    out: dict[str, str] = {}
-    for name, value in environ.items():
-        if not isinstance(name, str) or not isinstance(value, str):
-            continue
-        upper = name.upper()
-        if upper not in _KEEP_NAMES and (
-            upper in _STRIP_NAMES or upper in exact or upper.startswith(prefix_tuple)
-            or any(s in upper for s in _STRIP_SUBSTRINGS)
-        ):
-            continue
-        out[name] = value
-    out.update(_FORCED)
-    if not out.get("PATH"):
-        out["PATH"] = _DEFAULT_PATH
-    return out
+    return sanitize_environment(environ, _normalize_names(tuple(extra)), keep=keep)
 
 
 def _find_shell(env: Mapping[str, str]) -> str | None:
@@ -687,7 +666,7 @@ def _execute(context: Any, command: str, timeout_s: int, cfg: ShellConfig, cance
         raise ToolError("the project directory no longer exists", code="not_found")
     if _is_cancelled(cancel):
         return ToolOutcome("[cancelled before the command started]", False, False, SHELL_TRUST, None, "cancelled")
-    env = sanitized_env(os.environ, cfg.extra_strip_names)
+    env = sanitized_env(os.environ, cfg.extra_strip_names, keep=granted_names(root))
     shell_path = _find_shell(env)
     if shell_path is None:
         raise ToolError("no shell (bash or sh) was found", code="io_error")

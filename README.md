@@ -57,6 +57,16 @@ pytest tests/static -v                   # not in pytest.ini's default testpaths
 pytest tests/unit tests/integration -v   # real-database tests are skipped unless set up below
 ```
 
+**What CI runs.** On every push and pull request `.github/workflows/ci.yml` runs
+all three of those directories in one backend job (Python 3.11), the m2c client
+tests on Python 3.11 and 3.14 with ripgrep and bubblewrap installed, and the
+protocol checks, including that the client's copy of the schemas is current. A
+skipped test no longer passes silently: each test job writes a JUnit report and
+`.github/scripts/check_skips.py` fails the job for any skip whose reason is not in
+`.github/scripts/skip-allowlist.txt` (a short list, each line explaining why).
+The real-Postgres tests below and the FreeCAD tests are on that list, so CI does
+not run them: run them by hand before a change that touches SQL.
+
 **SQL-versus-grants check (no database needed).**
 `backend/tests/static/test_sql_grants.py` replays `backend/migrations/*.sql` in
 order to work out what the app role (`minime_app`) may do to each table, reads

@@ -83,6 +83,12 @@ def replay(name):
                 await drive_client(link, rec, srv, group, run_id)
             await until(lambda: len(srv.connections) == len(groups)
                         and all(c.script_done for c in srv.connections), what="the transcript to finish")
+            # The fake server finishing its script only means it SENT the last events. Wait until the
+            # client has received and stored them too, or a loaded machine (a 2-core CI runner) closes
+            # the link first and the store is a few events short.
+            last_seq = stream_lines(lines)[-1]["seq"]
+            await until(lambda: (info := link.run_info(run_id)) is not None and info.last_seq >= last_seq,
+                        what="the client to take in the whole stream")
             await link.aclose()
             return srv, rec, link
 

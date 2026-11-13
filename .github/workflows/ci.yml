@@ -20,7 +20,34 @@ permissions:
 
 jobs:
   test:
+    # Q01 -- one pytest run over tests/unit, tests/integration AND tests/static.
+    #
+    #   - The codeagent tests (tests/unit/test_codeagent_*.py, the run-manager,
+    #     router, loop, broker, wiring and socket tests, plus the *_pg files in
+    #     tests/integration) live in unit/ and integration/, so they were always
+    #     collected here. What was missing was tests/static (SQL-vs-grants, the
+    #     logging AST checks, the protocol-at-runtime test, the call-site
+    #     inventories): it is not in backend/pytest.ini's default testpaths, so
+    #     it only ever ran by hand. It needs no database and no network
+    #     (verified: 120 passed, 0 skipped, with no proxy and no DATABASE_URL).
+    #   - Python stays 3.11 here (the version this job always used; the floor
+    #     requirements.txt installs on, and backend/pyproject.toml's ruff
+    #     target). The m2c client is the package that is matrixed. Note that
+    #     backend.Dockerfile builds on python:3.12-slim, so the version the
+    #     backend ships on is not the one this job tests; adding "3.12" is a
+    #     one-line matrix change if that gap should be closed.
+    #   - Many codeagent test modules start with pytest.importorskip("jsonschema").
+    #     They run here only because requirements.txt pins jsonschema; if that pin
+    #     were ever dropped they would all skip and the job would stay green.
+    #     The skip gate below turns that into a failure. Its allow list (see
+    #     .github/scripts/skip-allowlist.txt) holds the two skips this runner
+    #     cannot avoid: the real-Postgres tests (no database service here) and
+    #     the FreeCAD tests (FreeCAD is not installed).
+    #   - permissions narrowed to contents: read for this job: nothing here
+    #     needs the workflow-level security-events: write.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: backend
@@ -29,7 +56,12 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
       - run: pip install -r requirements.txt
-      - run: pytest tests/unit tests/integration -v
+      - name: Backend tests (unit, integration, static)
+        run: pytest tests/unit tests/integration tests/static -v -rs --junitxml="$RUNNER_TEMP/backend-junit.xml"
+      - name: Skip gate (backend)
+        # Runs even when the tests failed, so the skip list is in the log too.
+        if: ${{ !cancelled() }}
+        run: python ../.github/scripts/check_skips.py --scope backend "$RUNNER_TEMP/backend-junit.xml"
   lint:
     runs-on: ubuntu-latest
     defaults:
@@ -89,24 +121,110 @@ jobs:
     # directory for every test, so nothing here touches the runner's real
     # home.
     #
-    # Blocking (no continue-on-error), same reasoning as daemon-test: a
-    # small deterministic unit-test suite in which every environment probe is
-    # mocked, so the runner needs no ripgrep or bubblewrap. `m2c --version`
-    # is a smoke test that the console entry point was generated and runs.
-    # `m2c doctor` is deliberately NOT run here: its exit status depends on
-    # which tools the runner image happens to ship, not on this code.
+    # Still blocking (no continue-on-error), same reasoning as daemon-test: a
+    # deterministic unit-test suite, so a failure means the code is broken.
+    #
+    # Q01 -- what changed, and why (the paragraphs above are C01's, kept for
+    # the history of the job; where they say the runner needs no ripgrep or
+    # bubblewrap, or that `m2c doctor` is deliberately not run, Q01 reverses
+    # that, as explained below):
+    #
+    #   * Python matrix 3.11 (the package's floor, decision D1) and 3.14 (the
+    #     newest, what the maintainer's WSL runs). fail-fast is off so one
+    #     version's failure does not hide the other's result. NOTE: a matrix
+    #     renames the checks to "m2c-test (3.11)" / "m2c-test (3.14)"; a branch
+    #     protection rule that requires the old name "m2c-test" must be updated.
+    #
+    #   * ripgrep and bubblewrap are installed. The suite was NOT hermetic about
+    #     them after all: about 22 grep tests skip without a real `rg`, and the
+    #     real sandbox tests (C11a) skip without a working `bwrap`. A runner
+    #     that "needs no ripgrep" was a runner that quietly ran fewer tests.
+    #
+    #   * jsonschema (3 tests: tests/link/test_link_deps.py, test_link_requests.py,
+    #     tests/context/test_context_assemble.py) was never installed here, so
+    #     those tests were skipped on every run. It is installed from the pins
+    #     in protocol/requirements.txt (only the schema libraries, not the whole
+    #     file: that file also pins pytest 9.1.1, which would fight this
+    #     package's pytest 8.4.1).
+    #
+    #   * Skips are visible and bounded: pytest -rs prints each reason, and
+    #     .github/scripts/check_skips.py fails the job for any skip whose reason
+    #     is not in .github/scripts/skip-allowlist.txt.
+    #
+    #   * Can the hosted runner run the real sandbox tests? Unknown until the
+    #     first run, and it can change with the runner image. Ubuntu 24.04
+    #     restricts unprivileged user namespaces through AppArmor, which makes
+    #     bubblewrap fail with "setting up uid map: Permission denied". The
+    #     probe step tries bubblewrap as the tests will, lifts that restriction
+    #     with sysctl on this throw-away VM if needed, and only if bubblewrap
+    #     still cannot start sets M2C_CI_NO_USERNS=1, the one thing that lets the
+    #     allow list excuse the sandbox tests' skip. The probe never fails the
+    #     job by itself; it prints the image, the kernel and the outcome.
+    #
+    #   * `m2c doctor` now runs. Its exit status is 1 only for a HARD failure
+    #     (OS, Python, git, ripgrep, config directory), and every one of those is
+    #     under this job's control: Linux, the matrix Python, git preinstalled,
+    #     ripgrep installed above, a config directory in the runner's temp dir.
+    #     So a non-zero exit here is a real regression in doctor (or a broken
+    #     runner), not "which tools the image happens to ship", which is why it
+    #     is not allowed to fail silently (no `|| true`). bubblewrap is only a
+    #     WARN in doctor and only checks the program is on PATH; whether it can
+    #     actually start is the probe step's job, not doctor's.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
     defaults:
       run:
         working-directory: m2c
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with: { python-version: "3.11" }
+        with: { python-version: "${{ matrix.python-version }}" }
+      - name: Install ripgrep and bubblewrap (the tests that use the real tools skip without them)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ripgrep bubblewrap
+          rg --version | head -n 1
+          bwrap --version
+      - name: Probe whether bubblewrap can start on this runner
+        run: |
+          . /etc/os-release
+          echo "runner image: ${PRETTY_NAME}; kernel: $(uname -r)"
+          probe() { bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev true; }
+          if probe; then
+            echo "bubblewrap user namespaces: available"
+            exit 0
+          fi
+          echo "::notice title=sandbox::bubblewrap could not start; trying to lift Ubuntu's AppArmor user-namespace restriction (this VM is discarded after the job)"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          if probe; then
+            echo "bubblewrap user namespaces: available after lifting the AppArmor restriction"
+            exit 0
+          fi
+          echo "::warning title=sandbox::bubblewrap cannot create a user namespace on this runner: the real sandbox tests cannot run here, and the skip gate will allow exactly that skip"
+          echo "M2C_CI_NO_USERNS=1" >> "$GITHUB_ENV"
       - run: pip install -e ".[dev]"
-      - run: pytest -v
+      - name: Install the protocol schema libraries (jsonschema), pinned from protocol/requirements.txt
+        run: |
+          grep -E '^(jsonschema|jsonschema-specifications|referencing|rpds-py|attrs|typing_extensions)==' ../protocol/requirements.txt > "$RUNNER_TEMP/schema-requirements.txt"
+          cat "$RUNNER_TEMP/schema-requirements.txt"
+          pip install -r "$RUNNER_TEMP/schema-requirements.txt"
+      - name: Tests
+        run: pytest -v -rs --junitxml="$RUNNER_TEMP/m2c-junit.xml"
+      - name: Skip gate (m2c)
+        # Runs even when the tests failed, so the skip list is in the log too.
+        if: ${{ !cancelled() }}
+        run: python ../.github/scripts/check_skips.py --scope m2c "$RUNNER_TEMP/m2c-junit.xml"
       - run: m2c --version
+      - name: m2c doctor
+        env:
+          M2C_HOME: ${{ runner.temp }}/m2c-home
+        run: m2c doctor
   frontend-lint:
     # Was entirely unwired: package.json's own "lint" script (`next lint`)
     # existed but nothing in CI ever called it, and it wasn't even
@@ -184,16 +302,46 @@ jobs:
     # (passes vacuously until then). Step 2 is the pytest suite built on the
     # same functions. Blocking, like test/lint: a failure means the contract
     # that client and server are built against is broken.
+    #
+    # Q01 -- two additions, and one finding:
+    #   * Finding: step 1 (`validate.py` with no flag) ALREADY runs the client-copy
+    #     comparison as its fourth check. But that check passes vacuously when
+    #     m2c/src/m2c/protocol/v1 does not exist ("not created yet: nothing to
+    #     compare"), which was right while C01 was in flight and is now a hole: a
+    #     deleted or moved copy would pass. The "Client copy" step below names the
+    #     check on its own line in the run log and refuses the vacuous pass.
+    #   * The contract test now writes a JUnit report and goes through the skip
+    #     gate with an EMPTY allow list for this scope: every test here must run.
+    #     (The contract test skips itself if the m2c/ package is missing, and
+    #     importorskips jsonschema; either would otherwise be a silent skip.)
+    #   * The skip gate has its own unit tests (.github/scripts/test_check_skips.py,
+    #     standard library + pytest). They run here, before the gate is used by
+    #     this job, because this job already has pytest and is the cheapest place.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
       - run: pip install -r protocol/requirements.txt
       - run: python protocol/validate.py
-      - run: pytest tests/unit/test_protocol_contract.py --noconftest -v
+      - name: Client copy of the schemas exists and is current
+        run: |
+          if [ ! -d m2c/src/m2c/protocol/v1 ]; then
+            echo "::error title=protocol::m2c/src/m2c/protocol/v1 is missing; validate.py would pass vacuously. Run: python protocol/validate.py --sync-client"
+            exit 1
+          fi
+          python protocol/validate.py --check-client-copy
+      - name: Contract test
+        run: pytest tests/unit/test_protocol_contract.py --noconftest -v -rs --junitxml="$RUNNER_TEMP/protocol-junit.xml"
         working-directory: backend
+      - name: Test the skip gate itself
+        run: python -m pytest .github/scripts -q
+      - name: Skip gate (protocol)
+        if: ${{ !cancelled() }}
+        run: python .github/scripts/check_skips.py --scope protocol "$RUNNER_TEMP/protocol-junit.xml"
   secrets-scan:
     runs-on: ubuntu-latest
     steps:
