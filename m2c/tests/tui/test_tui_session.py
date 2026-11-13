@@ -270,7 +270,8 @@ def test_the_sandbox_warning_is_shown_once_per_session(tmp_path):
             await rig.send("b")
             await ask_once(rig, "y")
             await rig.until(lambda: len(rig.chat.results) == 2)
-            assert rig.ui.text().count("there is no sandbox yet") == 1
+            assert rig.ui.text().count("no sandbox is active") == 1
+            assert "there is no sandbox yet" not in rig.ui.text()
     run_async(scenario())
 
 

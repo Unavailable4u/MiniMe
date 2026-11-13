@@ -16,6 +16,7 @@ Two jobs:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -39,6 +40,40 @@ def _hermetic_env(tmp_path, monkeypatch):
     monkeypatch.setenv("M2C_HOME", str(tmp_path / "m2c-home"))
     monkeypatch.delenv("M2C_LOG_LEVEL", raising=False)
     return home
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_sandbox: the test runs the real sandbox (needs bubblewrap and user namespaces; skips loudly when they are missing)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_unavailable_by_default(request, monkeypatch):
+    """Patch C11a.  Every test that is not about the sandbox sees "no working sandbox": the shell tool then runs exactly as
+    it did before the sandbox existed (C07), whatever machine the suite runs on, and the doctor never starts a real probe.
+    A test that wants the real thing is marked ``real_sandbox``; one that wants a fake status patches ``get_status``."""
+    if request.node.get_closest_marker("real_sandbox") or os.environ.get("M2C_TEST_SANDBOX") == "real":
+        from m2c import sandbox
+
+        sandbox.reset()
+        yield
+        sandbox.reset()
+        return
+    from m2c import sandbox
+
+    monkeypatch.setattr(
+        sandbox, "get_status",
+        lambda **_: sandbox.SandboxStatus(False, "bwrap_missing", sandbox.probe.REASONS["bwrap_missing"], None),
+    )
+    monkeypatch.setattr(
+        sandbox, "fresh_probe",
+        lambda **_: sandbox.ProbeResult(False, "bwrap_missing", sandbox.probe.REASONS["bwrap_missing"]),
+    )
+    sandbox.reset()
+    yield
+    sandbox.reset()
 
 
 @pytest.fixture

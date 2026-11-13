@@ -1,0 +1,29 @@
+# backend/tests/canary/skip-allowlist.txt -- Patch Q06.
+#
+# The ONLY reasons a canary test may be skipped in CI.  It is read by
+# .github/scripts/check_skips.py (Patch Q01) through --allowlist, so Q01's own
+# list (.github/scripts/skip-allowlist.txt) is left alone: that file is shared
+# by every suite, and these entries mean nothing to any other one.
+#
+# Format (see check_skips.py):   scope | text found in the skip reason
+#
+# The package runs twice, and each mode has tests that only make sense in the
+# other one, so each mode gets its own scope.  A skip in the wrong mode is
+# therefore still a failure.  In particular "real-database mode did not run"
+# cannot hide in the real-database pass: the fake-mode reason below is not on
+# the real-mode list, so if the CI database URL ever went missing the job would
+# report the missing tests as an unexpected skip instead of passing quietly.
+
+# --- fake-recorder mode (no MINIME_TEST_DATABASE_URL) ------------------------
+# The tests that need a real Postgres: the scanner's information_schema walk,
+# the row-level-security visibility check, the real-table plants.
+canary-fake | MINIME_TEST_DATABASE_URL is not set (fake-recorder mode)
+
+# --- real-database mode (MINIME_TEST_DATABASE_URL set) -----------------------
+# The tests of the fake twins and of the SQL recorder, which have nothing to
+# look at when the real store and ledger are in use (the real tables are
+# scanned instead), and one parameter case that Postgres cannot represent.
+canary-real | in real mode the store writes SQL, covered by the statement tests
+canary-real | real mode scans the table itself, covered by the database tests
+canary-real | fake-mode twin tables only
+canary-real | a uuid array cannot hold text

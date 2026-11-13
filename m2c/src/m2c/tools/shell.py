@@ -1,14 +1,19 @@
 """
 m2c/src/m2c/tools/shell.py -- Patch C07: the shell tool v0 (``bash``).
 
-SECURITY-CRITICAL, AND THERE IS NO SANDBOX YET
-----------------------------------------------
-This module runs a command the model proposed, as the user, with the user's
-full privileges: it can read and write anything the user can, use the network
-and start other programs.  The sandbox (C11, Wave 9) is the real boundary and
-does not exist yet.  Until it does, the only things between the model and the
-user's account are the approval flow (C06 decides, the device runner and the
-terminal UI ask) and the checks in this file, which exist to make sure that
+SECURITY-CRITICAL
+-----------------
+Patch C11a (the sandbox, ``m2c.sandbox``) changes WHERE the command runs, not how a call
+is checked or supervised: when a working sandbox is available the command runs inside
+bubblewrap (project writable, ``.git``, ``.m2c`` and shell rc files read-only, an empty
+home, no network, its own PID namespace); when it is not, it runs as described below, with
+the user's full privileges, and the visible warning says so.  See "The sandbox" at the end
+of this docstring.  The rest of this text is C07's and still holds in both cases.
+
+This module runs a command the model proposed, as the user.  Without the sandbox it can
+read and write anything the user can, use the network and start other programs; the only
+things between the model and the user's account are then the approval flow (C06 decides,
+the device runner and the terminal UI ask) and the checks in this file, which exist to make sure that
 
 * nothing runs unless the caller says, explicitly, that it was authorized;
 * a policy ``deny`` still wins over that authorization;
@@ -17,8 +22,9 @@ terminal UI ask) and the checks in this file, which exist to make sure that
 * its output cannot flood memory or inject escape codes into the terminal UI.
 
 ``SANDBOX_WARNING`` is the text the terminal UI (C09) shows, visibly, before the
-first command of a session; ``ShellConfig.warn`` is how it receives it.  Nothing
-in this patch gives a mode that skips approval.
+first command of a session that runs WITHOUT a sandbox (``warning_text`` adds the
+reason); ``ShellConfig.warn`` is how it receives it.  Nothing in this patch gives a
+mode that skips approval.
 
 How a call runs
 ---------------
@@ -90,10 +96,11 @@ group is killed too (SIGKILL), so a call never leaves a stray process behind:
 background jobs (``cmd &``) do not survive the call; there is no background shell
 in v0 (that is C16).
 
-LIMIT: a process that leaves the group (``setsid``, ``nohup setsid``, a daemon
-that double-forks and calls ``setsid``) cannot be killed this way and keeps
-running after the call.  Only a sandbox that confines the whole tree (C11) can
-close that gap.  Signals are sent to the group only while its leader has not been
+LIMIT (unsandboxed runs only): a process that leaves the group (``setsid``, ``nohup
+setsid``, a daemon that double-forks and calls ``setsid``) cannot be killed this way
+and keeps running after the call.  Inside the sandbox the gap is closed: the signalled
+process is bubblewrap, and when it dies the kernel kills every process in its PID
+namespace.  Signals are sent to the group only while its leader has not been
 reaped (we detect its exit without reaping it), so the group id cannot have been
 recycled.
 
@@ -118,6 +125,34 @@ Logging
 -------
 One line per run through ``log_event``: exit status, duration and a size, and a
 code for a failure.  Never the command, the reason, an argument or any output.
+
+The sandbox (Patch C11a)
+------------------------
+``ShellConfig.sandbox`` is ``"auto"`` (the default), ``"required"`` or ``"off"``:
+
+* ``auto``      use the sandbox when the self-test (``m2c.sandbox.probe``) passed, otherwise run
+                unsandboxed AND show the warning, with the reason.
+* ``required``  when the self-test did not pass, run nothing: ``ToolError(code="refused")`` with a
+                fixed message (the tool-error vocabulary is pinned by protocol/v1, so "refused" is
+                the code, not a new one).
+* ``off``       never use the sandbox; the warning is shown.
+
+Once the self-test has passed, the sandbox is a promise for the session in EVERY mode but ``off``:
+if a command's profile then cannot be built (a project on ``/mnt/c``, a ``.git`` that is a symlink,
+a bad extra path) the command is REFUSED, never quietly run unsandboxed.  Otherwise the model could
+bring about its own downgrade (``ln -s x .git``).  ``sandbox_active(context)`` says whether
+commands run sandboxed, and is True only when the self-test passed and the mode is not ``off``: the
+warning text and every status line are derived from it, so nothing can claim a sandbox that is not
+there.
+
+What does not change: authorization, the policy re-check, arguments, the working directory, the new
+session and process group, the timeout, cancel, streaming, the output cap and the terminal
+sanitizer, because the sandbox only replaces ``[shell, "-c", command]`` by
+``[bwrap, ...profile..., "--", shell, "-c", command]`` and the same ``Popen`` runs it.  What does:
+inside a PID namespace the shell is not the process group leader's child but bubblewrap's, bubblewrap
+reports a signalled command as exit status 128+N rather than by dying, so an exit status from 129 to
+159 is annotated "(terminated by signal N)"; an explicit ``exit 137`` is indistinguishable from a
+SIGKILL and is annotated the same way (the ``exit_code`` field is the same either way).
 
 Configuration lives on the session's ``ToolContext`` without changing that class:
 ``configure_shell(context, ShellConfig(...))`` stores a ``ShellConfig`` as
@@ -145,6 +180,7 @@ import weakref
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
+from .. import sandbox as _sandbox
 from ..logging_setup import log_event
 from ..policy.decide import Request, decide
 from ..secrets.env import granted_names, sanitize_environment
@@ -152,13 +188,18 @@ from .paths import ToolError
 
 __all__ = [
     "AUTHORIZATIONS", "AUTH_POLICY_ALLOWED", "AUTH_USER_APPROVED", "CallEnv", "DEFAULT_MAX_OUTPUT_BYTES",
-    "DEFAULT_TIMEOUT_S", "SANDBOX_WARNING", "SHELL_TRUST", "ShellConfig", "TerminalSanitizer", "ToolOutcome",
-    "bash", "configure_shell", "run_command", "sanitized_env",
+    "DEFAULT_TIMEOUT_S", "SANDBOX_MODES", "SANDBOX_REQUIRED_MESSAGE", "SANDBOX_WARNING", "SHELL_TRUST", "ShellConfig",
+    "TerminalSanitizer", "ToolOutcome", "bash", "configure_shell", "run_command", "sandbox_active", "sanitized_env",
+    "warning_text",
 ]
 
 logger = logging.getLogger("m2c.tools.shell")
 
-SANDBOX_WARNING = "commands run with your full privileges; there is no sandbox yet"
+# Patch C11a: shown only when it is TRUE (no sandbox is in use for this session); ``warning_text`` appends the reason.
+SANDBOX_WARNING = "commands run with your full privileges; no sandbox is active"
+SANDBOX_REQUIRED_MESSAGE = "the shell tool did not run: the sandbox is required and no working sandbox is available"
+SANDBOX_MODES = ("auto", "required", "off")
+_REASON_OFF = "the sandbox is turned off in the settings"
 
 # protocol/v1/common.json trust enum; see the module docstring for why this is not "untrusted".
 SHELL_TRUST = "external"
@@ -263,6 +304,9 @@ class ShellConfig:
     ``kill_grace_s``       how long a SIGTERM'd group gets before SIGKILL.
     ``drain_grace_s``      how long to wait, after the shell exits, for output pipes something else still holds.
     ``flush_bytes`` / ``flush_interval_s``  the streaming coalescing thresholds.
+    ``sandbox``            ``"auto"`` (default), ``"required"`` or ``"off"``; see "The sandbox" in the module docstring.
+    ``sandbox_extra_ro``   more read-only paths inside the sandbox (relative to the home, ``~/x`` or absolute).
+    ``sandbox_toolchain_dirs``  the read-only toolchain directories under the home, mounted only if they exist.
     """
 
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
@@ -272,6 +316,9 @@ class ShellConfig:
     drain_grace_s: float = DRAIN_GRACE_S
     flush_bytes: int = FLUSH_BYTES
     flush_interval_s: float = FLUSH_INTERVAL_S
+    sandbox: str = "auto"
+    sandbox_extra_ro: tuple[str, ...] = ()
+    sandbox_toolchain_dirs: tuple[str, ...] = _sandbox.DEFAULT_HOME_TOOLCHAIN_DIRS
 
     def __post_init__(self) -> None:
         m = self.max_output_bytes
@@ -285,6 +332,15 @@ class ShellConfig:
         _positive_number("flush_interval_s", self.flush_interval_s)
         if isinstance(self.flush_bytes, bool) or not isinstance(self.flush_bytes, int) or self.flush_bytes <= 0:
             raise ValueError("flush_bytes must be a positive integer")
+        if not isinstance(self.sandbox, str) or self.sandbox not in SANDBOX_MODES:
+            raise ValueError("sandbox must be one of: " + ", ".join(SANDBOX_MODES))
+        for name in ("sandbox_extra_ro", "sandbox_toolchain_dirs"):
+            value = getattr(self, name)
+            if isinstance(value, str) or not isinstance(value, (tuple, list)) or not all(
+                isinstance(v, str) and v and "\x00" not in v for v in value
+            ):
+                raise ValueError(f"{name} must be a tuple of non-empty strings")
+            object.__setattr__(self, name, tuple(value))
 
 
 _DEFAULT_CONFIG = ShellConfig()
@@ -308,8 +364,34 @@ def _config_for(context: Any) -> ShellConfig:
     return cfg
 
 
-def _warn_once(context: Any, cfg: ShellConfig) -> None:
-    """Give the sandbox warning to the UI the first time a command is about to start in this session.
+def warning_text(reason: str | None = None) -> str:
+    """``SANDBOX_WARNING`` plus the reason (fixed words from ``m2c.sandbox``), for a run that is NOT sandboxed."""
+    return f"{SANDBOX_WARNING} ({reason})" if reason else SANDBOX_WARNING
+
+
+def _sandbox_status(cfg: ShellConfig) -> "_sandbox.SandboxStatus | None":
+    """The sandbox status for this configuration, or None for ``off``.  Looked up through the module so that a test (or a
+    later patch) can replace ``m2c.sandbox.get_status``.  A lookup that raises is "not available": security fails closed."""
+    if cfg.sandbox == "off":
+        return None
+    try:
+        return _sandbox.get_status(extra_ro=cfg.sandbox_extra_ro, toolchain_dirs=cfg.sandbox_toolchain_dirs)
+    except Exception:  # noqa: BLE001
+        return _sandbox.SandboxStatus(False, "probe_error", "the sandbox self-test could not be completed", None)
+
+
+def sandbox_active(context: Any = None, config: ShellConfig | None = None) -> bool:
+    """True only when commands of this session really run in the sandbox: the mode is not ``off`` and the self-test passed.
+
+    Nothing may say "sandboxed" on any other basis.  (This may run the self-test the first time, about a tenth of a second.)
+    """
+    cfg = config if config is not None else _config_for(context)
+    status = _sandbox_status(cfg)
+    return bool(status is not None and status.available)
+
+
+def _warn_once(context: Any, cfg: ShellConfig, text: str = SANDBOX_WARNING) -> None:
+    """Give the sandbox warning to the UI the first time a command is about to start unsandboxed in this session.
 
     A failing display is logged by type and tried again with the next command; it never stops the command.
     """
@@ -323,7 +405,7 @@ def _warn_once(context: Any, cfg: ShellConfig) -> None:
     except TypeError:  # a context that cannot be weakly referenced: warn every time rather than never
         pass
     try:
-        cfg.warn(SANDBOX_WARNING)
+        cfg.warn(text)
     except Exception as exc:  # noqa: BLE001 -- a broken display must not break the command
         try:
             with _WARN_LOCK:
@@ -632,10 +714,15 @@ def _reap(proc: subprocess.Popen) -> int | None:
         return None
 
 
-def _exit_status(returncode: int | None) -> tuple[int | None, str]:
-    """(exit code, the text of the status line) for a command that ended by itself."""
+def _exit_status(returncode: int | None, sandboxed: bool = False) -> tuple[int | None, str]:
+    """(exit code, the text of the status line) for a command that ended by itself.
+
+    Under the sandbox bubblewrap exits with 128+N when a signal N ended the command, so 129..159 is annotated the way
+    a negative return code is without it (an explicit ``exit 137`` cannot be told apart; see the module docstring)."""
     if returncode is None:
         return None, "[exit status: unknown]"
+    if sandboxed and _sandbox.signal_from_exit_code(returncode) is not None:
+        return returncode, f"[exit status: {returncode} (terminated by signal {returncode - 128})]"
     if returncode >= 0:
         return returncode, f"[exit status: {returncode}]"
     return 128 - returncode, f"[exit status: {128 - returncode} (terminated by signal {-returncode})]"
@@ -659,6 +746,19 @@ def _spawn(argv: list[str], cwd: str, env: dict[str, str]) -> subprocess.Popen:
         raise ToolError("the command could not be started", code="io_error") from None
 
 
+def _sandboxed_argv(command: str, root: str, env: Mapping[str, str], cfg: ShellConfig) -> list[str]:
+    """The bubblewrap command line for this call.  The self-test passed, so a profile that cannot be built NOW is a
+    refusal, never a quiet run without the sandbox (see the module docstring).  The text is fixed and has no path."""
+    try:
+        return _sandbox.wrap_command(
+            command, project=root, env=env, toolchain_dirs=cfg.sandbox_toolchain_dirs,
+            extra_ro=cfg.sandbox_extra_ro, denied=_sandbox.default_denied(),
+        )
+    except _sandbox.ProfileError as exc:
+        log_event(logger, logging.WARNING, "tools.shell_sandbox", check="bash_sandbox", status="refused", code=exc.code)
+        raise ToolError(f"the shell tool did not run: the sandbox could not be built ({exc.message})", code="refused") from None
+
+
 def _execute(context: Any, command: str, timeout_s: int, cfg: ShellConfig, cancel: Any,
              on_chunk: Callable[[str, str], None] | None) -> ToolOutcome:
     root = os.fspath(context.root)
@@ -667,13 +767,21 @@ def _execute(context: Any, command: str, timeout_s: int, cfg: ShellConfig, cance
     if _is_cancelled(cancel):
         return ToolOutcome("[cancelled before the command started]", False, False, SHELL_TRUST, None, "cancelled")
     env = sanitized_env(os.environ, cfg.extra_strip_names, keep=granted_names(root))
-    shell_path = _find_shell(env)
-    if shell_path is None:
-        raise ToolError("no shell (bash or sh) was found", code="io_error")
-    _warn_once(context, cfg)
+    status = _sandbox_status(cfg)
+    sandboxed = bool(status is not None and status.available)
+    if cfg.sandbox == "required" and not sandboxed:
+        raise ToolError(SANDBOX_REQUIRED_MESSAGE, code="refused")
+    if sandboxed:
+        argv, spawn_env = _sandboxed_argv(command, root, env, cfg), _sandbox.bwrap.outer_environment()
+    else:
+        shell_path = _find_shell(env)
+        if shell_path is None:
+            raise ToolError("no shell (bash or sh) was found", code="io_error")
+        argv, spawn_env = [shell_path, "-c", command], env
+        _warn_once(context, cfg, warning_text(_REASON_OFF if status is None else status.reason))
 
     started = time.monotonic()
-    proc = _spawn([shell_path, "-c", command], root, env)
+    proc = _spawn(argv, root, spawn_env)
     pgid = proc.pid  # start_new_session made the shell a group leader
     filters = {"stdout": _StreamFilter(), "stderr": _StreamFilter()}
     buf = _OutputBuffer(cfg.max_output_bytes)
@@ -766,13 +874,13 @@ def _execute(context: Any, command: str, timeout_s: int, cfg: ShellConfig, cance
         outcome = ToolOutcome(text + "[cancelled; the command's process group was killed]",
                               truncated, False, SHELL_TRUST, None, "cancelled")
     else:
-        exit_code, status_line = _exit_status(returncode)
+        exit_code, status_line = _exit_status(returncode, sandboxed)
         if leftovers:
             text += "[processes that kept the output open after the command ended were stopped]\n"
         ok = exit_code == 0
         outcome = ToolOutcome(text + status_line, truncated, ok, SHELL_TRUST, exit_code, None if ok else "exit_nonzero")
 
-    fields: dict[str, Any] = {"check": "bash", "status": "ok" if outcome.ok else "error"}
+    fields: dict[str, Any] = {"check": "bash_sandbox" if sandboxed else "bash", "status": "ok" if outcome.ok else "error"}
     if outcome.code:
         fields["code"] = outcome.code
     if outcome.exit_code is not None:

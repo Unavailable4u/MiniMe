@@ -66,6 +66,19 @@ pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="th
 
 SHELL_SRC = Path(m2c.__file__).resolve().parent / "tools" / "shell.py"
 
+# Patch C11a: ``M2C_TEST_SANDBOX=real`` runs this file with the real sandbox switched on (see tests/conftest.py).  A few tests
+# are about the UNSANDBOXED path and cannot mean the same thing there; each is skipped under that variable, and its sandbox-aware
+# equivalent lives in tests/sandbox/test_sandbox_shell_regression.py (which runs the same behaviour with the sandbox off AND on).
+_REAL_SANDBOX_RUN = os.environ.get("M2C_TEST_SANDBOX") == "real"
+needs_host_pids = pytest.mark.skipif(
+    _REAL_SANDBOX_RUN,
+    reason="writes a PID and checks it on the host; inside the sandbox's PID namespace the number is not a host PID (see tests/sandbox/test_sandbox_shell_regression.py)",
+)
+unsandboxed_only = pytest.mark.skipif(
+    _REAL_SANDBOX_RUN,
+    reason="about the warning shown for an UNSANDBOXED run; a sandboxed run shows none (see tests/tools/test_tools_shell_sandbox.py)",
+)
+
 
 # ==========================================================================
 # helpers
@@ -369,6 +382,7 @@ def test_a_command_that_runs_too_long_is_killed_and_reported_as_timed_out(quick)
     assert 0.9 <= elapsed < 8
 
 
+@needs_host_pids
 def test_the_whole_process_group_is_killed_on_timeout(quick, proj):
     # the shell starts a child, which starts a grandchild; both must be gone afterwards
     script = "sh -c 'sleep 300 & echo $! > grandchild.pid; wait' & echo $! > child.pid; wait"
@@ -379,6 +393,7 @@ def test_the_whole_process_group_is_killed_on_timeout(quick, proj):
     assert wait_until(lambda: not alive(grandchild)), "the grandchild survived the timeout"
 
 
+@needs_host_pids
 def test_a_command_that_ignores_sigterm_is_killed_after_the_grace_period(quick, proj):
     started = time.monotonic()
     r = run(quick, "trap '' TERM; sleep 300 & echo $! > pid; wait", 1)
@@ -387,6 +402,7 @@ def test_a_command_that_ignores_sigterm_is_killed_after_the_grace_period(quick, 
     assert wait_until(lambda: not alive(read_pid(proj / "pid"))), "SIGKILL must follow SIGTERM"
 
 
+@needs_host_pids
 def test_the_process_is_started_in_its_own_session(ctx):
     r = run(ctx, 'echo "$$ $(cut -d" " -f5,6 /proc/$$/stat)"')  # fields 5 and 6 of /proc/PID/stat: pgrp and session
     pid, pgid, sid = (int(x) for x in re.search(r"(\d+) (\d+) (\d+)", r.output).groups())
@@ -400,6 +416,7 @@ def test_a_command_that_closed_its_own_output_is_still_timed_out(quick, proj):
     assert r.code == "timeout"
 
 
+@needs_host_pids
 def test_background_processes_left_in_the_group_are_stopped_when_the_command_ends(quick, proj):
     started = time.monotonic()
     r = run(quick, "sleep 300 & echo $! > bg.pid; echo done", 30)
@@ -408,6 +425,7 @@ def test_background_processes_left_in_the_group_are_stopped_when_the_command_end
     assert wait_until(lambda: not alive(read_pid(proj / "bg.pid")))
 
 
+@needs_host_pids
 def test_a_background_job_that_redirected_its_output_is_stopped_too(quick, proj):
     r = run(quick, "sleep 300 >/dev/null 2>&1 & echo $! > bg.pid; echo done", 30)
     assert r.ok
@@ -417,6 +435,7 @@ def test_a_background_job_that_redirected_its_output_is_stopped_too(quick, proj)
 # ==========================================================================
 # cancel
 # ==========================================================================
+@needs_host_pids
 def test_cancel_kills_the_process_group_promptly(quick, proj):
     cancel = threading.Event()
     threading.Timer(0.5, cancel.set).start()
@@ -829,21 +848,30 @@ def test_the_fast_path_returns_clean_text_unchanged_and_the_stream_filter_flushe
 # ==========================================================================
 # the sandbox warning
 # ==========================================================================
-def test_the_warning_text_is_the_one_in_the_work_package():
-    assert SANDBOX_WARNING == "commands run with your full privileges; there is no sandbox yet"
+# Patch C11a: the warning says "full privileges" only when that is true (no sandbox is in use), and gives the reason.
+# The suite's autouse fixture makes the sandbox "unavailable: bubblewrap is not installed" for every test but the real ones.
+UNSANDBOXED_WARNING = shell.warning_text(shell._sandbox.probe.REASONS["bwrap_missing"])
 
 
+def test_the_warning_text_says_there_is_no_sandbox_and_nothing_else():
+    assert SANDBOX_WARNING == "commands run with your full privileges; no sandbox is active"
+    assert "there is no sandbox yet" not in SANDBOX_WARNING, "C11a replaced the C07 text"
+    assert UNSANDBOXED_WARNING.startswith(SANDBOX_WARNING + " (") and UNSANDBOXED_WARNING.endswith(")")
+
+
+@unsandboxed_only
 def test_the_warning_is_given_once_per_session_before_the_first_command(proj):
     events = []
     c = ToolContext(proj)
     configure_shell(c, ShellConfig(warn=lambda text: events.append(("warn", text))))
     run(c, "echo one", 20, on_chunk=lambda s, t: events.append(("chunk", t)))
     run(c, "echo two", 20, on_chunk=lambda s, t: events.append(("chunk", t)))
-    assert events[0] == ("warn", SANDBOX_WARNING)
-    assert [e for e in events if e[0] == "warn"] == [("warn", SANDBOX_WARNING)]
+    assert events[0] == ("warn", UNSANDBOXED_WARNING)
+    assert [e for e in events if e[0] == "warn"] == [("warn", UNSANDBOXED_WARNING)]
     assert [t for k, t in events if k == "chunk"] == ["one\n", "two\n"]
 
 
+@unsandboxed_only
 def test_each_session_is_warned_separately(proj):
     texts = []
     for _ in range(2):
@@ -851,9 +879,10 @@ def test_each_session_is_warned_separately(proj):
         configure_shell(c, ShellConfig(warn=texts.append))
         run(c, "true")
         run(c, "true")
-    assert texts == [SANDBOX_WARNING, SANDBOX_WARNING]
+    assert texts == [UNSANDBOXED_WARNING, UNSANDBOXED_WARNING]
 
 
+@unsandboxed_only
 def test_a_refused_command_does_not_use_up_the_warning(proj):
     texts = []
     c = ToolContext(proj)
@@ -862,7 +891,7 @@ def test_a_refused_command_does_not_use_up_the_warning(proj):
         run_command(c, "true", 20, authorization=None)
     assert texts == []
     run(c, "true")
-    assert texts == [SANDBOX_WARNING]
+    assert texts == [UNSANDBOXED_WARNING]
 
 
 def test_a_warn_callable_that_fails_does_not_stop_the_command(proj):

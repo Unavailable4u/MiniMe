@@ -67,6 +67,20 @@ skipped test no longer passes silently: each test job writes a JUnit report and
 The real-Postgres tests below and the FreeCAD tests are on that list, so CI does
 not run them: run them by hand before a change that touches SQL.
 
+**"No content at rest" canary test.**
+`backend/tests/canary/` plants run-time-random canaries in a prompt, project files, tool outputs, the model's reply,
+tool arguments and an `M2C.md`, runs a scripted session through the real server and the real device client, and
+fails if any canary is found in Postgres, logs, Redis after the run, error reports or the ledger. It is not in
+`pytest.ini`'s default testpaths: name it. Install `pip install -e ../m2c` first (without its `[dev]` extra), then:
+
+```bash
+cd backend
+pytest tests/canary -v    # fake-recorder mode, no database
+# real-database mode adds MINIME_TEST_DATABASE_URL (+ MINIME_TEST_SCAN_DATABASE_URL); see backend/tests/canary/README.md
+```
+
+CI runs both modes in the `canary` job (the only job that runs the real-database mode).
+
 **SQL-versus-grants check (no database needed).**
 `backend/tests/static/test_sql_grants.py` replays `backend/migrations/*.sql` in
 order to work out what the app role (`minime_app`) may do to each table, reads

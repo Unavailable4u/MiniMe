@@ -14,19 +14,22 @@ Checks, in report order, and what a failure means:
     Python             HARD  3.11 or newer (decision D1).
     git                HARD  must be on PATH.
     ripgrep (rg)       HARD  must be on PATH.
-    bubblewrap (bwrap) WARN  must be on PATH for the sandbox.  Only a warning
-                             *for now*: nothing in C01 needs the sandbox, and
-                             the later work package that does (C11) refuses
-                             to run sandboxed features without it.  It is
-                             not a hard requirement here so a developer can
-                             install and test the client before installing
-                             bubblewrap.  The check only looks for the
-                             program; actually running it to see whether
-                             unprivileged user namespaces work (§11.1) is C21.
+    bubblewrap (bwrap) WARN  must be on PATH, and (Patch C11a) the sandbox must
+                             actually WORK: when the program is found the doctor
+                             runs the sandbox self-test (m2c.sandbox.probe: a
+                             throw-away project and home, eleven escape attempts)
+                             and reports ok, or a warning that names exactly
+                             which check failed or why the sandbox cannot be
+                             built (no user namespaces, no private /proc ...).
+                             Only a warning: m2c still runs commands without a
+                             sandbox (with a visible warning) unless the shell
+                             setting ``sandbox`` is ``required``, and a developer
+                             can install and test the client before installing
+                             bubblewrap.
     Project location   WARN  the project must not live under /mnt/c (slow,
                              different permission semantics, defeats the
                              sandbox's assumptions).  Warning only, per the
-                             work package; C11 will refuse to sandbox it.
+                             work package; the sandbox (C11a) refuses to build there.
     Config directory   HARD  ~/.m2c (or $M2C_HOME) can be created with mode
                              0700 and written to.
 
@@ -64,8 +67,10 @@ import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import paths
+from . import sandbox as _sandbox
 from .logging_setup import log_event
 
 logger = logging.getLogger("m2c.doctor")
@@ -99,6 +104,9 @@ class Environment:
     project_path: Path | None  # as given (or the cwd); None if unknown
     resolved_project_path: Path | None  # after resolving symlinks
     prepare_config_dir: Callable[[], Path]  # create 0700 + write test; raises ConfigDirError
+    # Patch C11a: runs the sandbox self-test and returns a ``m2c.sandbox.ProbeResult``.  None (the default, so every
+    # existing hand-built Environment keeps working) means "do not test, only look for the program".
+    sandbox_probe: Callable[[], Any] | None = None
 
     @classmethod
     def detect(cls, project: Path | None = None) -> Environment:
@@ -122,6 +130,7 @@ class Environment:
             project_path=project,
             resolved_project_path=resolved,
             prepare_config_dir=paths.prepare_config_dir,
+            sandbox_probe=lambda: _sandbox.fresh_probe(),
         )
 
 
@@ -298,18 +307,49 @@ def check_rg(env: Environment) -> CheckResult:
     )
 
 
+_BWRAP_NAME = "bubblewrap (bwrap)"
+_NO_SANDBOX_NOTE = (
+    "Until it works, m2c runs commands without a sandbox and says so (the default 'auto' mode), or refuses to "
+    "run them if the shell setting 'sandbox' is 'required'."
+)
+# One hint per fixed reason code from m2c.sandbox.probe; anything else gets the generic one.
+_SANDBOX_HINTS = {
+    "userns_unavailable": (
+        "Unprivileged user namespaces are blocked. On Ubuntu 24.04 and later an AppArmor rule can do this:\n"
+        "  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"
+        "On Debian the switch is:\n"
+        "  sudo sysctl -w kernel.unprivileged_userns_clone=1\n"
+        "Inside a container, the container runtime must allow them (or run m2c on the host)."
+    ),
+    "proc_unavailable": "A private /proc could not be mounted. Containers that restrict mounts cause this; run m2c on the host or in a less restricted container.",
+    "netns_unavailable": "A new network namespace could not be created. Check that the kernel allows user and network namespaces.",
+}
+
+
 def check_bwrap(env: Environment) -> CheckResult:
-    return _tool_check(
-        env,
-        name="bubblewrap (bwrap)",
-        binary="bwrap",
-        missing_status=Status.WARN,
-        missing_detail=(
-            "'bwrap' (bubblewrap) was not found on PATH. The command sandbox will refuse to run "
-            "until it is installed."
-        ),
-        hint=_install_hint("bubblewrap")
-        + "\nThis check only looks for the program; it does not yet test that user namespaces work.",
+    found = env.which("bwrap")
+    if not found:
+        return CheckResult(
+            _BWRAP_NAME,
+            Status.WARN,
+            "'bwrap' (bubblewrap) was not found on PATH, so there is no command sandbox. " + _NO_SANDBOX_NOTE,
+            _install_hint("bubblewrap"),
+        )
+    if env.sandbox_probe is None:
+        return CheckResult(_BWRAP_NAME, Status.OK, str(found))
+    try:
+        probe = env.sandbox_probe()
+    except Exception as exc:  # a broken self-test is a sandbox that cannot be shown to work: never "ok"
+        log_event(logger, logging.WARNING, "doctor.sandbox_probe_crashed", check="bwrap", exc_type=type(exc).__name__)
+        return CheckResult(_BWRAP_NAME, Status.WARN, "The sandbox self-test could not be run. " + _NO_SANDBOX_NOTE,
+                           "This is probably a bug in m2c doctor or an unusual system; please report it.")
+    if getattr(probe, "works", False) is True:
+        return CheckResult(_BWRAP_NAME, Status.OK, f"{found} - {probe.describe()}")
+    reason = getattr(probe, "describe", lambda: "the sandbox self-test failed")()
+    code = getattr(probe, "reason_code", "")
+    hint = _SANDBOX_HINTS.get(code, "Run 'm2c doctor' again after fixing the cause above; the self-test is repeated every time.")
+    return CheckResult(
+        _BWRAP_NAME, Status.WARN, f"bubblewrap was found at {found} but the sandbox does not work: {reason}. " + _NO_SANDBOX_NOTE, hint
     )
 
 
