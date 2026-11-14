@@ -154,6 +154,22 @@ reports a signalled command as exit status 128+N rather than by dying, so an exi
 159 is annotated "(terminated by signal N)"; an explicit ``exit 137`` is indistinguishable from a
 SIGKILL and is annotated the same way (the ``exit_code`` field is the same either way).
 
+The network (Patch C11b)
+------------------------
+``ShellConfig.network`` is ``"prompt"`` (the default) or ``"off"``.  ``off`` is exactly the C11a behavior: the command
+has no network at all.  ``prompt`` gives a SANDBOXED command a controlled one without ever giving it a network
+interface: a host-side proxy (``m2c.sandbox.netproxy``, started lazily on the first command and kept for the session)
+connects only to allowed domains and asks the person about any new one; a tiny bridge inside the sandbox
+(``m2c.sandbox.bridge``) relays the command's ``HTTP(S)_PROXY`` traffic to it.  The proxy variables are set AFTER the
+environment is sanitized (and any proxy variable the host had is dropped), with an EMPTY ``NO_PROXY``.  Nothing here
+loosens the sandbox: the network namespace stays unshared, and anything that goes wrong (no system python3, the proxy
+cannot start, the bridge cannot bind) leaves the command running WITHOUT network, never with a wider one.  Commands
+that are not sandboxed (``sandbox="off"`` or no working sandbox) get no proxy and behave as before.  The settings are
+``network_allow`` (domains allowed without asking), ``network_ports`` (default 443), ``network_prompt`` (the injected
+async ``DomainPrompt``; none means an unlisted domain is denied), ``network_record`` (receives decisions: host and
+word only, never a path or payload) and ``network_allow_cleartext`` (plain ``http://`` through the proxy; off).
+The proxy controls WHERE a command may connect, not WHAT it sends: see ``m2c.sandbox.netproxy`` for the limits.
+
 Configuration lives on the session's ``ToolContext`` without changing that class:
 ``configure_shell(context, ShellConfig(...))`` stores a ``ShellConfig`` as
 ``context.shell_config``; the "warned once" record is kept per context, so each
@@ -183,12 +199,15 @@ from typing import Any, Callable, Mapping
 from .. import sandbox as _sandbox
 from ..logging_setup import log_event
 from ..policy.decide import Request, decide
+from ..sandbox import bridge as _net_bridge
+from ..sandbox import netpolicy as _net_policy
+from ..sandbox import netproxy as _net_proxy
 from ..secrets.env import granted_names, sanitize_environment
 from .paths import ToolError
 
 __all__ = [
     "AUTHORIZATIONS", "AUTH_POLICY_ALLOWED", "AUTH_USER_APPROVED", "CallEnv", "DEFAULT_MAX_OUTPUT_BYTES",
-    "DEFAULT_TIMEOUT_S", "SANDBOX_MODES", "SANDBOX_REQUIRED_MESSAGE", "SANDBOX_WARNING", "SHELL_TRUST", "ShellConfig",
+    "DEFAULT_TIMEOUT_S", "NETWORK_MODES", "SANDBOX_MODES", "SANDBOX_REQUIRED_MESSAGE", "SANDBOX_WARNING", "SHELL_TRUST", "ShellConfig",
     "TerminalSanitizer", "ToolOutcome", "bash", "configure_shell", "run_command", "sandbox_active", "sanitized_env",
     "warning_text",
 ]
@@ -199,6 +218,7 @@ logger = logging.getLogger("m2c.tools.shell")
 SANDBOX_WARNING = "commands run with your full privileges; no sandbox is active"
 SANDBOX_REQUIRED_MESSAGE = "the shell tool did not run: the sandbox is required and no working sandbox is available"
 SANDBOX_MODES = ("auto", "required", "off")
+NETWORK_MODES = ("prompt", "off")                      # Patch C11b
 _REASON_OFF = "the sandbox is turned off in the settings"
 
 # protocol/v1/common.json trust enum; see the module docstring for why this is not "untrusted".
@@ -307,6 +327,12 @@ class ShellConfig:
     ``sandbox``            ``"auto"`` (default), ``"required"`` or ``"off"``; see "The sandbox" in the module docstring.
     ``sandbox_extra_ro``   more read-only paths inside the sandbox (relative to the home, ``~/x`` or absolute).
     ``sandbox_toolchain_dirs``  the read-only toolchain directories under the home, mounted only if they exist.
+    ``network``            ``"prompt"`` (default: proxy on, ask about new domains) or ``"off"`` (no network, as in C11a).
+    ``network_allow``      domains allowed without asking (exact names or ``*.example.com``); the user's saved list adds to it.
+    ``network_ports``      the ports the proxy will connect to (default 443).
+    ``network_prompt``     the async ``DomainPrompt(host, port, label)``; None means an unlisted domain is denied.
+    ``network_record``     ``callable(dict)`` given each decision (host, decision word, scope); fails open.
+    ``network_allow_cleartext``  allow plain ``http://`` through the proxy (default False).
     """
 
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
@@ -319,6 +345,12 @@ class ShellConfig:
     sandbox: str = "auto"
     sandbox_extra_ro: tuple[str, ...] = ()
     sandbox_toolchain_dirs: tuple[str, ...] = _sandbox.DEFAULT_HOME_TOOLCHAIN_DIRS
+    network: str = "prompt"
+    network_allow: tuple[str, ...] = ()
+    network_ports: tuple[int, ...] = (443,)
+    network_prompt: Callable[..., Any] | None = None
+    network_record: Callable[[dict], None] | None = None
+    network_allow_cleartext: bool = False
 
     def __post_init__(self) -> None:
         m = self.max_output_bytes
@@ -341,6 +373,26 @@ class ShellConfig:
             ):
                 raise ValueError(f"{name} must be a tuple of non-empty strings")
             object.__setattr__(self, name, tuple(value))
+        if not isinstance(self.network, str) or self.network not in NETWORK_MODES:
+            raise ValueError("network must be one of: " + ", ".join(NETWORK_MODES))
+        allow = self.network_allow
+        if isinstance(allow, str) or not isinstance(allow, (tuple, list)) or not all(
+            isinstance(v, str) and v and "\x00" not in v for v in allow
+        ):
+            raise ValueError("network_allow must be a tuple of non-empty strings")
+        object.__setattr__(self, "network_allow", tuple(allow))
+        ports = self.network_ports
+        if isinstance(ports, (str, int)) or not isinstance(ports, (tuple, list)) or not ports or not all(
+            isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536 for v in ports
+        ):
+            raise ValueError("network_ports must be a non-empty tuple of port numbers")
+        object.__setattr__(self, "network_ports", tuple(ports))
+        for name in ("network_prompt", "network_record"):
+            value = getattr(self, name)
+            if value is not None and not callable(value):
+                raise ValueError(f"{name} must be callable")
+        if not isinstance(self.network_allow_cleartext, bool):
+            raise ValueError("network_allow_cleartext must be true or false")
 
 
 _DEFAULT_CONFIG = ShellConfig()
@@ -746,13 +798,45 @@ def _spawn(argv: list[str], cwd: str, env: dict[str, str]) -> subprocess.Popen:
         raise ToolError("the command could not be started", code="io_error") from None
 
 
-def _sandboxed_argv(command: str, root: str, env: Mapping[str, str], cfg: ShellConfig) -> list[str]:
+def _network_for(context: Any, cfg: ShellConfig, command: str) -> "_net_bridge.NetworkMount | None":
+    """Patch C11b: the network mount for this command, or None (the command then has no network, as in C11a).
+
+    Every failure here (no system python3, the proxy cannot start, a bad setting) is "no network", never a refusal of
+    the command and never a wider network, and is logged with a fixed code only (no host, no path, no command)."""
+    if cfg.network != "prompt":
+        return None
+    try:
+        python = _sandbox.bwrap.find_sandbox_python("/")
+        if not python:
+            log_event(logger, logging.WARNING, "tools.shell_network", check="bash_network", status="off", code="no_python")
+            return None
+        key = (cfg.network_allow, cfg.network_ports, cfg.network_allow_cleartext, id(cfg.network_prompt),
+               id(cfg.network_record))
+
+        def build() -> "_net_proxy.NetworkService":
+            return _net_proxy.make_service(
+                allow=cfg.network_allow, ports=cfg.network_ports, prompt=cfg.network_prompt,
+                record=cfg.network_record, allow_cleartext=cfg.network_allow_cleartext)
+
+        service = _net_proxy.service_for(context, key, build)
+        service.set_label(_net_policy.command_label(command))
+        return service.mount(python)
+    except Exception as exc:  # noqa: BLE001 -- fail closed: no network
+        code = getattr(exc, "code", None)
+        log_event(logger, logging.WARNING, "tools.shell_network", check="bash_network", status="off",
+                  code=code if isinstance(code, str) and code.isidentifier() else "proxy_unavailable")
+        return None
+
+
+def _sandboxed_argv(command: str, root: str, env: Mapping[str, str], cfg: ShellConfig,
+                    network: "_net_bridge.NetworkMount | None" = None) -> list[str]:
     """The bubblewrap command line for this call.  The self-test passed, so a profile that cannot be built NOW is a
     refusal, never a quiet run without the sandbox (see the module docstring).  The text is fixed and has no path."""
+    extra = {} if network is None else {"network": network}   # nothing new is passed when there is no network
     try:
         return _sandbox.wrap_command(
             command, project=root, env=env, toolchain_dirs=cfg.sandbox_toolchain_dirs,
-            extra_ro=cfg.sandbox_extra_ro, denied=_sandbox.default_denied(),
+            extra_ro=cfg.sandbox_extra_ro, denied=_sandbox.default_denied(), **extra,
         )
     except _sandbox.ProfileError as exc:
         log_event(logger, logging.WARNING, "tools.shell_sandbox", check="bash_sandbox", status="refused", code=exc.code)
@@ -772,7 +856,10 @@ def _execute(context: Any, command: str, timeout_s: int, cfg: ShellConfig, cance
     if cfg.sandbox == "required" and not sandboxed:
         raise ToolError(SANDBOX_REQUIRED_MESSAGE, code="refused")
     if sandboxed:
-        argv, spawn_env = _sandboxed_argv(command, root, env, cfg), _sandbox.bwrap.outer_environment()
+        mount = _network_for(context, cfg, command)
+        if mount is not None:
+            env = _net_bridge.apply_proxy_environment(env)     # AFTER sanitizing: ours win, the host's are dropped
+        argv, spawn_env = _sandboxed_argv(command, root, env, cfg, mount), _sandbox.bwrap.outer_environment()
     else:
         shell_path = _find_shell(env)
         if shell_path is None:
@@ -938,7 +1025,10 @@ def run_command(
     if cancel is not None and not callable(getattr(cancel, "is_set", None)):
         raise ToolError("cancel must have an is_set method", code="invalid_args")
     cfg = config if config is not None else _config_for(context)
-    return _execute(context, command, timeout_s, cfg, cancel, on_chunk)
+    try:
+        return _execute(context, command, timeout_s, cfg, cancel, on_chunk)
+    finally:
+        _net_proxy.clear_label(context)       # Patch C11b: a prompt after the command ended names no command
 
 
 def bash(context: Any, command: Any, timeout_s: Any = DEFAULT_TIMEOUT_S, reason: Any = None,

@@ -33,6 +33,7 @@ import os
 import stat
 from collections.abc import Mapping, Sequence
 
+from .bridge import NetworkMount, launcher_argv
 from .profile import (
     DEFAULT_HOME_TOOLCHAIN_DIRS,
     ProfileError,
@@ -42,8 +43,8 @@ from .profile import (
 )
 
 __all__ = [
-    "BWRAP_NAMES", "SHELL_CANDIDATES", "default_home", "find_bwrap", "find_shell", "outer_environment",
-    "signal_from_exit_code", "wrap_command",
+    "BWRAP_NAMES", "PYTHON_CANDIDATES", "SHELL_CANDIDATES", "default_home", "find_bwrap", "find_sandbox_python",
+    "find_shell", "outer_environment", "signal_from_exit_code", "wrap_command",
 ]
 
 BWRAP_NAMES: tuple[str, ...] = ("bwrap",)
@@ -91,6 +92,21 @@ def find_shell(root: str = "/") -> str | None:
     return None
 
 
+# C11b: the python3 that runs the network bridge INSIDE the sandbox.  Fixed absolute paths under /usr (which the sandbox
+# mounts), never a PATH lookup and never a virtualenv: what runs in there is the system's own interpreter.
+PYTHON_CANDIDATES: tuple[str, ...] = ("/usr/bin/python3", "/bin/python3", "/usr/local/bin/python3")
+
+
+def find_sandbox_python(root: str = "/") -> str | None:
+    """The first of ``PYTHON_CANDIDATES`` that is an executable file under ``root`` (the layout's root), as the
+    path it has INSIDE the sandbox; None when there is none (then the network stays off).  This only looks; the
+    network probe proves that it runs in there."""
+    for candidate in PYTHON_CANDIDATES:
+        if _is_executable_file(os.path.join(root, candidate.lstrip("/"))):
+            return candidate
+    return None
+
+
 def default_home() -> str | None:
     """The real home directory: ``$HOME`` when it is an absolute path, otherwise the passwd entry; None if unknown."""
     raw = os.environ.get("HOME", "")
@@ -124,8 +140,13 @@ def wrap_command(
     toolchain_dirs: Sequence[str] = DEFAULT_HOME_TOOLCHAIN_DIRS,
     extra_ro: Sequence[str] = (),
     denied: Sequence[str] = (),
+    network: NetworkMount | None = None,
 ) -> list[str]:
     """The full argv that runs ``command`` in the sandbox: ``[bwrap, *profile, "--", shell, "-c", command]``.
+
+    With ``network`` (C11b) the proxy's directory is mounted read-only and the command is started by the bridge
+    launcher (``python3 bridge.py ... -- shell -c command``, which execs the shell, so the exit status is still the
+    command's).  The network namespace stays unshared.
 
     Raises ``ProfileError`` (fixed text, never a path) when the sandbox cannot be built for these inputs, or when
     bubblewrap or a shell cannot be found (codes ``bwrap_missing`` and ``no_shell``).  Nothing is started or created.
@@ -145,7 +166,12 @@ def wrap_command(
     profile = build_profile(
         project=project, home=real_home, env=env, layout=resolved_layout,
         toolchain_dirs=toolchain_dirs, extra_ro=extra_ro, denied=denied,
+        net_dir=network.directory if network is not None else None,
     )
+    if network is not None:
+        if not network.python or not network.python.startswith("/"):
+            raise ProfileError("no_python")
+        return [bwrap, *profile, "--", *launcher_argv(network.python, shell, command)]
     return [bwrap, *profile, "--", shell, "-c", command]
 
 

@@ -107,6 +107,10 @@ class Environment:
     # Patch C11a: runs the sandbox self-test and returns a ``m2c.sandbox.ProbeResult``.  None (the default, so every
     # existing hand-built Environment keeps working) means "do not test, only look for the program".
     sandbox_probe: Callable[[], Any] | None = None
+    # Patch C11b: runs the network self-test (``m2c.sandbox.probe.run_network_probe``) and returns its result; None means
+    # "do not test".  ``network_mode`` is the shell setting ``network`` ("prompt" or "off") as the caller knows it.
+    network_probe: Callable[[], Any] | None = None
+    network_mode: str = "prompt"
 
     @classmethod
     def detect(cls, project: Path | None = None) -> Environment:
@@ -131,6 +135,7 @@ class Environment:
             resolved_project_path=resolved,
             prepare_config_dir=paths.prepare_config_dir,
             sandbox_probe=lambda: _sandbox.fresh_probe(),
+            network_probe=lambda: _sandbox.probe.run_network_probe(),
         )
 
 
@@ -344,13 +349,40 @@ def check_bwrap(env: Environment) -> CheckResult:
         return CheckResult(_BWRAP_NAME, Status.WARN, "The sandbox self-test could not be run. " + _NO_SANDBOX_NOTE,
                            "This is probably a bug in m2c doctor or an unusual system; please report it.")
     if getattr(probe, "works", False) is True:
-        return CheckResult(_BWRAP_NAME, Status.OK, f"{found} - {probe.describe()}")
+        return _with_network(env, CheckResult(_BWRAP_NAME, Status.OK, f"{found} - {probe.describe()}"))
     reason = getattr(probe, "describe", lambda: "the sandbox self-test failed")()
     code = getattr(probe, "reason_code", "")
     hint = _SANDBOX_HINTS.get(code, "Run 'm2c doctor' again after fixing the cause above; the self-test is repeated every time.")
     return CheckResult(
         _BWRAP_NAME, Status.WARN, f"bubblewrap was found at {found} but the sandbox does not work: {reason}. " + _NO_SANDBOX_NOTE, hint
     )
+
+
+_NETWORK_HINTS = {
+    "no_python": "Install a system python3 (for example 'sudo apt install python3'); the network bridge runs on it inside the sandbox.",
+    "proxy_failed": "The host-side proxy could not start (a private temporary directory or a unix socket was not possible).",
+}
+
+
+def _with_network(env: Environment, sandbox_ok: CheckResult) -> CheckResult:
+    """Patch C11b: add what the command network can do to the sandbox line.  A network that cannot run is a warning with
+    the reason (commands then run with NO network, which is safe); the sandbox's own verdict is never changed by it."""
+    if env.network_mode == "off":
+        return CheckResult(sandbox_ok.name, sandbox_ok.status, sandbox_ok.detail + "; network: off (setting)", sandbox_ok.hint)
+    if env.network_probe is None:
+        return sandbox_ok
+    try:
+        net = env.network_probe()
+    except Exception as exc:  # noqa: BLE001 -- an unfinished self-test is "network off", never "ok"
+        log_event(logger, logging.WARNING, "doctor.network_probe_crashed", check="bwrap", exc_type=type(exc).__name__)
+        return CheckResult(sandbox_ok.name, Status.WARN, sandbox_ok.detail + "; network: the network self-test could not be run, "
+                           "so commands have no network access", "This is probably a bug in m2c doctor; please report it.")
+    if getattr(net, "works", False) is True:
+        return CheckResult(sandbox_ok.name, sandbox_ok.status, sandbox_ok.detail + "; network: prompt mode, "
+                           + getattr(net, "describe", lambda: "works")(), sandbox_ok.hint)
+    reason = getattr(net, "describe", lambda: "the network self-test failed")()
+    hint = _NETWORK_HINTS.get(getattr(net, "reason_code", ""), "Run 'm2c doctor' again after fixing the cause above; the self-test is repeated every time.")
+    return CheckResult(sandbox_ok.name, Status.WARN, sandbox_ok.detail + f"; network: {reason}. Commands run with no network access", hint)
 
 
 def _under_mnt_c(path: Path) -> bool:

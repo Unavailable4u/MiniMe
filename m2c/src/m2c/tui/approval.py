@@ -27,6 +27,16 @@ The edited input keeps every other field of the call (``timeout_s``, ``reason``)
 command is refused (the person can press ``n``); an unchanged one is a plain allow.  C06 decides the edited call
 again, so an edit can never get past a deny rule.
 
+THE DOMAIN PROMPT (Patch C11b)
+------------------------------
+When a sandboxed command tries to reach a domain nobody has allowed, the network proxy asks through the same kind of
+one-at-a-time modal: ``Allow network access to <host>?`` with ``y`` allow for this session, ``a`` always allow (saved
+in ``~/.m2c/network.json`` by the policy, never here), ``n`` deny.  Esc is a deny.  ``DomainPromptMachine`` is the pure
+key map and ``describe_domain_request`` the text; they answer with the policy's own words (``allow_session``,
+``allow_always``, ``deny``).  The prompt shows the host, the port and the short label of the running command (already
+redacted and cut to a line by ``m2c.sandbox.netpolicy.command_label``) and nothing else about the command.  No other key
+answers: a stray key can never allow a domain.
+
 Standard library plus runner.py (C24); no terminal.
 
 Place this file at: m2c/src/m2c/tui/approval.py
@@ -42,8 +52,8 @@ from .render import Block, line
 from .safe import clean, clean_line, safe_name, truncate
 
 __all__ = [
-    "ApprovalMachine", "Done", "EditStart", "Expand", "KEY_HELP", "Pending", "SessionMemory", "Step",
-    "canonical_key", "describe_request",
+    "ApprovalMachine", "DOMAIN_KEY_HELP", "Done", "DomainDone", "DomainPromptMachine", "EditStart", "Expand", "KEY_HELP",
+    "Pending", "SessionMemory", "Step", "canonical_key", "describe_domain_request", "describe_request",
 ]
 
 MAX_COMMAND_CHARS = 8000
@@ -213,4 +223,53 @@ def describe_request(request: ApprovalRequest) -> list[Block]:
     if tool in ("edit_file", "write_file"):
         legend += "  [v] expand diff"
     blocks.append(line(legend, "info"))
+    return blocks
+
+
+# --------------------------------------------------------------------------
+# Patch C11b: the network domain prompt
+# --------------------------------------------------------------------------
+DOMAIN_KEY_HELP = "[y] allow for this session  [a] always allow (saved)  [n] deny  [Esc] deny"
+
+
+@dataclass(frozen=True)
+class DomainDone:
+    """The prompt is answered; ``answer`` is one of ``allow_session``, ``allow_always``, ``deny``."""
+    answer: str
+
+
+class DomainPromptMachine:
+    """The keys of the domain prompt.  Only ``y``, ``a``, ``n`` and Esc decide; anything else is a hint, so no stray key
+    allows a domain.  Once decided it stays decided (a second key is ignored)."""
+
+    def __init__(self) -> None:
+        self.answer: Optional[str] = None
+
+    def feed(self, key: str) -> Union[Pending, DomainDone]:
+        if self.answer is not None:
+            return Pending()
+        k = key.lower() if isinstance(key, str) and len(key) == 1 else key
+        if k == "y":
+            self.answer = "allow_session"
+        elif k == "a":
+            self.answer = "allow_always"
+        elif k in ("n", "escape"):
+            self.answer = "deny"
+        elif isinstance(k, str) and len(k) == 1 and k.isprintable():
+            return Pending("Press y, a or n.")
+        else:
+            return Pending()
+        return DomainDone(self.answer)
+
+
+def describe_domain_request(host: str, port: int, label: str = "") -> list[Block]:
+    """What the domain prompt shows: the host, the port, the short label, the keys.  Everything is cleaned for a
+    terminal; a host that does not look like one is not shown as one."""
+    shown = clean_line(host, 255)
+    port_text = str(port) if isinstance(port, int) and not isinstance(port, bool) else "?"
+    blocks = [line(f"Allow network access to {shown}?   port {port_text}", "warning")]
+    text = clean_line(label, 60) if isinstance(label, str) and label else ""
+    if text:
+        blocks.append(line(f"asked by the running command: {text}", "dim"))
+    blocks.append(line(DOMAIN_KEY_HELP, "info"))
     return blocks

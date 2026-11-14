@@ -62,6 +62,15 @@ def _sandbox_unavailable_by_default(request, monkeypatch):
         sandbox.reset()
         return
     from m2c import sandbox
+    from m2c.sandbox import bwrap as _bwrap
+
+    # Patch C11b: no test but a real-sandbox one starts a proxy or runs the network self-test; "no system python3" is
+    # the cheapest way to say "no network" to the shell tool, and the doctor's network probe is a plain "unavailable".
+    monkeypatch.setattr(_bwrap, "find_sandbox_python", lambda root="/": None)
+    monkeypatch.setattr(
+        sandbox.probe, "run_network_probe",
+        lambda **_: sandbox.probe.NetworkProbeResult(False, "bwrap_missing", sandbox.probe.NETWORK_REASONS["bwrap_missing"]),
+    )
 
     monkeypatch.setattr(
         sandbox, "get_status",

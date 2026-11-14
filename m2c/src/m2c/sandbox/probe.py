@@ -51,6 +51,13 @@ Fails closed: any unexpected exception during the probe is "does not work" (``pr
 Logging fails open and carries only words and codes: ``sandbox.probe status=ok|failed code=...
 count=<checks run>``.  No command and no output is ever logged.
 
+Patch C11b adds a SECOND, separate probe at the bottom of this file: ``run_network_probe`` (``NETWORK_CHECK_NAMES``).
+It starts a real host-side proxy with a fake resolver and a loopback fake upstream (offline-safe: no real internet),
+runs ONE sandboxed command through the bridge and judges it from what the command printed and from what the host saw
+(the upstream's accept count, the proxy directory's mode).  It is kept apart from ``CHECK_NAMES`` on purpose: the main
+probe, ``works`` and the existing tests that pin ``CHECK_NAMES`` are untouched.  A failed network probe only means "the
+network stays off"; it never changes whether the sandbox itself is active.
+
 Standard library only.  Place this file at: m2c/src/m2c/sandbox/probe.py
 """
 from __future__ import annotations
@@ -58,6 +65,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import socket
 import shlex
 import shutil
 import signal
@@ -81,8 +89,9 @@ from .profile import (
 )
 
 __all__ = [
-    "CHECK_NAMES", "CheckOutcome", "ProbeResult", "REASONS", "RunResult", "classify_start_failure", "default_runner",
-    "reset_session_cache", "run_probe", "session_probe",
+    "CHECK_NAMES", "CheckOutcome", "NETWORK_CHECK_NAMES", "NETWORK_REASONS", "NetworkProbeResult", "ProbeResult",
+    "REASONS", "RunResult", "classify_start_failure", "default_runner", "reset_session_cache", "run_network_probe",
+    "run_probe", "session_network_probe", "session_probe",
 ]
 
 logger = logging.getLogger("m2c.sandbox.probe")
@@ -648,3 +657,318 @@ def reset_session_cache() -> None:
     """Forget every remembered result (tests; a doctor that wants a fresh look uses ``run_probe`` directly)."""
     with _CACHE_LOCK:
         _CACHE.clear()
+        _NET_CACHE.clear()
+
+
+# ==========================================================================
+# Patch C11b: the network probe
+# ==========================================================================
+NETWORK_CHECK_NAMES: tuple[str, ...] = (
+    "direct_connect_fails", "not_allowed_refused", "ip_literal_refused", "private_resolution_refused",
+    "allowed_host_works", "socket_dir_private",
+)
+
+# Fixed words for "the network stays off, and why".  Nothing from a process, a path or a host is ever added.
+NETWORK_REASONS: dict[str, str] = {
+    "bwrap_missing": REASONS["bwrap_missing"],
+    "no_python": "no system python3 was found for the network bridge",
+    "no_shell": REASONS["bwrap_failed"],
+    "sandbox_unavailable": "the sandbox itself does not work, so the network stays off",
+    "proxy_failed": "the network proxy could not be started",
+    "bridge_failed": "the network bridge could not be started inside the sandbox",
+    "timeout": REASONS["timeout"],
+    "check_failed": "the network bridge started but did not hold",
+    "probe_error": "the network self-test could not be completed",
+}
+_NET_PROBE_TIMEOUT_S = 30.0
+
+
+@dataclass(frozen=True)
+class NetworkProbeResult:
+    """The verdict on the controlled network.  ``works`` is True only when every check in NETWORK_CHECK_NAMES ran and
+    passed; ``python`` is the in-sandbox python3 that ran the bridge (None when there is none)."""
+
+    works: bool
+    reason_code: str
+    reason: str
+    checks: tuple[CheckOutcome, ...] = ()
+    python: str | None = None
+    duration_ms: int = 0
+
+    @property
+    def failed(self) -> tuple[str, ...]:
+        return tuple(c.name for c in self.checks if not c.passed)
+
+    def describe(self) -> str:
+        if self.works:
+            return f"all {len(self.checks)} network checks passed"
+        if self.reason_code == "check_failed" and self.failed:
+            return f"{self.reason}: {', '.join(self.failed)}"
+        return self.reason
+
+
+def _net_failure(code: str, *, started: float, python: str | None = None,
+                 checks: Sequence[CheckOutcome] = ()) -> NetworkProbeResult:
+    code = code if code in NETWORK_REASONS else "probe_error"
+    ms = max(0, int((time.monotonic() - started) * 1000))
+    return NetworkProbeResult(False, code, NETWORK_REASONS[code], tuple(checks), python, ms)
+
+
+class _FakeUpstream:
+    """A blocking loopback server on the host: it sends a banner to whoever connects and counts the connections.  The
+    count is the probe's evidence that a refused destination was never connected to."""
+
+    def __init__(self, banner: str) -> None:
+        self.banner = banner.encode("ascii")
+        self.accepted = 0
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(8)
+        self._sock.settimeout(0.2)
+        self.port = int(self._sock.getsockname()[1])
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, name="m2c-probe-upstream", daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            self.accepted += 1
+            try:
+                conn.sendall(self.banner)
+            except OSError:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        self._thread.join(2)
+
+
+# The client that runs INSIDE the sandbox.  It prints one ``NAME status-code body-word`` line per attempt.
+_NETWORK_CLIENT = r"""
+import socket, sys
+PORT = int(sys.argv[1])
+def direct(addr):
+    try:
+        socket.create_connection(addr, 3).close()
+        return "CONNECTED"
+    except OSError:
+        return "FAILED"
+def via(host):
+    try:
+        s = socket.create_connection(("127.0.0.1", 3128), 5)
+        s.settimeout(6)
+        s.sendall(("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n" % (host, PORT, host, PORT)).encode())
+        data = b""
+        while len(data) < 4096:
+            chunk = s.recv(1024)
+            if not chunk:
+                break
+            data += chunk
+            if b"\r\n\r\n" in data and (data.startswith(b"HTTP/1.1 200") and len(data.split(b"\r\n\r\n", 1)[1]) >= 8):
+                break
+        return data.decode("latin-1")
+    except OSError:
+        return ""
+print("DIRECT_DOC", direct(("192.0.2.1", 443)))
+print("DIRECT_HOST_LOOPBACK", direct(("127.0.0.1", PORT)))
+for tag, host in (("DENIED", "denied.example"), ("IPLIT", "93.184.216.34"), ("PRIVATE", "rebind.example"),
+                  ("ALLOWED", "allowed.example")):
+    reply = via(host)
+    status = reply.split(" ", 2)[1] if reply.startswith("HTTP/") and len(reply.split(" ", 2)) > 1 else "0"
+    print("REPLY_BEGIN", tag, status)
+    print(reply.replace("\r", "").replace("\n", "|"))
+    print("REPLY_END", tag)
+"""
+
+
+def _parse_replies(stdout: str) -> dict[str, tuple[str, str]]:
+    out: dict[str, tuple[str, str]] = {}
+    lines = stdout.splitlines()
+    for i, line in enumerate(lines):
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "REPLY_BEGIN" and i + 1 < len(lines):
+            out[parts[1]] = (parts[2], lines[i + 1])
+    return out
+
+
+def run_network_probe(
+    *,
+    runner: Runner | None = None,
+    bwrap_path: str | None = None,
+    python: str | None = None,
+    layout: SystemLayout | None = None,
+    toolchain_dirs: Sequence[str] = DEFAULT_HOME_TOOLCHAIN_DIRS,
+    extra_ro: Sequence[str] = (),
+    denied: Sequence[str] = (),
+    timeout_s: float = _NET_PROBE_TIMEOUT_S,
+) -> NetworkProbeResult:
+    """Really test the controlled network, fresh.  Never raises: any trouble is "the network stays off".
+
+    It needs no internet: the proxy runs with a fake resolver (``allowed.example`` -> the loopback fake upstream,
+    ``rebind.example`` -> a private address) and the test-only loopback flag, which exists only as a constructor
+    argument of the proxy and is reachable from no setting or environment variable.  One sandboxed command makes the
+    attempts; the verdict combines what it printed with what the host saw."""
+    started = time.monotonic()
+    result = _run_network_probe(runner, bwrap_path, python, layout, toolchain_dirs, extra_ro, denied, timeout_s, started)
+    log_event(logger, logging.INFO if result.works else logging.WARNING, "sandbox.network_probe",
+              status="ok" if result.works else "failed", code=result.reason_code, count=len(result.checks),
+              duration_ms=result.duration_ms)
+    return result
+
+
+def _run_network_probe(runner, bwrap_path, python, layout, toolchain_dirs, extra_ro, denied, timeout_s,
+                       started) -> NetworkProbeResult:
+    # imported here: the main probe must stay importable and testable without the network modules
+    from .bridge import NETWORK_DIR_DEST, launcher_argv
+    from .bwrap import find_sandbox_python
+    from .netpolicy import NetworkPolicy
+    from .netproxy import NetworkError, NetworkService, ProxyConfig
+
+    world: _World | None = None
+    upstream: _FakeUpstream | None = None
+    service: NetworkService | None = None
+    py: str | None = None
+    try:
+        bwrap = bwrap_path if bwrap_path is not None else find_bwrap()
+        if not bwrap:
+            return _net_failure("bwrap_missing", started=started)
+        try:
+            resolved = layout if layout is not None else detect_system_layout("/")
+        except ProfileError:
+            return _net_failure("sandbox_unavailable", started=started)
+        shell = find_shell(resolved.root)
+        if shell is None:
+            return _net_failure("no_shell", started=started)
+        py = python if python is not None else find_sandbox_python(resolved.root)
+        if not py:
+            return _net_failure("no_python", started=started)
+
+        banner = "M2CNET" + secrets.token_hex(6)
+        upstream = _FakeUpstream(banner)
+        hosts = {"allowed.example": ["127.0.0.1"], "rebind.example": ["10.0.0.5"]}
+
+        async def resolver(host: str, port: int) -> list[str]:
+            return list(hosts.get(host, []))
+
+        policy = NetworkPolicy(allow=["allowed.example", "rebind.example"], ports=(upstream.port,), store=None,
+                               prompt=None)
+        service = NetworkService(policy, config=ProxyConfig(), resolver=resolver, _test_allow_loopback=True)
+        try:
+            service.start()
+            mount = service.mount(py)
+        except NetworkError:
+            return _net_failure("proxy_failed", started=started, python=py)
+
+        world = _World()
+        probe_env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C", "TERM": "dumb"}
+        try:
+            profile = build_profile(
+                project=world.project, home=world.home, env=probe_env, layout=resolved,
+                toolchain_dirs=toolchain_dirs, extra_ro=extra_ro, denied=denied, net_dir=mount.directory,
+            )
+        except ProfileError:
+            return _net_failure("probe_error", started=started, python=py)
+        script = "\n".join([
+            ": probe_check=network",
+            f"{_q(py)} -I -c {_q(_NETWORK_CLIENT)} {upstream.port}",
+            f"if touch {_q(NETWORK_DIR_DEST + '/probe_w_' + world.unique)} 2>/dev/null; then echo NETDIR_WRITABLE; fi",
+            f"echo {SENTINEL}", "",
+        ])
+        outer = outer_environment()
+        run = runner if runner is not None else default_runner
+        argv = [bwrap, *profile, "--", *launcher_argv(py, shell, script)]
+        got = run(argv, env=outer, timeout_s=timeout_s)
+        if got.timed_out:
+            return _net_failure("timeout", started=started, python=py)
+        if not _ran(got):
+            return _net_failure("bridge_failed", started=started, python=py)
+
+        replies = _parse_replies(got.stdout)
+        words = got.stdout.split()
+        accepted = upstream.accepted
+
+        def refused(tag: str, message_word: str) -> bool:
+            status, body = replies.get(tag, ("0", ""))
+            return status == "403" and message_word in body
+
+        direct_ok = ("DIRECT_DOC FAILED" in got.stdout and "DIRECT_HOST_LOOPBACK FAILED" in got.stdout)
+        allowed_status, allowed_body = replies.get("ALLOWED", ("0", ""))
+        works_through = allowed_status == "200" and banner in allowed_body and accepted == 1
+        dir_ok = _network_dir_private(mount.directory) and "NETDIR_WRITABLE" not in words
+        results = {
+            "direct_connect_fails": direct_ok,
+            "not_allowed_refused": refused("DENIED", "not allowed") and accepted == 1,
+            "ip_literal_refused": refused("IPLIT", "m2c network:") and accepted == 1,
+            "private_resolution_refused": refused("PRIVATE", "not reachable") and accepted == 1,
+            "allowed_host_works": works_through,
+            "socket_dir_private": dir_ok,
+        }
+        outcomes = [CheckOutcome(n, bool(results[n]), "ok" if results[n] else "violated") for n in NETWORK_CHECK_NAMES]
+        ms = max(0, int((time.monotonic() - started) * 1000))
+        if all(o.passed for o in outcomes):
+            return NetworkProbeResult(True, "ok", "the network works", tuple(outcomes), py, ms)
+        if not works_through and all(o.passed for o in outcomes if o.name != "allowed_host_works") and not replies:
+            return _net_failure("bridge_failed", started=started, python=py, checks=outcomes)
+        return _net_failure("check_failed", started=started, python=py, checks=outcomes)
+    except Exception:  # noqa: BLE001 -- a security check that cannot be completed is a failed one
+        return _net_failure("probe_error", started=started, python=py)
+    finally:
+        if service is not None:
+            try:
+                service.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if upstream is not None:
+            upstream.close()
+        if world is not None:
+            world.close()
+
+
+def _network_dir_private(directory: str | None) -> bool:
+    """The proxy's directory and socket belong to this user and are closed to everyone else (host-side evidence)."""
+    if not directory:
+        return False
+    try:
+        st = os.lstat(directory)
+        sock = os.lstat(os.path.join(directory, "proxy.sock"))
+    except OSError:
+        return False
+    return (st.st_uid == os.geteuid() and (st.st_mode & 0o077) == 0
+            and sock.st_uid == os.geteuid() and (sock.st_mode & 0o077) == 0)
+
+
+_NET_CACHE: dict[tuple, NetworkProbeResult] = {}
+
+
+def session_network_probe(
+    *,
+    runner: Runner | None = None,
+    toolchain_dirs: Sequence[str] = DEFAULT_HOME_TOOLCHAIN_DIRS,
+    extra_ro: Sequence[str] = (),
+    denied: Sequence[str] = (),
+    **kwargs,
+) -> NetworkProbeResult:
+    """The network probe result for this process, run once per distinct settings and then remembered."""
+    key = _key(toolchain_dirs, extra_ro, denied, runner)
+    with _CACHE_LOCK:
+        cached = _NET_CACHE.get(key)
+        if cached is None:
+            cached = run_network_probe(runner=runner, toolchain_dirs=toolchain_dirs, extra_ro=extra_ro,
+                                       denied=denied, **kwargs)
+            _NET_CACHE[key] = cached
+        return cached

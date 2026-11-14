@@ -104,11 +104,15 @@ from ..runner import ApprovalRequest, Choice, ToolRunner
 from ..session_setup import open_project, project_policy_context
 from ..store import append_event, create_session, new_session_id, read_events
 from ..tools.paths import PathGuardError, resolve_for_read
+from ..sandbox import netpolicy as _net_policy
+from ..sandbox import netproxy as _net_proxy
+from ..tools.shell import ShellConfig, configure_shell
 from ..trust import Answer, TrustPromptMachine, TrustStore, TrustStoreError, describe_prompt, fingerprint_matches
 from ..trust import ignored_note, project_trust_state
 from ..trust.store import FILE_NAME as TRUST_FILE_NAME
 from .approval import (
-    ApprovalMachine, Done, EditStart, Expand, Pending, SessionMemory, describe_request,
+    ApprovalMachine, Done, DomainDone, DomainPromptMachine, EditStart, Expand, Pending, SessionMemory,
+    describe_domain_request, describe_request,
 )
 from .complete import Scan, candidates, mention_at, scan_project
 from .diff import Existing
@@ -149,6 +153,14 @@ class _Approval:
     request: ApprovalRequest
     machine: ApprovalMachine
     future: "asyncio.Future[Done]"
+
+
+@dataclass
+class _DomainAsk:
+    """Patch C11b: the network domain prompt that is open (at most one)."""
+
+    machine: DomainPromptMachine
+    future: "asyncio.Future[str]"
 
 
 @dataclass
@@ -234,6 +246,10 @@ class Session:
             raise StartupError("this folder cannot be used as a project: " + clean_line(str(exc), 200)) from None
         self._tool_context = built.tool_context
         self._root = built.root
+        # Patch C11b: the terminal answers the network proxy's questions, so it replaces the shell configuration that
+        # session_setup made (same sandbox mode and warning) with one that carries its domain prompt and its recorder.
+        configure_shell(self._tool_context, ShellConfig(
+            warn=self._sandbox_warning, network_prompt=self._network_prompt, network_record=self._network_record))
 
         self.status = StatusState(mode=mode, window_tokens=window_from_env(self._environ))
         self.memory = SessionMemory()
@@ -270,6 +286,9 @@ class Session:
         self._worker: "asyncio.Task[None] | None" = None
         self._tasks: set["asyncio.Task[Any]"] = set()
         self._approval: _Approval | None = None
+        self._domain: _DomainAsk | None = None            # Patch C11b: the network domain prompt that is open
+        self._domain_lock = asyncio.Lock()                # one domain prompt at a time
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._modal: _Modal | None = None
         self._last_checkpoint_step = 0
         self._sandbox_shown = False
@@ -283,6 +302,7 @@ class Session:
     # ------------------------------------------------------------------ start and stop
     async def start(self, connect_timeout_s: float = 15.0) -> int | None:
         """Open the link.  Returns None when ready, else the process exit status (a line was shown)."""
+        self._loop = asyncio.get_running_loop()
         callbacks = LinkCallbacks(on_event=self._on_event, on_tool_proposed=self._on_tool_proposed,
                                   on_error=self._on_error, on_state=self._on_link_state)
         self._link = self._link_factory(self._store, callbacks=callbacks, capabilities=("tools",),
@@ -327,6 +347,9 @@ class Session:
         if self._runner is not None:
             await self._runner.aclose()
             self._runner = None
+        self._answer_domain("deny")                     # Patch C11b: a prompt still open when the session ends is a deny
+        self._loop = None
+        _net_proxy.close_network(self._tool_context)    # stop the proxy and remove its private directory
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -366,6 +389,8 @@ class Session:
         a = self._approval
         if a is not None:
             return not a.machine.editing
+        if self._domain is not None:
+            return True
         return self.modal is None and buffer_empty and self.grant_offered
 
     @property
@@ -379,6 +404,8 @@ class Session:
         a = self._approval
         if a is not None and not a.machine.editing:
             self._apply(a, a.machine.feed(key))
+        elif a is None and self._domain is not None:
+            self._apply_domain(self._domain.machine.feed(key))
         elif key == "g" and self.grant_offered:
             self._spawn(self._grant())
 
@@ -420,6 +447,9 @@ class Session:
             self._apply(a, a.machine.feed("escape"))
             self.ui.set_prompt("> ")
             return
+        if a is None and self._domain is not None:      # Patch C11b: Esc on the domain prompt is a deny, nothing more
+            self._apply_domain(self._domain.machine.feed("escape"))
+            return
         if self._modal is not None:
             self._modal = None
             self.ui.set_prompt("> ")
@@ -433,6 +463,11 @@ class Session:
     def on_interrupt(self) -> None:
         """Ctrl-C: stop the open run (or the prompt in front of it); with nothing running, leave."""
         a = self._approval
+        if a is None and self._domain is not None:      # Patch C11b: deny the open domain prompt, stop the run, stay
+            self._apply_domain(self._domain.machine.feed("escape"))
+            if self._run_id is not None:
+                self._spawn(self._cancel_current(say=True))
+            return
         if a is not None and a.machine.editing:
             self.on_escape()
         elif self._run_id is not None:
@@ -778,6 +813,59 @@ class Session:
         if done.remember_deny:
             self.ui.show([line("[denied] You will not be asked about this exact call again in this session.", "dim")])
         return done.choice
+
+    # ------------------------------------------------------------------ network domains (Patch C11b)
+    async def _network_prompt(self, host: str, port: int, label: str) -> str:
+        """The ``DomainPrompt`` the shell tool's proxy calls.  The proxy runs on its own thread and loop, so the question
+        is moved to the terminal's loop; no loop (the session is not running, or is closing) is a deny."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return "deny"
+        return await _net_policy.prompt_on_loop(self._ask_domain, loop)(host, port, label)
+
+    async def _ask_domain(self, host: str, port: int, label: str) -> str:
+        """One domain prompt at a time, and never while an approval prompt is open (the person would answer the wrong
+        one).  A withdrawn question (the proxy gave up waiting: that is a deny) disappears from the screen."""
+        async with self._domain_lock:
+            while self._approval is not None:
+                await asyncio.sleep(0.1)
+            ask = _DomainAsk(DomainPromptMachine(), asyncio.get_running_loop().create_future())
+            self._domain = ask
+            self.ui.show(describe_domain_request(host, port, label))
+            self.ui.set_prompt("allow network? [y/a/n] > ")
+            try:
+                return await ask.future
+            except asyncio.CancelledError:
+                self.ui.show([line("[the network request was withdrawn]", "dim")])
+                raise
+            finally:
+                if self._domain is ask:
+                    self._domain = None
+                self.ui.set_prompt("> ")
+
+    def _apply_domain(self, step: Any) -> None:
+        if isinstance(step, Pending):
+            if step.message:
+                self.ui.show([line(step.message, "dim")])
+        elif isinstance(step, DomainDone) and self._domain is not None and not self._domain.future.done():
+            self._domain.future.set_result(step.answer)
+
+    def _answer_domain(self, answer: str) -> None:
+        ask = self._domain
+        if ask is not None and not ask.future.done():
+            ask.future.set_result(answer)
+
+    def _network_record(self, data: dict) -> None:
+        """The proxy's decision record (host, decision word, scope) goes to the local log.  It arrives on the proxy's
+        thread; the store belongs to the terminal's loop, so it is handed over.  Fails open: a lost record is only lost."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        clean_data = {k: str(data.get(k, ""))[:255] for k in ("host", "decision", "scope")}
+        try:
+            loop.call_soon_threadsafe(self._log, "network", clean_data)
+        except RuntimeError:
+            pass
 
     def _apply(self, approval: _Approval, step: Any) -> None:
         if isinstance(step, Pending):

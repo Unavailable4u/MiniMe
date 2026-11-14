@@ -38,13 +38,17 @@ the order is part of the contract and tests pin it):
     it.  A read-only bind mount cannot be removed or renamed from inside either
     (``rmdir .git`` and ``mv .git x`` fail with "busy"), which is what stops the
     command from replacing a protected directory with its own.
+6b. (C11b, only when ``net_dir`` is given) the proxy's directory, READ-ONLY, at ``/run/m2c-net``.  A unix socket
+    on a read-only mount can still be connected to; nothing in it can be changed from inside.
 7.  The home and the root are remounted read-only, after every mount (a remount
     before a later mount would leave that mount's parent writable).
 
 Namespaces: new user (when the kernel offers it, ``--unshare-user-try``), PID, IPC,
 UTS and NETWORK.  The network namespace is unshared and nothing here ever shares it
 back: the command has only a loopback interface, so no connection leaves the
-machine.  (The proxy that C11b adds is a separate patch.)  ``--die-with-parent`` and
+machine.  (C11b adds controlled network WITHOUT sharing the namespace: when ``net_dir`` is given, the proxy's
+private directory (a unix socket and the bridge script) is mounted read-only at ``/run/m2c-net``, step 6b below.
+The command still has only a loopback interface.)  ``--die-with-parent`` and
 ``--new-session`` (no controlling terminal, so no TIOCSTI keystroke injection) are
 always present, and every Linux capability is dropped.
 
@@ -82,6 +86,8 @@ import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+
+from .bridge import NETWORK_DIR_DEST
 
 __all__ = [
     "DEFAULT_HOME_TOOLCHAIN_DIRS", "ETC_ENTRIES", "NEVER_MOUNT_HOME", "PROFILE_ERROR_MESSAGES", "PROTECTED_DIRS",
@@ -159,6 +165,8 @@ PROFILE_ERROR_MESSAGES: dict[str, str] = {
     # raised by bwrap.py, which builds on this module and shares its error type
     "bwrap_missing": "bubblewrap (bwrap) was not found",
     "no_shell": "no shell (bash or sh) was found for the sandbox",
+    "no_python": "no system python3 was found for the network bridge",
+    "net_dir_invalid": "the network directory is not private to this user",
     "command_invalid": "the command must be a string without a NUL byte",
 }
 
@@ -336,6 +344,24 @@ def _masked_files(mounts: Iterable[tuple[str, str]]) -> list[str]:
     return out
 
 
+def _check_net_dir(net_dir: object) -> str:
+    """The proxy directory, checked: absolute, a real directory (not a symlink), owned by this user, mode 0700."""
+    if not _is_abs_path(net_dir):
+        raise ProfileError("net_dir_invalid")
+    path = str(net_dir)
+    try:
+        st = os.lstat(path)
+    except OSError:
+        raise ProfileError("net_dir_invalid") from None
+    import stat as _stat
+
+    if not _stat.S_ISDIR(st.st_mode) or st.st_mode & 0o077:
+        raise ProfileError("net_dir_invalid")
+    if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+        raise ProfileError("net_dir_invalid")
+    return path
+
+
 def _protected_paths(project: str) -> list[str]:
     out: list[str] = []
     for name in dict.fromkeys(PROTECTED_DIRS + PROTECTED_RC_FILES):
@@ -377,6 +403,7 @@ def build_profile(
     toolchain_dirs: Sequence[str] = DEFAULT_HOME_TOOLCHAIN_DIRS,
     extra_ro: Sequence[str] = (),
     denied: Sequence[str] = (),
+    net_dir: str | None = None,
 ) -> list[str]:
     """The ``bwrap`` options (without the program name and without the command) that confine a command to ``project``.
 
@@ -386,6 +413,10 @@ def build_profile(
     ``layout``        the system directories (``detect_system_layout()``); tests pass a fake root.
     ``toolchain_dirs``/``extra_ro``  read-only paths mounted if they exist (relative to the home, ``~/x`` or absolute).
     ``denied``        absolute paths no mount may expose and the project may not contain (the m2c config directory).
+    ``net_dir``       (C11b) the HOST directory holding the proxy's unix socket and the bridge script; mounted
+                      read-only at ``/run/m2c-net``.  Must be an absolute, real (not a symlink) directory owned by
+                      this user and closed to everyone else (mode 0700), else ``ProfileError("net_dir_invalid")``.
+                      The network namespace stays unshared either way.
 
     Raises ``ProfileError`` (fixed text, never a path) when the sandbox cannot be built safely for these inputs.  The
     caller appends ``--`` and the command.  Only the disk is read; nothing is created or changed.
@@ -420,6 +451,8 @@ def build_profile(
     args += ["--bind", project_real, project_real]
     for path in protected:  # AFTER the project bind: a later mount wins
         args += ["--ro-bind", path, path]
+    if net_dir is not None:
+        args += ["--ro-bind", _check_net_dir(net_dir), NETWORK_DIR_DEST]
     args += ["--remount-ro", home_real, "--remount-ro", "/"]
     args += _environment_args(env, home_real, project_real)
     args += ["--chdir", project_real]
