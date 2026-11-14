@@ -1,0 +1,62 @@
+{
+  "name": "tasks",
+  "version": "v0",
+  "risk": "R0",
+  "description": "Keep a task list for the work in hand and show it to the person. Send the WHOLE list on every call: it replaces the previous one, and an empty list clears it. Give each task a short unique id, a title, a status (pending, in_progress, done or blocked) and optionally the ids it depends on. At most 30 tasks.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "tasks": {
+        "type": "array",
+        "description": "The complete task list, in the order to show it.",
+        "maxItems": 30,
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Short unique id, for example t1.",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "description": "What the task is, on one line.",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "in_progress",
+                "done",
+                "blocked"
+              ]
+            },
+            "depends_on": {
+              "type": "array",
+              "description": "Ids of tasks that must be done first. They must exist in this list and must not form a cycle.",
+              "maxItems": 29,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": [
+      "tasks"
+    ],
+    "additionalProperties": false
+  }
+}

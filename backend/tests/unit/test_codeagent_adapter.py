@@ -285,7 +285,7 @@ def test_tool_call_with_an_error_never_has_arguments():
 
 def test_tool_definitions_are_data_read_from_the_protocol_directory():
     assert TOOL_NAMES == {"read_file", "list_dir", "glob", "grep", "edit_file", "write_file", "delete_path",
-                          "bash", "plan_exit"}
+                          "bash", "plan_exit", "ask_user", "tasks"}
     for path in (REPO / "protocol" / "v1" / "tools").glob("*.json"):
         d = json.loads(path.read_text(encoding="utf-8"))
         spec = ToolSpec.from_definition(d)

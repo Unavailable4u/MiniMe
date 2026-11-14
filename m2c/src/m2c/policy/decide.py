@@ -103,6 +103,7 @@ from .modes import (
     DELETE,
     DENY,
     EDIT,
+    INTERACT,
     PLAN_EXIT,
     READ,
     RISKS,
@@ -890,6 +891,40 @@ def _decide_plan_exit(env: _Env, inp: dict) -> _V:
 
 
 # --------------------------------------------------------------------------
+# ask_user and tasks (Patch L01a)
+# --------------------------------------------------------------------------
+
+
+def _interact_text(name: str, inp: dict) -> str:
+    """The one string a rule's pattern is matched against: the question for ``ask_user``, the task titles
+    (one per line, only those that are text) for ``tasks``.  Bounded by ``_MAX_TEXT`` per string already; the
+    join is cut so a long list cannot make the match slow."""
+    if name == "ask_user":
+        return inp["question"]
+    titles = [t["title"] for t in inp["tasks"][:100] if isinstance(t, dict) and isinstance(t.get("title"), str)]
+    return "\n".join(titles)[:65536]
+
+
+def _decide_interact(env: _Env, spec: ToolSpec, inp: dict) -> _V:
+    """Neither tool touches a file or runs anything, so nothing here looks at a path.  A deny rule wins, an ask
+    rule asks, otherwise the mode default says (allow at R0 in every mode: ``ask_user`` is itself the prompt, and
+    a call nobody can answer is answered by the runner with a fixed "no person is available" result)."""
+    text = _interact_text(spec.name, inp)
+    r = first_command_match(env.merged.deny, spec.name, (text,))
+    if r is not None:
+        return _deny(f"denied by rule {r.layer}:{r.raw}", r.label)
+    r = first_command_match(env.merged.ask, spec.name, (text,))
+    if r is not None:
+        return _ask(f"rule {r.layer}:{r.raw} requires approval", r.label)
+    md = mode_default(env.ctx.mode, INTERACT, env.eff, inside_project=True, protected=False)
+    if md.action == ALLOW:
+        return _allow_mode(md.reason)
+    if md.action == ASK:
+        return _ask(md.reason)
+    return _deny(md.reason)
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
@@ -959,6 +994,8 @@ def _decide(request: object, ctx: object) -> Decision:
             v = _decide_shell(env, inp)
     elif cls == PLAN_EXIT:
         v = _decide_plan_exit(env, inp)
+    elif cls == INTERACT:
+        v = _decide_interact(env, spec, inp)
     else:
         v = _decide_file_tool(env, spec, inp)
     return _finalize(v, ctx, merged, eff)

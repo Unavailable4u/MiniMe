@@ -207,7 +207,8 @@ def random_request(rng):
     p = rng.choice(PATHS)
     inp = {"read_file": {"path": p}, "list_dir": {"path": p or "."}, "glob": {"pattern": rng.choice(["*.py", "../*", p or "x"])},
            "grep": {"pattern": "x", "path": p or "."}, "edit_file": {"path": p, "old_string": "a", "new_string": "b"},
-           "write_file": {"path": p, "content": "c"}, "delete_path": {"path": p}, "plan_exit": {"plan": "p"}}[tool]
+           "write_file": {"path": p, "content": "c"}, "delete_path": {"path": p}, "plan_exit": {"plan": "p"},
+               "ask_user": {"question": p or "q"}, "tasks": {"tasks": [{"id": "a", "title": p or "t", "status": "pending"}]}}[tool]
     return Request(tool, inp, risk)
 
 
@@ -250,7 +251,8 @@ def test_every_allow_is_built_by_an_allow_constructor_and_is_explained(monkeypat
         # 3. negative checks that hold in every mode
         assert req.tool not in ("plan_exit",), (req, d)
         if d.basis == "mode":
-            assert req.tool in ("read_file", "list_dir", "glob", "grep", "edit_file", "write_file"), (req, d)
+            # Patch L01a: ask_user and tasks run nothing and touch nothing; a mode default may allow them at R0
+            assert req.tool in ("read_file", "list_dir", "glob", "grep", "edit_file", "write_file", "ask_user", "tasks"), (req, d)
             if req.tool in ("edit_file", "write_file"):
                 assert mode == "accept-edits", (req, mode, d)
             assert d.matched_rule is None
@@ -262,7 +264,7 @@ def test_every_allow_is_built_by_an_allow_constructor_and_is_explained(monkeypat
                     if name != "project" or trusted for r in rs_.rules if r.action == "allow"]
             assert label in {f"allow:{name}:{r.raw}" for name in ("managed", "user", "project") for r in live}, (label, req)
         if mode == "plan":
-            assert req.tool in ("read_file", "list_dir", "glob", "grep"), (req, d)
+            assert req.tool in ("read_file", "list_dir", "glob", "grep", "ask_user", "tasks"), (req, d)
         if req.tool == "bash":
             assert d.basis == "rule"
         if req.tool == "delete_path":
@@ -280,8 +282,10 @@ def test_without_any_allow_rule_only_reads_and_accept_edits_edits_can_be_allowed
         req = random_request(rng)
         d = decide(req, ctx(mode, lay, project_trusted=True))
         if d.action == "allow":
-            assert req.tool in ("read_file", "list_dir", "glob", "grep", "edit_file", "write_file")
+            assert req.tool in ("read_file", "list_dir", "glob", "grep", "edit_file", "write_file", "ask_user", "tasks")
             assert d.basis == "mode"
+            if req.tool in ("ask_user", "tasks"):
+                assert req.risk == "R0"
             if req.tool in ("edit_file", "write_file"):
                 assert mode == "accept-edits"
 

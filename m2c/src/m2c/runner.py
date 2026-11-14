@@ -52,7 +52,8 @@ THE FLOW OF ONE CALL
    shell tool re-checks and a deny still wins; ``cancel`` is a ``threading.Event`` per call; ``on_chunk`` forwards
    stdout and stderr with ``send_tool_stream`` in order, from the worker thread to the event loop (live view only, capped).
    Read-only tools (``read_file``, ``list_dir``, ``glob``, ``grep``) run side by side.  Everything that changes
-   something (``edit_file``, ``write_file``, ``delete_path``, ``bash``, ``plan_exit``) runs ALONE and in ARRIVAL order, and
+   something (``edit_file``, ``write_file``, ``delete_path``, ``bash``, ``plan_exit``) and the two interact tools
+   (``ask_user``, ``tasks``; Patch L01a) runs ALONE and in ARRIVAL order, and
    is decided only when its turn comes, so a call is always judged in the state the earlier ones left (``plan_exit``
    changes the mode; the edit behind it is judged in the new one).
 6. **Answer** with ``tool_result{ok, output, truncated, trust, exit_code?, duration_ms}``.  ``trust`` is what C05/C07 say:
@@ -90,6 +91,27 @@ server cannot learn about this.  backend/codeagent/loop.py takes the run's mode 
 only (``_Ctx.mode``), protocol/README.md section 12 lists "changing mode mid-run" as not covered by the nine client message
 types, and no message was invented here.  Until an additive protocol change exists, the model keeps seeing the plan-mode
 tool list on the server while the device already allows edits.
+
+``ask_user`` and ``tasks`` (Patch L01a)
+--------------------------------------
+Like ``plan_exit`` they have no ``run_tool`` executor: the runner runs them itself, after C06 has decided (R0, allowed in
+every mode with no approval prompt; a deny or ask rule still applies) and after the usual ``approval`` message.  The
+pure parts (argument rules, the text the model reads) live in ``m2c.interact``.
+
+* ``question`` (an ``async (UserQuestion) -> UserAnswer | Declined``, the screen; L01b writes the terminal one) shows the
+  question.  The wait happens inside ``_prompt_lock``, the same lock approval prompts use: ONE thing is on the person's
+  screen at a time, and the ``timeout_s`` clock starts when the question is SHOWN, not when it was proposed.  The call
+  ends as an answer (``ok`` true, trust ``local_other``: the person's own words, redacted like every output), or with one
+  of the fixed messages: declined, timed out, failed (the screen raised: only the exception class is logged), bad answer
+  (the screen returned something the question did not allow) and, with no screen at all (headless, non-interactive), the
+  "no person is available" text, immediately.  A call closed under the question (interrupt, ``tool_finished``, run end,
+  ``aclose``) cancels the screen's coroutine so it takes the question down, and sends nothing.
+* ``task_sink`` (a plain ``(tuple[Task, ...]) -> None``) shows the new list.  Every valid call replaces the WHOLE list
+  and writes ONE local event (type ``tasks``, ``{call_id, tasks}``) after the sink succeeded; a failed event write never
+  fails the call (the list is a view, not an audit record).  With no sink the list is still checked, recorded and
+  confirmed.  A sink that raises gets the fixed ``MSG_TASKS_NOT_SHOWN`` and no event.
+* Nothing the model wrote (question, labels, ids, titles) or the person typed goes to a log or to the approval audit
+  record; the model's own task list is stored locally in the event, which is its place.
 
 Audit and hygiene
 -----------------
@@ -143,6 +165,9 @@ from typing import Any, Awaitable, Callable
 
 from . import checkpoints
 from .headless import ToolOutcome as HeadlessOutcome
+from .interact.question import (
+    Declined, QuestionCallable, QuestionError, UserAnswer, UserQuestion, answer_text, parse_question)
+from .interact.tasks import EVENT_TASKS, TaskListError, TaskList, TaskSink, parse_tasks, summarize
 from .link import LinkError, LinkMessageTooLargeError
 from .policy import MODES, TOOLS as POLICY_TOOLS, Context, Decision, Request
 from .policy.decide import decide as policy_decide
@@ -159,6 +184,12 @@ __all__ = [
     "Choice",
     "EDITED_NOTICE",
     "MSG_CHECKPOINT_FAILED",
+    "MSG_DECLINED",
+    "MSG_NO_PERSON",
+    "MSG_QUESTION_CANCELLED",
+    "MSG_QUESTION_FAILED",
+    "MSG_QUESTION_TIMED_OUT",
+    "MSG_TASKS_NOT_SHOWN",
     "ToolRunner",
 ]
 
@@ -175,10 +206,22 @@ MSG_NOT_ALLOWED = "error: not run. The policy does not allow this call."
 MSG_ALREADY_RAN = "error: not run. This call id was already used."
 MSG_PLAN_EXITED = "The person approved the plan. Plan mode is off on this device."
 MSG_NOT_IN_PLAN = "Plan mode was not on. Nothing changed."
+# Patch L01a: what the model reads when a question ends without an answer.  Each says what happened and that asking
+# again will not help; none holds anything the model, the person or a file wrote.
+MSG_NO_PERSON = ("error: no person is available to answer. This session cannot ask questions. "
+                 "Decide for yourself or say what you assumed; do not ask again.")
+MSG_DECLINED = "The person declined to answer. Do not ask the same question again; continue without the answer or say what you assumed."
+MSG_QUESTION_TIMED_OUT = ("error: the person did not answer in time. Do not ask the same question again; "
+                          "continue without the answer or say what you assumed.")
+MSG_QUESTION_CANCELLED = "error: the question was withdrawn before it was answered."
+MSG_QUESTION_FAILED = ("error: the question could not be shown to the person. Do not ask again; "
+                       "continue without the answer or say what you assumed.")
+MSG_TASKS_NOT_SHOWN = "error: the task list could not be shown to the person. It was not updated; do not resend it."
 
 READ_TOOLS = frozenset({"read_file", "list_dir", "glob", "grep"})
 CHECKPOINTED_TOOLS = frozenset({"edit_file", "write_file", "delete_path"})
-SERIAL_TOOLS = CHECKPOINTED_TOOLS | {"bash", "plan_exit"}
+INTERACT_TOOLS = frozenset({"ask_user", "tasks"})              # Patch L01a: run by the runner itself, in arrival order
+SERIAL_TOOLS = CHECKPOINTED_TOOLS | {"bash", "plan_exit"} | INTERACT_TOOLS
 TERMINAL_STATES = frozenset({"completed", "cancelled", "failed", "expired"})
 _MODE_STRICTNESS = {"plan": 0, "ask": 1, "accept-edits": 2}
 
@@ -381,6 +424,7 @@ class _Streamer:
 
 _DISMISSED = object()
 _FAILED = object()
+_TIMED_OUT = object()
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +443,9 @@ class ToolRunner:
     store              the local store connection (C02): checkpoints and the audit record; belongs to the loop's thread
     session_id         the session in the store when it is not ``run_id``
     ask                ``async (ApprovalRequest) -> Choice``, or None for a non-interactive run
+    question           (Patch L01a) ``async (UserQuestion) -> UserAnswer | Declined``, the screen for ``ask_user``, or
+                       None when nobody can answer (the call then fails at once with ``MSG_NO_PERSON``)
+    task_sink          (Patch L01a) ``(tuple[Task, ...]) -> None``, shows the model's task list; None is allowed
     clock              ``() -> aware datetime`` (the audit timestamps); default now in UTC
     executor           ``run_tool``'s signature; default C05's ``run_tool`` (tests inject slow or counting stand-ins)
     plan_exit_mode     the mode ``plan_exit`` switches to: ``ask`` (default) or ``accept-edits``
@@ -419,6 +466,8 @@ class ToolRunner:
         store: sqlite3.Connection,
         session_id: str | None = None,
         ask: AskCallable | None = None,
+        question: QuestionCallable | None = None,
+        task_sink: TaskSink | None = None,
         clock: Callable[[], datetime] = _utc_now,
         executor: Callable[..., Any] = run_tool,
         plan_exit_mode: str = "ask",
@@ -432,6 +481,10 @@ class ToolRunner:
             raise ValueError("plan_exit_mode must be a mode other than plan")
         if not callable(policy_context):
             raise ValueError("policy_context must be a function returning the current policy Context")
+        if question is not None and not callable(question):
+            raise ValueError("question must be an async function taking a UserQuestion, or None")
+        if task_sink is not None and not callable(task_sink):
+            raise ValueError("task_sink must be a function taking the task list, or None")
         self._link = link
         self._run_id = run_id
         self._session_id = session_id if session_id is not None else run_id
@@ -439,6 +492,8 @@ class ToolRunner:
         self._get_policy = policy_context
         self._store = store
         self._ask = ask
+        self._question = question
+        self._task_sink = task_sink
         self._clock = clock
         self._executor = executor
         self._plan_exit_target = plan_exit_mode
@@ -782,6 +837,10 @@ class ToolRunner:
                            *, stream: bool) -> _Outcome:
         if call.tool == "plan_exit":
             outcome = self._plan_exit(context)
+        elif call.tool == "ask_user":
+            outcome = await self._ask_user(call, args)
+        elif call.tool == "tasks":
+            outcome = self._task_list(call, args)
         elif call.tool in CHECKPOINTED_TOOLS and not self._checkpoint(args):
             return _Outcome(False, MSG_CHECKPOINT_FAILED)
         else:
@@ -820,6 +879,98 @@ class ToolRunner:
             except Exception as exc:  # noqa: BLE001 - the UI's problem; the mode did change
                 _log(logging.WARNING, "runner.mode_callback_failed", code=type(exc).__name__)
         return _Outcome(True, MSG_PLAN_EXITED)
+
+    # -- ask_user and tasks (Patch L01a) ---------------------------------------------------------------------------
+    async def _ask_user(self, call: _Call, args: Any) -> _Outcome:
+        """Show the question, wait for the person and turn the end of the wait into one outcome.  Never raises."""
+        try:
+            question = parse_question(args)
+        except QuestionError as exc:
+            return _Outcome(False, exc.message)
+        if self._question is None:
+            return _Outcome(False, MSG_NO_PERSON)
+        status, answer = await self._show_question(call, question)
+        if status is _DISMISSED:
+            return _Outcome(False, MSG_QUESTION_CANCELLED)       # the call was closed under it: the pipeline sends nothing
+        if status is _TIMED_OUT:
+            return _Outcome(False, MSG_QUESTION_TIMED_OUT)
+        if status is _FAILED:
+            return _Outcome(False, MSG_QUESTION_FAILED)
+        if isinstance(answer, Declined):
+            return _Outcome(False, MSG_DECLINED)
+        try:
+            text, truncated = answer_text(question, answer)
+        except QuestionError as exc:                              # the screen gave an answer the question did not allow
+            _log(logging.WARNING, "runner.bad_answer", tool="ask_user", call_id=call.call_id)
+            return _Outcome(False, exc.message)
+        return _Outcome(True, text, truncated, "local_other")     # the person's own words: data, never instructions
+
+    async def _show_question(self, call: _Call, question: UserQuestion) -> tuple[Any, Any]:
+        """One question on the one screen, like ``_prompt``: it waits for ``_prompt_lock`` (an approval prompt or
+        another question is open), and ``timeout_s`` runs from the moment it is shown.  ``(status, answer)``; ``status``
+        is ``_DISMISSED`` (the call was closed), ``_TIMED_OUT``, ``_FAILED`` (the screen raised) or None."""
+        assert self._question is not None
+
+        async def shown() -> Any:
+            async with self._prompt_lock:
+                if call.cancel_async.is_set():
+                    return _DISMISSED
+                try:
+                    return await asyncio.wait_for(self._question(question), timeout=question.timeout_s)
+                except asyncio.TimeoutError:                     # wait_for has cancelled the screen: it took the question down
+                    return _TIMED_OUT
+
+        task = asyncio.ensure_future(shown())
+        waiter = asyncio.ensure_future(call.cancel_async.wait())
+        try:
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                return _DISMISSED, None
+            if task.cancelled():
+                return _DISMISSED, None
+            if task.exception() is not None:
+                _log(logging.WARNING, "runner.question_failed", tool="ask_user", call_id=call.call_id,
+                     code=type(task.exception()).__name__)
+                return _FAILED, None
+            result = task.result()
+            if result is _DISMISSED or result is _TIMED_OUT:
+                return result, None
+            return None, result
+        finally:
+            waiter.cancel()
+            if not task.done():
+                task.cancel()
+
+    def _task_list(self, call: _Call, args: Any) -> _Outcome:
+        """Check the whole list, show it, record it locally and confirm with counts.  Runs on the loop's thread (the
+        store belongs to it) and never raises."""
+        try:
+            tasks = parse_tasks(args.get("tasks") if isinstance(args, dict) else None)
+        except TaskListError as exc:
+            return _Outcome(False, exc.message)
+        if self._task_sink is not None:
+            try:
+                self._task_sink(tasks)
+            except Exception as exc:  # noqa: BLE001 - the screen is gone or broken; the model is told, the list is not recorded
+                _log(logging.WARNING, "runner.task_sink_failed", tool="tasks", call_id=call.call_id,
+                     code=type(exc).__name__)
+                return _Outcome(False, MSG_TASKS_NOT_SHOWN)
+        self._record_tasks(call, tasks)
+        return _Outcome(True, summarize(tasks))
+
+    def _record_tasks(self, call: _Call, tasks: TaskList) -> None:
+        """One local event per update, with the whole list.  A failure is logged (class only) and changes nothing: the
+        list is a view for the person, not an audit record.  With no session bound (headless) there is nowhere to write."""
+        if self._session_id is None:
+            return
+        try:
+            append_event(self._store, self._session_id, EVENT_TASKS,
+                         {"call_id": call.call_id, "tasks": [t.as_dict() for t in tasks]},
+                         ts=normalize_ts(self._clock()))
+        except Exception as exc:  # noqa: BLE001 - fails open
+            _log(logging.WARNING, "runner.task_event_failed", call_id=call.call_id, code=type(exc).__name__)
 
     @staticmethod
     def _with_edit_notice(tool: Any, args: Any, outcome: _Outcome) -> _Outcome:

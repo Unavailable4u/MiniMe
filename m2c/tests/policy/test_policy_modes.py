@@ -115,13 +115,13 @@ def test_risk_rank_rejects_unknown_levels():
 
 # --- the catalog copy matches P00 ------------------------------------------
 TOOLS_DIR = Path(m2c.__file__).parent / "protocol" / "v1" / "tools"
-PY = {"string": str, "integer": int, "boolean": bool}
+PY = {"string": str, "integer": int, "boolean": bool, "array": list}      # array: Patch L01a
 
 
-def test_catalog_has_exactly_the_nine_p00_tools():
+def test_catalog_has_exactly_the_p00_tools_and_the_two_interact_tools():
     files = sorted(p.stem for p in TOOLS_DIR.glob("*.json"))
     assert files == sorted(TOOLS)
-    assert len(TOOLS) == 9
+    assert len(TOOLS) == 11                                       # the nine P00 tools + ask_user + tasks (L01a)
 
 
 @pytest.mark.parametrize("name", sorted(TOOLS))
@@ -141,4 +141,5 @@ def test_tool_classes():
     assert cls == {
         "read_file": "read", "list_dir": "read", "glob": "read", "grep": "read",
         "edit_file": "edit", "write_file": "edit", "delete_path": "delete", "bash": "shell", "plan_exit": "plan_exit",
+        "ask_user": "interact", "tasks": "interact",
     }

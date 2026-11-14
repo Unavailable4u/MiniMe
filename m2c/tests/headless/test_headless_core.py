@@ -110,6 +110,9 @@ def test_json_mode_prints_exactly_one_object_and_nothing_else_on_stdout(capsys, 
                   "credits": 0.5, "calls": 1},
         "exit_code": 0,
         "error": None,
+        # PATCH C10b: m2c -p runs real tools, so the object also says what they did (here: nothing)
+        "files_changed": [],
+        "tool_calls": {"ok": 0, "failed": 0, "denied": 0, "cancelled": 0},
     }
     out.server.assert_clean()
 

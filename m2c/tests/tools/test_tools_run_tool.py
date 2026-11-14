@@ -481,3 +481,16 @@ def test_ported_files_carry_the_port_header():
     head = (TOOLS_SRC / "paths.py").read_text()
     assert "Ported from daemon/path_guard.py (MiniMe, 6977ddf)" in head
     assert "Ported from daemon/tools.py (MiniMe, 6977ddf)" in (TOOLS_SRC / "files.py").read_text()
+
+
+# ==========================================================================
+# Patch L01a: ask_user and tasks belong to the runner, not to this executor
+# ==========================================================================
+@pytest.mark.parametrize("name,args", [("ask_user", {"question": "Which?"}), ("tasks", {"tasks": []})])
+def test_the_session_tools_are_not_executed_here_and_fail_closed_with_a_fixed_message(ctx, name, args):
+    from m2c.tools import SESSION_TOOLS
+
+    assert name in SESSION_TOOLS and name not in tool_names() and name not in ARG_SPECS
+    result = run_tool(ctx, name, args)
+    assert result.ok is False and result.code == "unknown_tool" and "run by the session" in result.output
+    assert "Which?" not in result.output

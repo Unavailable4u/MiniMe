@@ -417,7 +417,8 @@ P00 = _p00_tools()
 
 def test_p00_catalog_is_present_and_complete():
     assert [t["function"]["name"] for t in P00] == sorted(
-        ["read_file", "list_dir", "glob", "grep", "edit_file", "write_file", "delete_path", "bash", "plan_exit"])
+        ["read_file", "list_dir", "glob", "grep", "edit_file", "write_file", "delete_path", "bash", "plan_exit",
+         "ask_user", "tasks"])
 
 
 def test_m2c_malformed_arguments_for_bash_are_never_completed():

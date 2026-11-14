@@ -4,6 +4,7 @@ m2c/src/m2c/cli.py -- Patch C01: the ``m2c`` command (Patch C03: login/logout).
     m2c [--mode M] [--plain]      after login, the terminal chat (C09); --plain, or no terminal: the plain prompt (I01)
     m2c -p "task"                 headless: run one task, no prompts, no terminal needed (C10)
           [--output-format text|json] [--mode plan|ask|accept-edits]
+          [--allow RULE]... [--deny RULE]... [--sandbox auto|required|off] [--cwd PATH]   (real tools: C10b)
     m2c --version
     m2c login [--device-name N]   sign in with a code you approve in the web app
     m2c logout                    delete this device's local credential
@@ -39,6 +40,12 @@ with one, and --output-format is an option of -p only.  --mode also starts the i
 plain prompt of I01, which has no modes, so --mode with it (or without a terminal) is a usage error rather than a
 silently ignored safety option.
 
+Patch C10b: ``m2c -p`` runs the tools for real (edits, commands) under the policy of C06 in a non-interactive form: the
+options --allow, --deny, --sandbox and --cwd belong to -p only (with anything else they are a usage error, for the same
+reason as --mode above).  They are handed to ``headless.run_headless`` as one ``tool_setup`` made by ``session_setup``;
+that module is imported only when -p runs, so ``--version``, ``--help`` and the other commands do not load the tool and
+policy packages.
+
 Side effects, deliberately minimal: ``--version`` and ``--help`` do not touch
 the filesystem, and neither does ``logout`` when there is nothing to delete.
 ``doctor`` and ``login`` create the config directory (``~/.m2c``, mode 0700,
@@ -59,6 +66,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from . import __version__, doctor, headless
 from .auth import login as login_mod
@@ -133,8 +141,10 @@ def build_parser() -> argparse.ArgumentParser:
         "Run one task without any prompt or terminal: m2c -p \"fix the failing test\".\n"
         "Use -p - to read the task from stdin (also for a task that starts with a dash).\n"
         "Text mode writes the reply to stdout and progress to stderr; json mode writes one\n"
-        "JSON object to stdout. Only tools an explicit allow rule permits run; anything\n"
-        "that would ask fails the run (exit 3). Exit statuses are listed at the end.",
+        "JSON object to stdout. Tools run for real under the permission policy: what the\n"
+        "mode allows (--mode accept-edits for file edits) or an --allow rule permits; a call\n"
+        "that would need approval is refused and fails the run (exit 3). Project settings\n"
+        "are ignored. Exit statuses are listed at the end.",
     )
     headless_group.add_argument(
         "-p", "--print", dest="print_task", metavar="TASK",
@@ -148,6 +158,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", default=None, metavar="{" + ",".join(headless.MODES) + "}",
         help="the permission mode a headless run (-p) or the terminal chat starts in (default: "
         + headless.DEFAULT_MODE + "); plan can only be chosen here",
+    )
+    headless_group.add_argument(
+        "--allow", action="append", default=None, metavar="RULE",
+        help="with -p: allow calls matching RULE, written tool(pattern), e.g. 'bash(git status)' or "
+        "'write_file(src/**)'; repeatable; for this run only",
+    )
+    headless_group.add_argument(
+        "--deny", action="append", default=None, metavar="RULE",
+        help="with -p: deny calls matching RULE (same syntax); repeatable; a deny always wins over an allow",
+    )
+    headless_group.add_argument(
+        "--sandbox", choices=("auto", "required", "off"), default=None, metavar="{auto,required,off}",
+        help="with -p: how shell commands are sandboxed (default: auto = when the sandbox is available; required = "
+        "refuse to run commands without it; off = no sandbox)",
+    )
+    headless_group.add_argument(
+        "--cwd", default=None, metavar="PATH",
+        help="with -p: the project folder to work in (default: the current directory; the filesystem root and your "
+        "home directory are refused)",
     )
     parser.add_argument(
         "--plain", action="store_true",
@@ -317,7 +346,14 @@ def _run_headless(args: argparse.Namespace) -> int:
         output_format="text" if args.output_format is None else args.output_format,
     )
     try:
-        return headless.run_headless(options)
+        from . import session_setup  # lazy: only -p needs the policy and tool packages
+
+        def tool_setup() -> Any:
+            return session_setup.headless_tool_setup(
+                cwd=args.cwd, allow=tuple(args.allow or ()), deny=tuple(args.deny or ()),
+                sandbox="auto" if args.sandbox is None else args.sandbox)
+
+        return headless.run_headless(options, tool_setup=tool_setup)
     except Exception as exc:  # run_headless reports its own failures; this is a last resort, never a traceback
         return _unexpected("-p", exc)
 
@@ -403,6 +439,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output_format is not None:
         print("m2c: --output-format only applies to -p/--print.", file=sys.stderr)
         return EXIT_USAGE
+    for flag, value in (("--allow", args.allow), ("--deny", args.deny), ("--sandbox", args.sandbox), ("--cwd", args.cwd)):
+        if value is not None:    # C10b: a safety option that would be silently ignored is a usage error
+            print(f"m2c: {flag} only applies to -p/--print.", file=sys.stderr)
+            return EXIT_USAGE
     if args.command is not None and (args.mode is not None or args.plain):
         print(f"m2c: --mode and --plain apply to the chat (no command) and --mode to -p, not to the {args.command!r} "
               "command.", file=sys.stderr)

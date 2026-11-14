@@ -24,7 +24,7 @@ from tests.unit.run_manager_testkit import USER, World, start_payload
 
 pytest.importorskip("jsonschema", reason="the loop validates tool arguments with jsonschema")
 
-READ_ONLY = {"read_file", "list_dir", "glob", "grep", "plan_exit"}
+READ_ONLY = {"read_file", "list_dir", "glob", "grep", "plan_exit", "ask_user", "tasks"}   # R0 tools (L01a adds two)
 WRITERS = {"edit_file", "write_file", "bash"}
 
 

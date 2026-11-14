@@ -227,6 +227,50 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "ask_user"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/ask_user.json#/input_schema"
+          },
+          "risk": {
+            "const": "R0"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "tasks"
+          }
+        },
+        "required": [
+          "tool"
+        ]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "$ref": "tools/tasks.json#/input_schema"
+          },
+          "risk": {
+            "const": "R0"
+          }
+        }
+      }
     }
   ]
 }

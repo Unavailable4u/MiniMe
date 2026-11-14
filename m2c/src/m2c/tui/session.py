@@ -96,17 +96,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 
 from .. import checkpoints
-from ..context import assemble_run_context
 from ..link import DeviceLink, LinkCallbacks, LinkDeviceRevokedError, LinkError, LinkRateLimitedError
 from ..logging_setup import log_event
-from ..paths import config_dir
 from ..policy import Context, load_layers
 from ..repl import cwd_label_for
 from ..runner import ApprovalRequest, Choice, ToolRunner
+from ..session_setup import open_project, project_policy_context
 from ..store import append_event, create_session, new_session_id, read_events
-from ..tools import ToolContext
 from ..tools.paths import PathGuardError, resolve_for_read
-from ..tools.shell import ShellConfig, configure_shell
 from ..trust import Answer, TrustPromptMachine, TrustStore, TrustStoreError, describe_prompt, fingerprint_matches
 from ..trust import ignored_note, project_trust_state
 from ..trust.store import FILE_NAME as TRUST_FILE_NAME
@@ -230,19 +227,20 @@ class Session:
         self._project_path = str(project_path)
 
         try:
-            self._tool_context = ToolContext(project_path)
+            # PATCH C10b: the ToolContext, the shell configuration, the rule layers and the run context are built by
+            # session_setup, which headless mode (m2c -p) calls too.  The pieces, their order and their values are as before.
+            built = open_project(project_path, environ=self._environ, home=home, warn=self._sandbox_warning)
         except PathGuardError as exc:
             raise StartupError("this folder cannot be used as a project: " + clean_line(str(exc), 200)) from None
-        self._root = str(self._tool_context.root)
-        configure_shell(self._tool_context, ShellConfig(warn=self._sandbox_warning))
+        self._tool_context = built.tool_context
+        self._root = built.root
 
         self.status = StatusState(mode=mode, window_tokens=window_from_env(self._environ))
         self.memory = SessionMemory()
         self.renderer = Renderer(read_existing=self._read_existing)
         self._escape = EscapeTracker(**({"clock": clock} if clock is not None else {}))
-        self._config_home = Path(home) if home is not None else config_dir(self._environ)
-        self._layers = load_layers(managed=None, user=str(self._config_home / "settings.toml"),
-                                   project=None, project_trusted=False)
+        self._config_home = built.config_home                  # PATCH C10b: from session_setup (was built inline here)
+        self._layers = built.layers
         # C26: the folder-trust decision, made once.  The project layer is read only if the answer is "trusted".
         self._project_trusted = False
         self._trust_store = trust_store if trust_store is not None else (
@@ -255,7 +253,7 @@ class Session:
             self._set_trust_note("project settings are ignored: the project files changed while m2c was starting")
         elif not self._project_trusted:
             self._set_trust_note(ignored_note(self._trust))
-        self._run_context = assemble_run_context(self._root, self._root, self._config_home)
+        self._run_context = built.run_context
 
         conv = create_session(store, project_path=self._root, mode=mode, model_pref="auto")
         self.conversation_id = conv.id
@@ -569,8 +567,7 @@ class Session:
     # ------------------------------------------------------------------ policy and tools
     def policy_context(self) -> Context:
         """The CURRENT C06 context: the mode is read on every call."""
-        return Context(mode=self.status.mode, layers=self._layers, project_root=self._root,
-                       project_trusted=self._project_trusted, tainted=False, home=str(Path.home()), cwd=self._root)
+        return project_policy_context(self.status.mode, self._layers, self._root, project_trusted=self._project_trusted)
 
     def _sandbox_warning(self, text: str) -> None:
         if not self._sandbox_shown:

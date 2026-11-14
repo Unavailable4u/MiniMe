@@ -104,7 +104,7 @@ def test_every_request_offers_the_tools_and_the_configured_timeout(rigs):
     go(rig.turn())
     request = rig.adapter.requests[0]
     assert request.timeout_s == 33.0
-    assert rig.adapter.tool_names() == set(catalog().names) and len(catalog().names) == 9
+    assert rig.adapter.tool_names() == set(catalog().names) and len(catalog().names) == 11
     assert request.messages[0].role == "system"
 
 
@@ -262,7 +262,8 @@ def test_a_good_call_next_to_a_bad_one_still_runs(rigs):
 def test_plan_mode_offers_only_read_only_tools_plus_plan_exit(rigs):
     rig = rigs(Reply("a plan"), mode="plan")
     go(rig.turn())
-    assert rig.adapter.tool_names() == {"read_file", "list_dir", "glob", "grep", "plan_exit"}
+    # ask_user and tasks (Patch L01a) are R0: they write and run nothing, so plan mode keeps them
+    assert rig.adapter.tool_names() == {"read_file", "list_dir", "glob", "grep", "plan_exit", "ask_user", "tasks"}
     assert "plan mode" in rig.adapter.requests[0].messages[0].content
 
 

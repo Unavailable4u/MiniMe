@@ -156,7 +156,9 @@ def test_there_is_no_command_line_way_to_grant_trust():
     parser = cli.build_parser()
     help_text = parser.format_help() + "".join(
         action.format_help() for action in parser._subparsers._group_actions[0].choices.values())
-    assert "--trust" not in help_text and "--allow" not in help_text and "--yes" not in help_text
+    # PATCH C10b: ``m2c -p --allow RULE`` exists now.  It adds a permission rule for one run; it never trusts a folder
+    # (headless mode ignores project settings, see tests/headless/test_headless_wiring.py), so it is not a way to grant trust.
+    assert "--trust" not in help_text and "--yes" not in help_text
 
 
 def test_the_command_is_listed_in_the_help(capsys):

@@ -57,6 +57,10 @@ error ``code`` is local (protocol v1 has no such field) and travels only in the
 text of a failed result.  ``exit_code`` is on the wire only when it is set (the
 shell tool sets it).
 
+``ask_user`` and ``tasks`` (Patch L01a) are NOT here.  They talk to the person, not to the file system, and the
+runner (m2c/runner.py) runs them itself, like ``plan_exit``; ``TOOLS`` and ``ARG_SPECS`` stay the table of what this
+executor runs.  A call that reaches ``run_tool`` anyway fails closed with a fixed message that says so.
+
 ``delete_path`` has no ``recursive`` argument at this layer, because the
 protocol's schema has none; ``files.delete_path`` supports it for code that
 calls it directly.
@@ -80,7 +84,7 @@ from .paths import ERROR_CODES, Denylist, ToolError, assert_safe_root
 from .shell import CallEnv, ToolOutcome
 
 __all__ = [
-    "ARG_SPECS", "CallEnv", "Caps", "ToolContext", "ToolError", "ToolOutcome", "ToolResult", "TOOLS",
+    "ARG_SPECS", "CallEnv", "Caps", "SESSION_TOOLS", "ToolContext", "ToolError", "ToolOutcome", "ToolResult", "TOOLS",
     "paths", "run_tool", "tool_names",
 ]
 
@@ -310,6 +314,11 @@ TOOLS: dict[str, Callable[..., tuple[str, bool]]] = {
 }
 
 
+# Patch L01a: tools the SESSION runs (the runner), not this executor.  See the module docstring.
+SESSION_TOOLS = frozenset({"ask_user", "tasks"})
+_SESSION_TOOL_MESSAGE = "this tool is run by the session, not by the file and shell executor"
+
+
 def tool_names() -> list[str]:
     """The tools this executor implements."""
     return sorted(TOOLS)
@@ -409,6 +418,10 @@ def run_tool(context: ToolContext, name: Any, args: Any, *, call_env: Any = None
     raises).
     """
     started = time.monotonic()
+    if isinstance(name, str) and name in SESSION_TOOLS:
+        result = _failure("unknown_tool", _SESSION_TOOL_MESSAGE, started)
+        _log("session_tool", result)
+        return result
     if not isinstance(name, str) or name not in TOOLS or name not in ARG_SPECS:
         result = _failure("unknown_tool", "unknown tool", started)
         _log("unknown", result)

@@ -9,6 +9,7 @@ non-interactive sibling of the prompt loop in repl.py (I01); cli.py only parses 
 ``run_headless``.
 
     m2c -p "task" [--output-format text|json] [--mode plan|ask|accept-edits]
+                  [--allow RULE]... [--deny RULE]... [--sandbox auto|required|off] [--cwd PATH]
     echo "task" | m2c -p -
 
 OUTPUT
@@ -29,12 +30,20 @@ OUTPUT
                   connection).  On failure ``ok`` is false, ``result`` holds whatever text had arrived, and ``error`` is
                   ``{"code", "message"}``; the message is fixed text and never contains the task, a reply or tool input.
 
+                  PATCH C10b: when the run was given tools (``tool_setup``, which the CLI always passes) the object
+                  also has ``"files_changed"``, a sorted list of project-relative paths that edit_file, write_file and
+                  delete_path really changed (a file a shell command changed is not listed: nothing can see that), and
+                  ``"tool_calls"``, ``{"ok", "failed", "denied", "cancelled"}``: calls that ran and succeeded, ran (or
+                  were refused at the last moment) and failed, were refused by the policy, and were allowed but never
+                  finished because the run ended.  Both are present, empty / zero, even for a run that never started.
+
 EXIT CODES (``m2c --help`` prints this table; cli.py takes it from ``EXIT_CODES_HELP`` below)
 
     0  success
     1  general failure (the server could not answer, the connection was lost and did not come back, a run failed or
        expired, stdout was closed, an unexpected error)
-    2  usage error (unknown --mode, an empty or too long task, -p with a command, stdin is a terminal)
+    2  usage error (unknown --mode, an empty or too long task, -p with a command, stdin is a terminal, a bad --allow /
+       --deny rule, a --cwd that cannot be a project)
     3  policy denial (a tool would ask, was denied, or no policy / executor is installed to allow it)
     4  quota exhausted (the shared credit pool is used up)
     5  not logged in, or this device was revoked (or the credential is not accepted)
@@ -61,22 +70,36 @@ NON-INTERACTIVE POLICY (tools)
   no tool_result); only then is the run cancelled.  An allowed call is answered with a ``tool_result`` alone (an
   auto-allowed call needs no approval message, protocol/fixtures/02_edit_with_approval.jsonl).
 
-  THE POLICY ENGINE (C06) AND THE TOOL EXECUTORS (C05) ARE NOT ON THIS PATCH'S BASE.  They are built in parallel, and this
-  module imports neither (it does not import the ``policy`` or ``tools`` packages).  The join is two small injected
-  callables, installed with ``install_tool_hooks`` or passed to ``run_headless``:
+  THIS MODULE STILL IMPORTS NEITHER THE POLICY ENGINE (C06) NOR THE TOOL EXECUTORS (C05): it does not import the
+  ``policy``, ``tools``, ``runner``, ``sandbox`` or ``checkpoints`` modules, nor ``session_setup``.  The join is injected,
+  in one of two ways:
+
+  1. PATCH C10b, what ``m2c -p`` uses: ``run_headless(..., tool_setup=callable)``.  ``tool_setup()`` is called during the
+     usage checks and returns a prepared setup (m2c/session_setup.py builds it from the same pieces the TUI builds: the
+     folder check, the rule layers, the shell config, the C12 context); it may raise ``ToolSetupError`` (a usage error:
+     a bad rule, a folder that cannot be a project).  The setup has ``root`` (the resolved project folder: the run's
+     project path), ``notes`` (stderr lines to print once), ``run_start_fields`` (instructions, rules, memory_index for
+     run.start) and ``open(store, notify, mode=...)``, which returns the *tool host* once the store is open.  The host
+     has ``bind_run(run_id)``, ``decide`` and ``execute`` (the two hooks below), ``cancel()`` (kill every running
+     command; called first thing in cleanup, so a signal never leaves a command running), ``aclose()`` and ``summary()``
+     (the two json keys above).  With a setup, hello declares the capability ``"tools"`` so the server offers tools.
+  2. The older pair of callables, installed with ``install_tool_hooks`` or passed to ``run_headless``:
 
       decide(proposal) -> "allow" | "ask" | "deny"      (or an object with such a ``.decision``; may be ``async``)
       execute(proposal) -> ToolOutcome                  (or a dict with the same fields; may be ``async``)
 
   where ``proposal`` is a ``ToolProposal`` (call_id, tool, input, risk, plus the run's mode and project path, which the
-  policy needs).  THE DEFAULTS ARE CONSERVATIVE: with no policy and no executor installed, every ``tool_proposed`` from the
-  server fails the run as a policy denial.  The integration patch (I02) wires the real engine and the real executors in
-  with ``install_tool_hooks``; until then a headless run is a chat that cannot touch the machine.  Every way of getting an
+  policy needs).  A decision object may also carry ``.hint``: fixed words (never the call's input) saying which rule
+  would have been needed; they are added to the denial message.  A setup wins over loose hooks.
+
+  THE DEFAULTS ARE CONSERVATIVE: with no setup, no policy and no executor, every ``tool_proposed`` from the server fails
+  the run as a policy denial.  Every way of getting an
   answer wrong is a denial: no hook, an exception, ``None``, any value that is not exactly "allow", "ask" or "deny", an
   ``allow`` with no executor.  (An executor that fails, or returns something unusable, produces a failed ``tool_result``
   for the model; that is the tool failing, not the policy.)  A synchronous executor runs in a daemon thread so a slow tool
   does not stall the link; calls are handled one at a time, in order, once per call_id, and a call the server has already
-  closed with ``tool_finished`` is not run.
+  closed with ``tool_finished`` is not run.  A project's own settings are never read by a headless run (the folder-trust
+  prompt does not exist yet); a run with a project settings file prints one stderr line saying they are ignored.
 
 reply_restarted
   After a reconnect in the middle of a reply the server sends ``notice reply_restarted`` (backend/codeagent/hello.py): the
@@ -95,8 +118,9 @@ a token to a log line, and error texts never contain them; the user's own output
 through ``log_event`` with allowlisted keys only (codes, exit codes, run id, counts).  Security decisions fail closed
 (the tool policy above, credentials); metering is the server's, and nothing here counts credits except to show them.
 
-NOT IN THIS PATCH: ``--resume`` / ``--continue``, ``--max-usd``, ``--model`` (Appendix E lists them for later patches), reading
-settings, instructions or memory (C12), checkpoints, the sandbox.  Interrupted runs are not resumed by a new process.
+NOT IN THIS MODULE: ``--resume`` / ``--continue``, ``--max-usd``, ``--model`` (Appendix E lists them for later patches).
+Interrupted runs are not resumed by a new process.  (Checkpoints before edits, the sandbox, secrets redaction and the
+instructions / rules / memory of C12 are the tool host's and the setup's, in session_setup.py and runner.py.)
 
 Place this file at: m2c/src/m2c/headless.py
 """
@@ -238,6 +262,20 @@ class ToolOutcome:
     duration_ms: int | None = None
 
 
+class ToolSetupError(Exception):
+    """The tools could not be prepared, and the reason is the person's to fix (a bad ``--allow`` rule, a ``--cwd`` that
+    cannot be a project).  ``str(exc)`` is fixed text: it never contains the rule, the path or any other input.  The run
+    ends with ``exit_code`` (2, a usage error, unless the raiser says otherwise) and the json error ``code``."""
+
+    def __init__(self, message: str, *, exit_code: int = EXIT_USAGE, code: str = "usage") -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.code = code
+
+
+TOOLS_CAPABILITY = "tools"          # hello.capabilities: "offer me tools" (backend/codeagent sends tool_proposed only then)
+_NO_CALLS = {"ok": 0, "failed": 0, "denied": 0, "cancelled": 0}
+
 _HOOKS: dict[str, Callable[..., Any] | None] = {"decide": None, "execute": None}
 
 
@@ -347,11 +385,15 @@ class _HeadlessRun:
 
     def __init__(self, options: HeadlessOptions, *, stdout: IO[str], stderr: IO[str], stdin: IO[str] | None,
                  decide: Callable[..., Any] | None, execute: Callable[..., Any] | None, project_path: str,
-                 settle_s: float, cancel_wait_s: float, reconnect_give_up_s: float) -> None:
+                 settle_s: float, cancel_wait_s: float, reconnect_give_up_s: float,
+                 tool_setup: Callable[[], Any] | None = None) -> None:
         self.options = options
         self.json_mode = options.output_format == "json"
         self._stdout, self._stderr, self._stdin = stdout, stderr, stdin
         self._decide_hook, self._execute_hook = decide, execute
+        self._tool_setup = tool_setup   # PATCH C10b: () -> prepared setup (may raise ToolSetupError); see the docstring
+        self._setup: Any = None         # the prepared setup, once _validate has called ``tool_setup``
+        self._host: Any = None          # the tool host, once the store is open and the run exists
         self.project_path = project_path
         self.settle_s, self.cancel_wait_s, self.reconnect_give_up_s = settle_s, cancel_wait_s, reconnect_give_up_s
 
@@ -677,32 +719,36 @@ class _HeadlessRun:
         proposal = ToolProposal(call_id=call_id, tool=tool, input=dict(payload.get("input") or {}),
                                 risk=str(payload.get("risk", "")), mode=self.options.mode,
                                 project_path=self.project_path)
-        verdict, reason = await self._ask_policy(proposal)
+        verdict, reason, hint = await self._ask_policy(proposal)
         if verdict == "allow" and self._execute_hook is None:
-            verdict, reason = "deny", "no_executor"
+            verdict, reason, hint = "deny", "no_executor", ""
         if verdict != "allow":
-            await self._deny(proposal, "ask" if verdict == "ask" else reason)
+            await self._deny(proposal, "ask" if verdict == "ask" else reason, hint)
             return
         self._note(f"tool {_safe_tool_name(tool)} ({proposal.risk}): allowed")
         await self._run_tool(proposal)
 
-    async def _ask_policy(self, proposal: ToolProposal) -> tuple[str, str]:
-        """``(verdict, reason)``.  Only an exact "allow" is allow; every irregularity is a deny (fail closed)."""
+    async def _ask_policy(self, proposal: ToolProposal) -> tuple[str, str, str]:
+        """``(verdict, reason, hint)``.  Only an exact "allow" is allow; every irregularity is a deny (fail closed).
+        ``hint`` is the optional fixed-words ``.hint`` of a decision object (which rule would have been needed): one line,
+        cut short, and empty when it is not text."""
         hook = self._decide_hook
         if hook is None:
-            return "deny", "no_policy"
+            return "deny", "no_policy", ""
         try:
             answer = hook(proposal)
             if inspect.isawaitable(answer):
                 answer = await answer
             verdict = answer if isinstance(answer, str) else getattr(answer, "decision", None)
+            hint = getattr(answer, "hint", "") if not isinstance(answer, str) else ""
         except Exception:  # noqa: BLE001 - the exception's text could hold anything; it is not shown
-            return "deny", "policy_error"
+            return "deny", "policy_error", ""
+        hint = _one_line(hint, 280) if isinstance(hint, str) else ""
         if isinstance(verdict, str) and verdict in _VERDICTS:
-            return verdict, "denied" if verdict == "deny" else ""
-        return "deny", "policy_malformed"
+            return verdict, "denied" if verdict == "deny" else "", hint
+        return "deny", "policy_malformed", ""
 
-    async def _deny(self, proposal: ToolProposal, reason: str) -> None:
+    async def _deny(self, proposal: ToolProposal, reason: str, hint: str = "") -> None:
         """Report the denial to the server FIRST (approval deny/once, and no tool_result: P00), then fail the run."""
         name = _safe_tool_name(proposal.tool)
         message = {
@@ -715,6 +761,11 @@ class _HeadlessRun:
             "policy_malformed": f"The policy gave no usable answer for tool {name!r}; treated as a denial.",
             "no_executor": f"Tool {name!r} was allowed, but no tool executor is installed, so it was refused.",
         }.get(reason, f"Tool {name!r} was refused by the headless policy.")
+        if hint and reason in ("ask", "denied"):
+            # C10b: the same sentence opening, then the fixed words saying which rule would have been needed
+            lead = (f"Tool {name!r} would need approval, and headless mode never asks." if reason == "ask"
+                    else f"The policy denies tool {name!r}.")
+            message = f"{lead} {hint}"
         self._note(f"tool {name} ({proposal.risk}): denied")
         try:
             await self._link.send_approval(self.run_id, proposal.call_id, decision="deny", scope="once")
@@ -829,11 +880,22 @@ class _HeadlessRun:
             create_session(store, project_path=self.project_path, mode=self.options.mode, model_pref="auto",
                            session_id=run_id)
             self.run_id = run_id                                # known before the first event, which start_run waits for
+            start_fields: dict[str, Any] = {"instructions": ""}
+            if self._setup is not None:
+                # PATCH C10b: the tool host (the runner for this store), bound to the run BEFORE the server can propose
+                # anything.  Its two hooks are used unless a hook was given to run_headless or installed with
+                # ``install_tool_hooks`` (C10's contract: those win, which is also how tests stand in for the tools).
+                # The C12 fields go to the server with run.start.
+                self._host = self._setup.open(store, self._tool_note, mode=self.options.mode)
+                self._host.bind_run(run_id)
+                self._decide_hook = self._decide_hook or self._host.decide
+                self._execute_hook = self._execute_hook or self._host.execute
+                start_fields = dict(self._setup.run_start_fields)
             self._worker = asyncio.ensure_future(self._tool_worker())
             try:
                 finished, _ = await self._race(link.start_run(
                     run_id=run_id, mode=self.options.mode, cwd_label=cwd_label_for(self.project_path),
-                    instructions="", profile="code"))
+                    profile="code", **start_fields))
             except Exception as exc:  # noqa: BLE001
                 self.run_id = None                              # the server never accepted this run
                 self._fail_from_exception(exc)
@@ -880,9 +942,22 @@ class _HeadlessRun:
 
         assert self._ended is not None and self._hurry is not None
         self._cancel_give_up()
+        if self._host is not None:
+            # PATCH C10b: first of all, kill any command that is still running.  The worker below is cancelled, but a
+            # command runs in a thread that a cancelled task cannot stop; without this a SIGTERM would leave it running
+            # (and ``asyncio.run`` would wait for it when the loop closes).
+            try:
+                self._host.cancel()
+            except Exception:  # noqa: BLE001 - cleanup must go on
+                log_event(logger, logging.WARNING, "headless.tool_cancel_failed", run_id=self.run_id)
         if self._worker is not None:
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
+        if self._host is not None:
+            try:
+                await self._host.aclose()
+            except Exception:  # noqa: BLE001
+                log_event(logger, logging.WARNING, "headless.tool_close_failed", run_id=self.run_id)
         if (link is not None and self.run_id is not None and not self._terminal_seen
                 and not self._run_unknown and getattr(link, "state", None) == "connected"):
             self._cancelling = True
@@ -936,7 +1011,22 @@ class _HeadlessRun:
         if options.mode not in MODES:
             self._fail(EXIT_USAGE, "usage", f"--mode must be one of: {', '.join(MODES)}.")
             return False
+        if self._tool_setup is not None:
+            # PATCH C10b: prepare the tools now, with the other usage checks: a bad rule or folder is a usage error before
+            # anything touches the network or the store.  The setup's root is the run's project path from here on.
+            try:
+                self._setup = self._tool_setup()
+            except ToolSetupError as exc:
+                self._fail(exc.exit_code, exc.code, str(exc))
+                return False
+            self.project_path = self._setup.root
+            for line in self._setup.notes:
+                self._note(line)
         return True
+
+    def _tool_note(self, text: str) -> None:
+        """A warning from the tool side (the shell tool's "no sandbox is active"): fixed text, stderr only."""
+        self._note(text, prefix="[m2c] warning: ")
 
     def execute(self, credential_loader: Callable[[], Any] | None, link_factory: Callable[..., Any] | None,
                 link_options: dict | None, connect_timeout_s: float) -> int:
@@ -985,6 +1075,8 @@ class _HeadlessRun:
             return
         options = dict(link_options or {})
         options.setdefault("credential_loader", loader)
+        if self._setup is not None:
+            options.setdefault("capabilities", (TOOLS_CAPABILITY,))   # PATCH C10b: so the server offers tools
         try:
             asyncio.run(self.run(store, link_factory or DeviceLink, options, connect_timeout_s))
         finally:
@@ -1007,6 +1099,27 @@ class _HeadlessRun:
             except (ValueError, OSError):
                 pass
 
+    def _tool_summary(self) -> dict[str, Any]:
+        """``files_changed`` and ``tool_calls`` for the json object.  Bookkeeping, so it fails open: a host that cannot
+        say gives an empty list and zeros, never an error."""
+        files: list[str] = []
+        calls = dict(_NO_CALLS)
+        try:
+            raw = self._host.summary() if self._host is not None else None
+            if isinstance(raw, Mapping):
+                listed = raw.get("files_changed")
+                if isinstance(listed, (list, tuple)):
+                    files = [item for item in listed if isinstance(item, str)]
+                counted = raw.get("tool_calls")
+                if isinstance(counted, Mapping):
+                    for key in calls:
+                        value = counted.get(key)
+                        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                            calls[key] = value
+        except Exception:  # noqa: BLE001
+            log_event(logger, logging.WARNING, "headless.summary_failed", run_id=self.run_id)
+        return {"files_changed": files, "tool_calls": calls}
+
     def _emit(self) -> int:
         """The final output and the exit status."""
         failure = self.failure
@@ -1023,6 +1136,8 @@ class _HeadlessRun:
                 "exit_code": code,
                 "error": None if failure is None else {"code": failure.code, "message": failure.message},
             }
+            if self._tool_setup is not None:                    # PATCH C10b: present (empty) even when nothing ran
+                document.update(self._tool_summary())
             self._write_out(json.dumps(document, ensure_ascii=True, separators=(", ", ": ")) + "\n")
         elif self._wrote_any and self._last_char != "\n":
             self._write_out("\n")
@@ -1048,6 +1163,7 @@ def run_headless(
     settle_s: float = DEFAULT_SETTLE_S,
     cancel_wait_s: float = DEFAULT_CANCEL_WAIT_S,
     reconnect_give_up_s: float = DEFAULT_RECONNECT_GIVE_UP_S,
+    tool_setup: Callable[[], Any] | None = None,
 ) -> int:
     """Run one task headlessly and return the exit status (see the module docstring).  Never raises for a failure of the
     run: it ends in an exit status, and in json mode in the one JSON object.
@@ -1056,7 +1172,8 @@ def run_headless(
     stdin the task is read from for ``-p -``, ``credential_loader`` (default: C03's ``load_credential``),
     ``link_options`` / ``link_factory`` (default: C04's ``DeviceLink``), ``decide`` / ``execute`` (default: the hooks
     installed with ``install_tool_hooks``, else none: every tool call is then a policy denial), ``project_path`` (default:
-    the current directory), and the timings."""
+    the current directory), the timings, and (PATCH C10b) ``tool_setup``: the preparation of real tools (see the module
+    docstring; the CLI passes session_setup's), which supplies ``decide`` / ``execute`` (unless given or installed) and ``project_path``."""
     run = _HeadlessRun(
         options,
         stdout=stdout if stdout is not None else sys.stdout,
@@ -1068,5 +1185,6 @@ def run_headless(
         settle_s=settle_s,
         cancel_wait_s=cancel_wait_s,
         reconnect_give_up_s=reconnect_give_up_s,
+        tool_setup=tool_setup,
     )
     return run.execute(credential_loader, link_factory, link_options, connect_timeout_s)

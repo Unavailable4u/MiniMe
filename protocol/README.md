@@ -20,7 +20,7 @@ protocol/
     <t>.json           payload schema for each of the 15 message types
     run_event.json     payload schema for run_event, with one $def per subtype
     tool_definition.json   meta-schema for tools/*.json
-    tools/<name>.json  the nine v0 tools: description, input_schema, risk
+    tools/<name>.json  the v0 tools (nine, plus ask_user and tasks): description, input_schema, risk
   fixtures/
     01_plain_chat.jsonl  02_edit_with_approval.jsonl
     03_disconnect_resume.jsonl  04_quota_error.jsonl     golden transcripts
@@ -68,7 +68,7 @@ Every message, both directions, is one JSON object:
 |---|---|---|
 | `welcome` | `protocol`, `min_protocol`, `token_ttl_s`, `limits{max_parallel_runs, max_message_bytes?}`, optional `server_version` | `min_protocol` is the oldest version the server still accepts. |
 | `run_event` | `type` + subtype fields (section 3) | Stream; has `seq`. |
-| `tool_proposed` | `call_id`, `tool`, `input`, `risk` | Stream; has `seq`. `input` is checked against `v1/tools/<tool>.json` for the nine v0 tools; other names (MCP, later catalogs) pass the schema and the client fails closed. |
+| `tool_proposed` | `call_id`, `tool`, `input`, `risk` | Stream; has `seq`. `input` is checked against `v1/tools/<tool>.json` for the v0 tools (the nine, ask_user and tasks); other names (MCP, later catalogs) pass the schema and the client fails closed. |
 | `budget_warning` | `scope` (run/account), `spent_pct`, optional `reset_at` | Stream; has `seq`. 80% on both surfaces (build plan 11.5). |
 | `error` | `code`, `message`, optional `ref_id`, `details` | No `seq`. `message` is fixed, sanitized text. |
 | `pong` | optional `nonce` | |
@@ -169,6 +169,8 @@ schemas use only the keyword subset every provider accepts); `risk` follows prod
 | `delete_path` | R1, `risk_max` R4 | `path` |
 | `bash` | R2 | `command` (optional `timeout_s`, `reason`) |
 | `plan_exit` | R0 | `plan` |
+| `ask_user` | R0 | `question` (optional `options`, `allow_free_text`, `timeout_s`) |
+| `tasks` | R0 | `tasks` |
 
 A call to a tool carries its `risk`, or its `risk_max` where it has one (`delete_path`:
 R1 inside the project with a checkpoint, R4 otherwise). `tool_proposed` enforces this and
@@ -178,6 +180,29 @@ a call's risk and never lowers it. Input objects are closed: an unknown argument
 rejection. `validate_tool_input()` fails closed for a tool not in the catalog.
 
 `run.start.tool_catalog_version` (`"v0"`) says which catalog the client can execute.
+
+### 7.1 `ask_user` and `tasks` (added in v1, additive)
+
+Both are executed on the device, touch no file and run no command, hence R0: the client allows them in
+every mode with no approval prompt (`ask_user` is itself the prompt). They add no message type: the
+question travels in `tool_proposed.input` and the answer in `tool_result.output`.
+
+- `ask_user` `{question, options?, allow_free_text?, timeout_s?}`: blocks until the person answers,
+  declines or `timeout_s` (default 600, 1..3600) passes. `options` holds at most six `{label,
+  description?}` with unique single-line labels. `allow_free_text` (default true) may be false only when
+  options are given. The `tool_result` is `ok` true with `The person answered.` followed by one `Chose:
+  <label>` and/or `Wrote: <text>` line, or `ok` false with a fixed text (declined, timed out, cancelled, no
+  person available, screen failed). Both the question and the answer are `content`: they are never stored
+  on the server beyond the history the run already keeps. The answer's trust label is `local_other`.
+  A request to pick several options (`allow_multiple`) is NOT part of this version: it would be a new
+  optional field in a later additive change.
+- `tasks` `{tasks: [{id, title, status, depends_on?}]}`: the model sends the WHOLE list each time; it
+  replaces the previous one and `[]` clears it. `status` is `pending`, `in_progress`, `done` or
+  `blocked`. At most 30 tasks; ids unique; `depends_on` names ids in the same list and must not form a
+  cycle (the client checks ids, dependencies and cycles; JSON Schema cannot). The `tool_result` is a
+  one-line confirmation with counts, or a fixed `error: invalid task list: <rule>` with `ok` false.
+
+A client that does not know these tools answers them as it answers any unknown tool (fails closed).
 
 ## 8. Versioning rule
 

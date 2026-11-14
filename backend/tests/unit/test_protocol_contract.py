@@ -85,6 +85,8 @@ TOOLS = {
     "delete_path": ("R1", "R4"),
     "bash": ("R2", None),
     "plan_exit": ("R0", None),
+    "ask_user": ("R0", None),                 # Patch L01a
+    "tasks": ("R0", None),                    # Patch L01a
 }
 MINIMAL_INPUT = {
     "read_file": {"path": "a.txt"},
@@ -96,6 +98,8 @@ MINIMAL_INPUT = {
     "delete_path": {"path": "a.txt"},
     "bash": {"command": "ls"},
     "plan_exit": {"plan": "1. do the thing"},
+    "ask_user": {"question": "Which database?"},
+    "tasks": {"tasks": []},
 }
 REQUIRED_FIXTURES = ["01_plain_chat.jsonl", "02_edit_with_approval.jsonl",
                      "03_disconnect_resume.jsonl", "04_quota_error.jsonl"]
@@ -194,7 +198,7 @@ def test_all_schema_ids_live_under_v1():
 # 2. Tool schemas v0
 # ---------------------------------------------------------------------------
 
-def test_tool_catalog_is_exactly_the_nine_v0_tools():
+def test_tool_catalog_is_exactly_the_nine_v0_tools_plus_ask_user_and_tasks():
     assert set(V.load_tools()) == set(TOOLS)
 
 

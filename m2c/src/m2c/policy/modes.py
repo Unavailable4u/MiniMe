@@ -11,9 +11,10 @@ Modes (product guide 8.2, protocol ``common.json#/$defs/mode``):
                    deletes and shell still ask.
 
 A mode default answers only "what happens when no rule says anything".  It can
-return ``allow`` in exactly two cases, both for tools that cannot run a process
-or reach the network: a read tool at risk R0 (every mode) and an edit tool at
-risk R1 inside the project in ``accept-edits``.  A mode default NEVER allows
+return ``allow`` in exactly three cases, all for tools that cannot run a process
+or reach the network: a read tool at risk R0 (every mode), an edit tool at
+risk R1 inside the project in ``accept-edits``, and (Patch L01a) an interact tool
+at risk R0 (every mode).  A mode default NEVER allows
 network access or process execution: the shell class has no allow entry at all,
 and anything above the class ceiling (R3 network or outside the project, R4
 irreversible) falls back to ``ask``.  ``tests/policy/test_policy_invariants.py``
@@ -40,6 +41,7 @@ __all__ = [
     "ALLOW",
     "ASK",
     "DENY",
+    "INTERACT",
     "MODES",
     "RISKS",
     "ModeDefault",
@@ -60,6 +62,11 @@ RISKS = ("R0", "R1", "R2", "R3", "R4")
 
 # Tool classes.  "shell" is the only class that runs a process.
 READ, EDIT, DELETE, SHELL, PLAN_EXIT = "read", "edit", "delete", "shell", "plan_exit"
+
+# Patch L01a: ``ask_user`` and ``tasks``.  They touch no file, run no process and reach no network: they only
+# show something to the person (and ``ask_user`` waits for the person's words).  So they are allowed in every
+# mode at R0 with no approval prompt (``ask_user`` IS the prompt); a deny rule still wins, an ask rule still asks.
+INTERACT = "interact"
 
 
 @dataclass(frozen=True)
@@ -109,6 +116,9 @@ TOOLS: Mapping[str, ToolSpec] = {
         _spec("bash", SHELL, "R2", ["command"],
               {"command": str, "timeout_s": int, "reason": str}),
         _spec("plan_exit", PLAN_EXIT, "R0", ["plan"], {"plan": str}),
+        _spec("ask_user", INTERACT, "R0", ["question"],
+              {"question": str, "options": list, "allow_free_text": bool, "timeout_s": int}),
+        _spec("tasks", INTERACT, "R0", ["tasks"], {"tasks": list}),
     )
 }  # fmt: skip
 
@@ -148,7 +158,7 @@ class ModeDefault:
 
 # Highest effective risk at which a class may be allowed BY A MODE DEFAULT.
 # The shell class has none: no mode ever allows running a process.
-_CLASS_CEILING = {READ: "R0", EDIT: "R1"}
+_CLASS_CEILING = {READ: "R0", EDIT: "R1", INTERACT: "R0"}
 
 
 def class_ceiling(tool_class: str) -> str | None:
@@ -176,6 +186,11 @@ def mode_default(
 
     if tool_class == PLAN_EXIT:
         return ModeDefault(ASK, "leaving plan mode needs the user's approval")
+
+    if tool_class == INTERACT:
+        if risk_rank(risk) <= risk_rank("R0"):
+            return ModeDefault(ALLOW, f"{mode} mode: showing a question or a task list to the person is allowed")
+        return ModeDefault(ASK, "an interact tool above R0 needs approval")
 
     if tool_class == READ:
         if inside_project and risk_rank(risk) <= risk_rank("R0"):

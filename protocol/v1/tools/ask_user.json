@@ -1,0 +1,58 @@
+{
+  "name": "ask_user",
+  "version": "v0",
+  "risk": "R0",
+  "description": "Ask the person a question and wait for the answer. Use it when you are blocked on a decision that is theirs to make and cannot be settled from the request or the code. Offer up to six options when the answer is a choice; the person can also type their own words unless allow_free_text is false. The call blocks until they answer, decline or the timeout passes; do not ask the same thing again after a decline or a timeout.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "question": {
+        "type": "string",
+        "description": "The question, in plain words. At most 2000 characters.",
+        "minLength": 1,
+        "maxLength": 2000
+      },
+      "options": {
+        "type": "array",
+        "description": "Choices to offer, at most six. Leave out for an open question.",
+        "maxItems": 6,
+        "items": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string",
+              "description": "Short single-line text the person picks; unique among the options.",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "description": {
+              "type": "string",
+              "description": "One line on what choosing it means.",
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "allow_free_text": {
+        "type": "boolean",
+        "description": "Whether the person may answer in their own words. Must stay true when no options are given.",
+        "default": true
+      },
+      "timeout_s": {
+        "type": "integer",
+        "description": "Give up waiting after this many seconds.",
+        "default": 600,
+        "minimum": 1,
+        "maximum": 3600
+      }
+    },
+    "required": [
+      "question"
+    ],
+    "additionalProperties": false
+  }
+}
