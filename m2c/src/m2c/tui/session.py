@@ -63,11 +63,25 @@ MODES
 plan can be chosen at startup (``--mode plan``) and is left through ``plan_exit`` (C24's ``on_mode_change``).  The
 server learns the mode only at ``run.start``, so a mode changed during a run reaches the server with the next run.
 
-PROJECT SETTINGS
-----------------
-Project settings are IGNORED in v0 (the trust prompt is not built): the rule layers are loaded with
-``project_trusted=False`` (the project file is never parsed) and when ``.m2c/settings.toml`` exists one line in the
-status area says it is being ignored.
+PROJECT SETTINGS AND FOLDER TRUST (Patch C26)
+---------------------------------------------
+A project folder is attacker-controlled content, so its settings (and, later, hooks and skills) are used only after the
+person said "trust this folder" (m2c/trust/).  The decision is made ONCE, in the constructor: ``trust`` is the
+``TrustState`` (trusted / needs a prompt / why not), and the project layer of the rules is read ONLY when it is trusted
+-- the project file is never parsed otherwise.  ``policy_context().project_trusted`` is the real answer.
+
+* trusted before (the same files as when the person answered) -> loaded at once, no prompt;
+* never asked, or the files changed since -> ``start`` shows the question once, BEFORE the hello line, and the keys are
+  captured (``t`` trust and remember, ``s`` this session only, ``n`` or Esc do not trust and remember that).  Until it is
+  answered the project is ignored.  The answer re-checks the fingerprint, loads the layer, checks the fingerprint AGAIN
+  (the files cannot move between "what was shown" and "what was read"), and only then remembers it;
+* symlinks, too many files, unreadable files or an unusable trust file -> never trusted automatically, no prompt, one line
+  in the status area says why;
+* not trusted -> one status line says the project settings are ignored.
+
+A change to the files DURING the session is applied at the next start, and the session never upgrades itself from
+untrusted to trusted without the prompt: nothing but the person's key at the open question can do it.  Closing m2c with the
+question open remembers nothing.  Headless mode does not use this class (it never prompts).
 
 Place this file at: m2c/src/m2c/tui/session.py
 """
@@ -93,6 +107,9 @@ from ..store import append_event, create_session, new_session_id, read_events
 from ..tools import ToolContext
 from ..tools.paths import PathGuardError, resolve_for_read
 from ..tools.shell import ShellConfig, configure_shell
+from ..trust import Answer, TrustPromptMachine, TrustStore, TrustStoreError, describe_prompt, fingerprint_matches
+from ..trust import ignored_note, project_trust_state
+from ..trust.store import FILE_NAME as TRUST_FILE_NAME
 from .approval import (
     ApprovalMachine, Done, EditStart, Expand, Pending, SessionMemory, describe_request,
 )
@@ -179,6 +196,7 @@ class Session:
     grant_fn           ``request_grant`` by default (tests inject a stand-in)
     clock              monotonic seconds (the Esc Esc window)
     cancel_wait_s      how long to wait for the server to confirm a cancel
+    trust_store        the folder-trust store (``<home>/trust.json`` by default; tests inject one)
     """
 
     def __init__(
@@ -196,6 +214,7 @@ class Session:
         grant_fn: Callable[..., Any] = request_grant,
         clock: Callable[[], float] | None = None,
         cancel_wait_s: float = 3.0,
+        trust_store: Any = None,
     ) -> None:
         if mode not in ("plan", "ask", "accept-edits"):
             raise StartupError("the mode must be plan, ask or accept-edits")
@@ -224,9 +243,18 @@ class Session:
         self._config_home = Path(home) if home is not None else config_dir(self._environ)
         self._layers = load_layers(managed=None, user=str(self._config_home / "settings.toml"),
                                    project=None, project_trusted=False)
-        project_settings = Path(self._root) / ".m2c" / "settings.toml"
-        if project_settings.exists():
-            self.status.notes.append("project settings (.m2c/settings.toml) are ignored in this version")
+        # C26: the folder-trust decision, made once.  The project layer is read only if the answer is "trusted".
+        self._project_trusted = False
+        self._trust_store = trust_store if trust_store is not None else (
+            TrustStore.default(self._environ) if home is None else TrustStore(Path(home) / TRUST_FILE_NAME))
+        self._trust = project_trust_state(self._root, self._trust_store)
+        self._trust_note: str | None = None
+        self._trust_prompt: TrustPromptMachine | None = None
+        self._trust_offered = False
+        if self._trust.trusted and not self._apply_project_trust():
+            self._set_trust_note("project settings are ignored: the project files changed while m2c was starting")
+        elif not self._project_trusted:
+            self._set_trust_note(ignored_note(self._trust))
         self._run_context = assemble_run_context(self._root, self._root, self._config_home)
 
         conv = create_session(store, project_path=self._root, mode=mode, model_pref="auto")
@@ -274,6 +302,7 @@ class Session:
             return EXIT_UNREACHABLE
         self._worker = asyncio.get_running_loop().create_task(self._work())
         self._refresh_status()
+        self._offer_trust_prompt()
         self.ui.set_prompt("> ")
         self.ui.show([line("m2c: type a message, or /help.", "dim")])
         return None
@@ -334,6 +363,8 @@ class Session:
     def captures_keys(self, buffer_empty: bool) -> bool:
         """True when a typed key is a command, not text: an approval is waiting (and not being edited), or ``g`` is
         on offer and the input line is empty."""
+        if self._trust_prompt is not None:
+            return True
         a = self._approval
         if a is not None:
             return not a.machine.editing
@@ -344,6 +375,9 @@ class Session:
         return self._modal
 
     def on_key(self, key: str) -> None:
+        if self._trust_prompt is not None:  # the folder-trust question was asked first and is answered first
+            self._feed_trust(key)
+            return
         a = self._approval
         if a is not None and not a.machine.editing:
             self._apply(a, a.machine.feed(key))
@@ -378,7 +412,11 @@ class Session:
         self._outbox.put_nowait(stripped)
 
     def on_escape(self) -> None:
-        """Esc: stop the agent; a second Esc within the window opens the rewind list."""
+        """Esc: stop the agent; a second Esc within the window opens the rewind list.  With the folder-trust question
+        open it answers that question (the same as ``n``) and nothing else."""
+        if self._trust_prompt is not None:
+            self._feed_trust("escape")
+            return
         a = self._approval
         if a is not None and a.machine.editing:
             self._apply(a, a.machine.feed("escape"))
@@ -438,11 +476,101 @@ class Session:
         else:
             self.ui.show([line("Unknown command. Try /help.", "dim")])
 
+    # ------------------------------------------------------------------ folder trust (Patch C26)
+    @property
+    def trust(self):
+        """The ``TrustState`` decided once at startup (read-only: nothing re-evaluates it during the session)."""
+        return self._trust
+
+    @property
+    def project_trusted(self) -> bool:
+        """True only after the person trusted this folder (earlier, with the same files, or now at the question)."""
+        return self._project_trusted
+
+    @property
+    def trust_prompt_active(self) -> bool:
+        return self._trust_prompt is not None
+
+    def _apply_project_trust(self) -> bool:
+        """Load the project layer of the rules if, and only if, the files are still exactly the ones that were trusted.
+
+        The fingerprint is checked before the file is read and AGAIN after, so the layer that is kept was read while the
+        files were the trusted ones.  Returns whether the project layer is now in use.
+        """
+        fingerprint = self._trust.fingerprint
+        if not fingerprint_matches(self._root, fingerprint):
+            return False
+        project = str(Path(self._root) / ".m2c" / "settings.toml")
+        layers = load_layers(managed=None, user=str(self._config_home / "settings.toml"),
+                             project=project, project_trusted=True)
+        if not fingerprint_matches(self._root, fingerprint):
+            return False
+        self._layers = layers
+        self._project_trusted = True
+        return True
+
+    def _set_trust_note(self, text: str | None) -> None:
+        if self._trust_note is not None and self._trust_note in self.status.notes:
+            self.status.notes.remove(self._trust_note)
+        self._trust_note = text
+        if text:
+            self.status.notes.append(text)
+
+    def _offer_trust_prompt(self) -> None:
+        """Show the question once, at startup, when the state asks for it (or the problem with the trust file)."""
+        if self._trust_offered:
+            return
+        self._trust_offered = True
+        state = self._trust
+        if state.needs_prompt:
+            self._trust_prompt = TrustPromptMachine(state)
+            self.ui.show(describe_prompt(state))
+        elif state.reason == "store_unusable":
+            self.ui.show([line(state.message, "error")])
+
+    def _feed_trust(self, key: str) -> None:
+        machine = self._trust_prompt
+        if machine is None:
+            return
+        step = machine.feed(key)
+        if isinstance(step, Answer):
+            self._trust_prompt = None
+            self._finish_trust(step)
+        elif step.message:
+            self.ui.show([line(step.message, "dim")])
+
+    def _finish_trust(self, answer: Answer) -> None:
+        if answer.trust:
+            if self._apply_project_trust():
+                self._set_trust_note(None)
+                saved = self._remember_trust("trusted") if answer.remember else False
+                tail = " and remembered until its files change." if saved else " for this session only."
+                self.ui.show([line("Project settings from this folder are now trusted" + tail, "info")])
+            else:
+                self.ui.show([line("The project files changed while the question was open, so nothing was trusted. "
+                                   "Restart m2c to be asked again.", "warning")])
+        else:
+            if answer.remember:
+                self._remember_trust("untrusted")
+            self.ui.show([line("Project settings from this folder stay ignored.", "info")])
+        self._refresh_status()
+
+    def _remember_trust(self, decision: str) -> bool:
+        """Write the answer to the trust file.  A failure is shown and the answer applies to this session only."""
+        try:
+            self._trust_store.set(self._root, decision, self._trust.fingerprint)
+            return True
+        except TrustStoreError as exc:
+            self.ui.show([line(f"{exc} The answer applies to this session only.", "warning")])
+        except ValueError:
+            self.ui.show([line("Could not save the answer. It applies to this session only.", "warning")])
+        return False
+
     # ------------------------------------------------------------------ policy and tools
     def policy_context(self) -> Context:
         """The CURRENT C06 context: the mode is read on every call."""
-        return Context(mode=self.status.mode, layers=self._layers, project_root=self._root, project_trusted=False,
-                       tainted=False, home=str(Path.home()), cwd=self._root)
+        return Context(mode=self.status.mode, layers=self._layers, project_root=self._root,
+                       project_trusted=self._project_trusted, tainted=False, home=str(Path.home()), cwd=self._root)
 
     def _sandbox_warning(self, text: str) -> None:
         if not self._sandbox_shown:

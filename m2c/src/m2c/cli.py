@@ -8,6 +8,8 @@ m2c/src/m2c/cli.py -- Patch C01: the ``m2c`` command (Patch C03: login/logout).
     m2c login [--device-name N]   sign in with a code you approve in the web app
     m2c logout                    delete this device's local credential
     m2c doctor [--project P]      check that this machine can run m2c
+    m2c trust --list              the project folders you decided about (C26)
+    m2c trust --forget PATH       drop the decision for a folder, so you are asked again
 
 Built on argparse only (runtime dependencies are the standard library until
 a work package says otherwise).  ``main()`` returns an exit status instead of
@@ -52,7 +54,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -180,6 +184,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="project folder to check (default: the current directory)",
     )
+    trust_parser = sub.add_parser(
+        "trust",
+        help="list the project folders you decided about, or forget a decision",
+        description="Project settings, hooks and skills are used only in a folder you trusted, and only while its files "
+        "are the ones you trusted.  The answer is given in the folder itself, when m2c asks.  This command only shows "
+        "the saved answers (--list) or removes one so that you are asked again (--forget).",
+    )
+    trust_group = trust_parser.add_mutually_exclusive_group(required=True)
+    trust_group.add_argument("--list", action="store_true", help="show each folder, your decision and when you made it")
+    trust_group.add_argument("--forget", metavar="PATH", help="remove the saved decision for this folder")
     return parser
 
 
@@ -256,6 +270,43 @@ def _run_doctor(project: Path | None) -> int:
     report = doctor.run_doctor(env=doctor.Environment.detect(project))
     sys.stdout.write(report.render())
     return EXIT_OK if report.ok else EXIT_FAILURE
+
+
+def _run_trust(args: argparse.Namespace) -> int:
+    """``m2c trust --list`` / ``--forget PATH`` (Patch C26).  Reads and edits the trust file only; it cannot grant trust."""
+    from .trust import TrustStore, TrustStoreError, canonical_root
+    from .tui.safe import clean_line
+
+    try:
+        store = TrustStore.default()
+        if args.list:
+            entries = store.items()
+            for folder, entry in entries:
+                when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(entry.time))
+                print(f"{entry.decision:<9}  {when}  {clean_line(folder, 300)}")
+            if not entries:
+                print("No folder trust decisions are stored.")
+            if store.ignored_entries:
+                n = store.ignored_entries
+                print(f"({n} malformed entr{'y' if n == 1 else 'ies'} ignored)")
+            return EXIT_OK
+        folder = canonical_root(os.path.expanduser(args.forget))
+        if folder is None:
+            print("m2c trust: --forget: that is not a usable folder path.", file=sys.stderr)
+            return EXIT_USAGE
+        if store.forget(folder):
+            print(f"Forgot the trust decision for {clean_line(folder, 300)}. You will be asked again there.")
+        else:
+            print(f"There is no decision stored for {clean_line(folder, 300)}.")
+        return EXIT_OK
+    except TrustStoreError as exc:  # fixed text plus the path, with how to fix it (store.py)
+        print(f"m2c trust: {clean_line(str(exc), 1000)}", file=sys.stderr)
+        return EXIT_FAILURE
+    except ConfigDirError as exc:
+        print(f"m2c trust: {exc}.", file=sys.stderr)
+        return EXIT_FAILURE
+    except Exception as exc:
+        return _unexpected("trust", exc)
 
 
 def _run_headless(args: argparse.Namespace) -> int:
@@ -367,6 +418,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_logout()
     if args.command == "doctor":
         return _run_doctor(args.project)
+    if args.command == "trust":
+        return _run_trust(args)
     parser.error(f"unknown command {args.command!r}")  # unreachable: argparse validates choices
     return EXIT_USAGE
 

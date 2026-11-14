@@ -36,11 +36,16 @@ the path from a plain checkout).
 
 ## Run it
 
-Install (the m2c package **without** its `[dev]` extra: `m2c[dev]` pins a different pytest than the backend does):
+Install in two steps, with `--no-deps` for m2c (it pins `rich==15.0.0` and `prompt_toolkit` for the terminal UI, which the
+backend's `rich==14.3.4` cannot satisfy, so pip cannot resolve the two together, and the canary test imports neither library):
 
 ```bash
-cd backend && pip install -r requirements.txt && pip install -e ../m2c
+cd backend && pip install -r requirements.txt && pip install --no-deps -e ../m2c
 ```
+
+Because of `--no-deps`, a plain `pip check` lists m2c's own two unmet requirements (`prompt-toolkit` not installed, `rich==15.0.0`
+against 14.3.4); that is expected. CI's `pip check` step accepts exactly those two lines and fails on anything else, for example a
+`websockets` that no longer matches m2c's pin. Do not install m2c without `--no-deps`: pip would replace the backend's `rich` with 15.0.0.
 
 **Fake-recorder mode** (no database; the default). The run store and the usage ledger are in-memory twins, and every
 SQL statement and parameter either would send is recorded and scanned instead of table rows:

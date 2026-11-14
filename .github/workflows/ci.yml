@@ -350,8 +350,20 @@ jobs:
     # untouched. Placed after `protocol` rather than at the end of the file: other patches append their own jobs
     # there, and two hunks that both end at EOF cannot both be applied with `git apply`.
     #
-    # m2c is installed WITHOUT its [dev] extra: that extra pins a different pytest than backend/requirements.txt
-    # does, and pip would refuse the pair. The m2c suite keeps its own job (`m2c-test`).
+    # Q06b -- how the two packages are installed, and why in two steps. backend/requirements.txt pins rich==14.3.4
+    # (guardrails-ai 0.10.2 needs rich below 15, e2b needs 14 or newer) while m2c/pyproject.toml pins rich==15.0.0 and
+    # prompt_toolkit==3.0.53 for the terminal UI, so `pip install -r requirements.txt -e ../m2c` ends in
+    # ResolutionImpossible. The pins differ for a real reason and aligning them is a separate decision. The canary
+    # test needs neither library (only m2c/tui/app.py imports them; the harness imports m2c.tui.session, which does
+    # not) and needs only websockets from m2c, which both packages pin to the same version. So: the backend first,
+    # then m2c with --no-deps, and no [dev] extra (it pins a different pytest as well). The m2c suite keeps its own
+    # job (`m2c-test`).
+    #
+    # Because of --no-deps, `pip check` can never be fully clean here: m2c's own rich==15.0.0 and prompt_toolkit
+    # requirements stay unmet on purpose. The pip check step tolerates exactly those two lines and fails on anything
+    # else (a drifted websockets, a new m2c runtime dependency, a broken backend pin), at install time with the
+    # offending lines in the log, not later as a confusing test failure. Its logic is tested in
+    # backend/tests/static/test_canary_ci_install.py.
     #
     # Two passes, both blocking, no continue-on-error (a security check that may be red is not a check):
     #   1. fake-recorder mode, no database URL: the run store and ledger are in-memory twins and every SQL
@@ -384,9 +396,26 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
-      - name: Install the backend and the m2c client (m2c without its dev extra, the pytest pins differ)
+      - name: Install the backend requirements
         working-directory: backend
-        run: pip install -r requirements.txt -e ../m2c
+        run: pip install -r requirements.txt
+      - name: Install the m2c client without its dependencies (its rich and prompt_toolkit pins cannot be resolved with the backend's)
+        working-directory: backend
+        run: pip install --no-deps -e ../m2c
+      - name: pip check (only m2c's own rich and prompt_toolkit lines are expected)
+        working-directory: backend
+        run: |
+          if out=$(python -m pip check 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+          unexpected=$(printf '%s\n' "$out" | grep -v -E '^m2c [^ ]+ (requires prompt-toolkit,|requires rich==|has requirement rich==)' || true)
+          if [ -z "$out" ] || [ -n "$unexpected" ]; then
+            echo "::error title=pip check::The installed packages are inconsistent beyond m2c's own rich and prompt_toolkit pins (the lines above). Fix the pin or the install; do not widen this check."
+            exit 1
+          fi
+          echo "pip check: only m2c's rich and prompt_toolkit requirements are unmet, as expected with --no-deps"
       - name: Canary test, fake-recorder mode (no database)
         working-directory: backend
         run: pytest tests/canary -v -rs --junitxml="$RUNNER_TEMP/canary-fake-junit.xml"

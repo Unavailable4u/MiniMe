@@ -71,10 +71,12 @@ not run them: run them by hand before a change that touches SQL.
 `backend/tests/canary/` plants run-time-random canaries in a prompt, project files, tool outputs, the model's reply,
 tool arguments and an `M2C.md`, runs a scripted session through the real server and the real device client, and
 fails if any canary is found in Postgres, logs, Redis after the run, error reports or the ledger. It is not in
-`pytest.ini`'s default testpaths: name it. Install `pip install -e ../m2c` first (without its `[dev]` extra), then:
+`pytest.ini`'s default testpaths: name it. Install the backend requirements and then m2c with `--no-deps` (m2c pins `rich==15.0.0`
+and the backend pins `rich==14.3.4`, so pip cannot resolve them together, and this test never imports the terminal UI that needs `rich` 15), then:
 
 ```bash
 cd backend
+pip install -r requirements.txt && pip install --no-deps -e ../m2c
 pytest tests/canary -v    # fake-recorder mode, no database
 # real-database mode adds MINIME_TEST_DATABASE_URL (+ MINIME_TEST_SCAN_DATABASE_URL); see backend/tests/canary/README.md
 ```
