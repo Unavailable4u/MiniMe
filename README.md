@@ -16,7 +16,7 @@ something the repository can set for you automatically.
 
 CI runs the full secret + static-analysis scan (Gitleaks + Semgrep,
 uploaded as SARIF to GitHub's Security tab) on every push regardless —
-see `.github/workflows/security-scan.yml` — but the local pre-commit hook
+see `.github/workflows/ci.yml` (job `secrets-scan`) — but the local pre-commit hook
 catches a leaked secret before it ever reaches a commit, which is worth
 having too.
 
