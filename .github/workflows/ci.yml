@@ -30,12 +30,15 @@ jobs:
     #     inventories): it is not in backend/pytest.ini's default testpaths, so
     #     it only ever ran by hand. It needs no database and no network
     #     (verified: 120 passed, 0 skipped, with no proxy and no DATABASE_URL).
-    #   - Python stays 3.11 here (the version this job always used; the floor
-    #     requirements.txt installs on, and backend/pyproject.toml's ruff
-    #     target). The m2c client is the package that is matrixed. Note that
-    #     backend.Dockerfile builds on python:3.12-slim, so the version the
-    #     backend ships on is not the one this job tests; adding "3.12" is a
-    #     one-line matrix change if that gap should be closed.
+    #   - SX-02 -- Python matrix 3.11 and 3.12. 3.11 is the version this job
+    #     always used (the floor requirements.txt installs on, and
+    #     backend/pyproject.toml's ruff target); 3.12 is what backend.Dockerfile
+    #     ships on (python:3.12-slim), so the backend is now tested on the
+    #     version it runs on. fail-fast is off so one version's failure does not
+    #     hide the other's result. NOTE: a matrix renames the checks to
+    #     "test (3.11)" / "test (3.12)"; a branch protection rule that requires
+    #     the old name "test" must be updated. Each leg runs on its own runner,
+    #     so the JUnit file name below does not need to change.
     #   - Many codeagent test modules start with pytest.importorskip("jsonschema").
     #     They run here only because requirements.txt pins jsonschema; if that pin
     #     were ever dropped they would all skip and the job would stay green.
@@ -48,13 +51,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     defaults:
       run:
         working-directory: backend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with: { python-version: "3.11" }
+        with: { python-version: "${{ matrix.python-version }}" }
       - run: pip install -r requirements.txt
       - name: Backend tests (unit, integration, static)
         run: pytest tests/unit tests/integration tests/static -v -rs --junitxml="$RUNNER_TEMP/backend-junit.xml"
