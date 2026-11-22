@@ -9,7 +9,13 @@ Fetching is the one real-world-flaky part of this module (a dead link,
 a paywall, a site that blocks non-browser requests) — every failure
 mode collapses to a single ValueError so the caller (the /api/notes/clip
 endpoint) has one exception type to translate into a 400, rather than
-needing to know trafilatura's internals.
+needing to know the fetcher's internals.
+
+Patch SX-06: the page is downloaded with utils.url_guard.safe_get, not
+with trafilatura's own downloader. The URL is user input, so the fetch
+must refuse private / loopback / cloud-metadata addresses (including
+after a redirect), verify certificates and cap the size, and that
+downloader does none of that. trafilatura is only used to extract text.
 
 Place this file at: agents/web_clipper.py
 """
@@ -18,6 +24,13 @@ import json
 
 import trafilatura
 
+from utils.url_guard import UnsafeURL, safe_get
+
+# Largest page a clip will download. PLACEHOLDER until the size limits are
+# decided (decision D-3 in the SX patch guide).
+CLIP_MAX_BYTES = 5_000_000
+CLIP_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
+
 
 def clip_url(url: str) -> dict:
     """Fetches and extracts `url` into the common artifact shape. Always
@@ -25,7 +38,19 @@ def clip_url(url: str) -> dict:
     structure the way a PDF has pages, so unlike pdf_ingestor.py there's
     nothing principled to split on here.
     """
-    downloaded = trafilatura.fetch_url(url)
+    try:
+        _final_url, _status, _headers, downloaded = safe_get(
+            url, max_bytes=CLIP_MAX_BYTES, allowed_content_types=CLIP_CONTENT_TYPES,
+        )
+    except UnsafeURL as exc:
+        # The URL was refused. Do not repeat it back: it may hold control
+        # characters or an internal name, and the route sends this message
+        # to the client as-is. The guard's own text is fixed and safe.
+        raise ValueError(f"could not fetch: {exc}") from exc
+    except ValueError as exc:
+        # FetchError, ResponseTooLarge and FetchTimeout: all ValueErrors with
+        # fixed text that never names a resolved address.
+        raise ValueError(f"could not fetch {url}: {exc}") from exc
     if not downloaded:
         raise ValueError(f"could not fetch {url}")
 
