@@ -1,0 +1,25 @@
+# .github/audit-allowlist.txt -- Patch SX-09.
+#
+# The ONLY dependency-audit findings the CI job `dependency-audit` may let through.
+# .github/scripts/check_audit.py compares the pip-audit and npm audit reports with
+# this file and fails the job for anything that is not listed here.
+#
+# Format (one entry per line; blank lines and lines starting with # are ignored):
+#
+#     ID | scope | reason | expires=YYYY-MM-DD
+#
+#   ID       any id the audit tool reports for the finding: GHSA-..., PYSEC-...,
+#            CVE-... (pip-audit lists the aliases of a finding too; npm audit
+#            gives GHSA ids). Case does not matter.
+#   scope    python    (backend/requirements.txt, read by pip-audit)
+#            frontend  (frontend/package-lock.json, production packages)
+#            promptfoo (backend/evals/promptfoo/package-lock.json, production packages)
+#   reason   plain words: why it is allowed and what removes it (a patch name or
+#            a decision). The reason cannot contain the "|" character.
+#   expires  the last day the entry is valid. From the next day the job fails
+#            until someone fixes the dependency or renews the entry on purpose.
+#
+# The job also fails when an entry matches no current finding (stale), so a fixed
+# dependency forces its line to be deleted in the same change.
+#
+# Empty on purpose in patch SX-09. Patch SX-10 fills it from the live audit.
