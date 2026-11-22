@@ -11,12 +11,22 @@ downloading the video stream itself (extract_flat / skip_download);
 youtube_transcript_api pulls the transcript directly, no video file
 ever touches disk.
 
+Patch SX-07: the URL is user input and yt-dlp does its own networking
+(it can be pointed at any site it has an extractor for), so the URL is
+checked with utils.url_guard.validate_youtube_url BEFORE yt-dlp sees it,
+and the page yt-dlp reports back (webpage_url) must also be on a YouTube
+host. Both refusals are the module's usual ValueError.
+
 Place this file at: agents/video_ingestor.py
 """
+
+from urllib.parse import urlsplit
 
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
+
+from utils.url_guard import YOUTUBE_HOSTS, UnsafeURL, validate_youtube_url
 
 # Segments are chunked into sections by elapsed time rather than kept as
 # one giant block or one node per caption line (a caption line is a
@@ -26,6 +36,20 @@ from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisable
 SECTION_LENGTH_SECONDS = 600  # 10-minute chunks
 
 
+def _is_youtube_page(page_url) -> bool:
+    """True only for an http(s) URL, without user info, whose host is a
+    YouTube host. Anything else (missing, not a string, unparsable) is
+    False: the check fails closed."""
+    if not isinstance(page_url, str):
+        return False
+    try:
+        parts = urlsplit(page_url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and "@" not in parts.netloc and host in YOUTUBE_HOSTS
+
+
 def _video_id(url: str) -> str:
     """yt-dlp already knows every URL shape (youtu.be, /watch?v=,
     /shorts/, /embed/, ...) -- extract_info with download=False resolves
@@ -33,10 +57,17 @@ def _video_id(url: str) -> str:
     reused instead of hand-rolling a second regex-based URL parser that
     could drift from yt-dlp's own idea of what a valid video URL is.
     """
+    try:
+        validate_youtube_url(url)
+    except UnsafeURL as exc:
+        # Not repeated back: the message goes to the client as it is.
+        raise ValueError(f"not a supported video URL: {exc}") from exc
     with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
         info = ydl.extract_info(url, download=False)
     if not info or "id" not in info:
         raise ValueError(f"could not resolve a video id from {url}")
+    if not _is_youtube_page(info.get("webpage_url")):
+        raise ValueError(f"could not resolve a video id from {url}: the page is not on YouTube")
     return info["id"], info.get("title") or url
 
 
