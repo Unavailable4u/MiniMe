@@ -13,28 +13,81 @@ Also covers hardware_speccer.py's _populate_datasheet_details(): the
 caller that actually nulls out a part's datasheet_url field when it
 gets DATASHEET_NOT_FOUND back.
 
+Patch SX-08: the datasheet download now goes through
+utils.url_guard.safe_stream, which is what these tests fake (as
+csl.safe_stream) instead of requests.get. DNS and socket connects are
+blocked for the whole module, so nothing here can reach the network; the
+tests that run the REAL safe_stream (private addresses) prove it refuses
+before any lookup or connection.
+
 eo/datasheet_cache.py's get_cached_datasheet/set_cached_datasheet are
 faked at the module level (bound names inside component_spec_lookup),
 same approach test_agent_academic_search.py uses for requests.get --
 this file never touches the real cache/network.
 """
+import contextlib
+import os
+import socket
+import tempfile
+
 import pytest
+import requests
 
 from agents import component_spec_lookup as csl
+from utils.url_guard import FetchError, FetchTimeout, ResponseTooLarge
 
 
 class _FakeResponse:
-    def __init__(self, content_type="text/html", status=200, raise_exc=None):
+    """What safe_stream yields: .headers, .status, .url and iter_bytes()."""
+
+    def __init__(self, content_type="text/html", chunks=(b"%PDF-1.4 fake pdf bytes",), fail_after=None):
         self.headers = {"Content-Type": content_type}
-        self.status_code = status
-        self._raise_exc = raise_exc
+        self.status = 200
+        self.url = ""
+        self._chunks = chunks
+        self._fail_after = fail_after      # an exception raised after the first chunk
 
-    def raise_for_status(self):
-        if self._raise_exc:
-            raise self._raise_exc
+    def iter_bytes(self, max_bytes=None):
+        for i, chunk in enumerate(self._chunks):
+            yield chunk
+            if i == 0 and self._fail_after is not None:
+                raise self._fail_after
 
-    def iter_content(self, chunk_size=65536):
-        yield b"%PDF-1.4 fake pdf bytes"
+
+def _fake_safe_stream(monkeypatch, handler):
+    """Replace csl.safe_stream. handler(url, **kwargs) returns a _FakeResponse
+    or raises (a raise stands for the guard refusing / the fetch failing).
+    Returns the list of (url, kwargs) calls."""
+    calls = []
+
+    @contextlib.contextmanager
+    def fake(url, **kwargs):
+        calls.append((url, kwargs))
+        yield handler(url, **kwargs)
+
+    monkeypatch.setattr(csl, "safe_stream", fake)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Any DNS lookup or socket connect in this module is a bug. Recorded as
+    well as refused, because url_guard turns a resolver error into 'could not
+    be resolved' and would hide it."""
+    calls = type("NetworkCalls", (), {})()
+    calls.dns, calls.connects = [], []
+
+    def getaddrinfo(host, *args, **kwargs):
+        calls.dns.append(host)
+        raise AssertionError(f"unexpected DNS lookup for {host!r}")
+
+    def connect(self, address):
+        calls.connects.append(address)
+        raise AssertionError(f"unexpected socket connect to {address!r}")
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    return calls
 
 
 @pytest.fixture(autouse=True)
@@ -48,10 +101,7 @@ def no_cache(monkeypatch):
 def test_confirmed_non_pdf_with_no_retry_hit_returns_sentinel(monkeypatch):
     """Non-PDF Content-Type on the primary URL, search() finds nothing
     usable -> DATASHEET_NOT_FOUND, not a plain None."""
-    monkeypatch.setattr(
-        csl.requests, "get",
-        lambda url, timeout, stream: _FakeResponse(content_type="text/html"),
-    )
+    _fake_safe_stream(monkeypatch, lambda url, **kw: _FakeResponse(content_type="text/html"))
     # search() is imported lazily inside _search_for_pdf_datasheet(), so
     # patch it at its real home instead of on the csl module object.
     import utils.web_search as web_search
@@ -69,11 +119,11 @@ def test_confirmed_non_pdf_with_no_part_number_skips_retry_returns_sentinel(monk
     lookup that silently returns the bad URL's non-existent content."""
     call_count = {"n": 0}
 
-    def _fake_get(url, timeout, stream):
+    def _fake_get(url, **kw):
         call_count["n"] += 1
         return _FakeResponse(content_type="text/html")
 
-    monkeypatch.setattr(csl.requests, "get", _fake_get)
+    _fake_safe_stream(monkeypatch, _fake_get)
 
     result = csl.get_datasheet_detail("https://vendor.example.com/products/qtr-8a")
     assert result is csl.DATASHEET_NOT_FOUND
@@ -88,13 +138,13 @@ def test_non_pdf_retry_finds_a_real_pdf(monkeypatch):
     detail from the retry URL comes back normally (not the sentinel)."""
     urls_hit = []
 
-    def _fake_get(url, timeout, stream):
+    def _fake_get(url, **kw):
         urls_hit.append(url)
         if url == "https://vendor.example.com/products/qtr-8a":
             return _FakeResponse(content_type="text/html")
         return _FakeResponse(content_type="application/pdf")
 
-    monkeypatch.setattr(csl.requests, "get", _fake_get)
+    _fake_safe_stream(monkeypatch, _fake_get)
     monkeypatch.setattr(
         csl, "_fetch_and_parse_pdf",
         lambda url: (
@@ -153,6 +203,180 @@ def test_no_part_number_and_no_url_still_returns_none_for_no_url():
     unchanged by this patch -- still a plain None, never the sentinel."""
     assert csl.get_datasheet_detail("") is None
     assert csl.get_datasheet_detail(None) is None
+
+
+# ---------------------------------------------------------------------------
+# SX-08: the download itself (safe_stream, chunks, cap, timeouts, temp file)
+# ---------------------------------------------------------------------------
+DATASHEET = "https://vendor.example.com/ds/qtr-8a.pdf"
+PARSED = {"title": "T", "sections": [{"content": "body text"}], "metadata": {"page_count": 3}}
+
+
+@pytest.fixture
+def downloads(monkeypatch, tmp_path):
+    """Temp files go to an empty directory we can inspect; ingest_pdf is
+    faked and records what file it was given and what that file held."""
+    folder = tmp_path / "dl"
+    folder.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(folder))
+    state = type("Downloads", (), {})()
+    state.folder = folder
+    state.ingested = []
+
+    def ingest_pdf(path):
+        with open(path, "rb") as fh:
+            state.ingested.append((path, fh.read()))
+        return PARSED
+
+    import agents.pdf_ingestor as pdf_ingestor
+    monkeypatch.setattr(pdf_ingestor, "ingest_pdf", ingest_pdf)
+    return state
+
+
+class TestDownload:
+    def test_goes_through_safe_stream_with_cap_and_timeouts(self, monkeypatch, downloads):
+        calls = _fake_safe_stream(monkeypatch, lambda url, **kw: _FakeResponse("application/pdf"))
+        result = csl.get_datasheet_detail(DATASHEET, part_number="QTR-8A")
+        assert result == {"title": "T", "content": "body text", "page_count": 3}
+        (url, kwargs), = calls
+        assert url == DATASHEET
+        assert kwargs["max_bytes"] == csl.DATASHEET_MAX_BYTES == 25_000_000
+        assert kwargs["timeout"] == csl.DATASHEET_REQUEST_TIMEOUT
+        assert kwargs["total_timeout"] == 2 * csl.DATASHEET_REQUEST_TIMEOUT
+
+    def test_body_is_written_chunk_by_chunk_and_temp_file_removed(self, monkeypatch, downloads):
+        chunks = (b"%PDF-1.4 ", b"middle ", b"end")
+        _fake_safe_stream(monkeypatch, lambda url, **kw: _FakeResponse("application/pdf", chunks=chunks))
+        csl.get_datasheet_detail(DATASHEET)
+        (path, content), = downloads.ingested
+        assert content == b"%PDF-1.4 middle end"
+        assert path.endswith(".pdf")
+        assert os.listdir(downloads.folder) == []
+
+    def test_pdf_extension_is_enough_even_with_a_generic_content_type(self, monkeypatch, downloads):
+        _fake_safe_stream(monkeypatch, lambda url, **kw: _FakeResponse("application/octet-stream"))
+        assert csl.get_datasheet_detail(DATASHEET)["title"] == "T"
+
+    def test_pdf_content_type_is_enough_without_an_extension(self, monkeypatch, downloads):
+        _fake_safe_stream(monkeypatch, lambda url, **kw: _FakeResponse("application/pdf; qs=0.9"))
+        assert csl.get_datasheet_detail("https://vendor.example.com/download?id=7")["title"] == "T"
+
+    def test_not_a_pdf_downloads_nothing(self, monkeypatch, downloads):
+        _fake_safe_stream(monkeypatch, lambda url, **kw: _FakeResponse("text/html"))
+        assert csl.get_datasheet_detail("https://vendor.example.com/page") is csl.DATASHEET_NOT_FOUND
+        assert downloads.ingested == []
+        assert os.listdir(downloads.folder) == []
+
+
+class TestPrivateAddressesAreRefused:
+    """The REAL safe_stream: the download returns the normal 'nothing here'
+    result (None) and nothing is looked up, connected to or ingested."""
+
+    @pytest.mark.parametrize("url", [
+        "http://10.0.0.5/ds.pdf",
+        "http://169.254.169.254/latest/meta-data/ds.pdf",
+        "http://127.0.0.1/ds.pdf",
+        "http://localhost/ds.pdf",
+        "http://[::1]/ds.pdf",
+        "http://2130706433/ds.pdf",
+        "file:///etc/passwd",
+        "https://user@vendor.example.com/ds.pdf",
+    ])
+    def test_literal_private_urls_return_none_without_dns_or_connect(self, downloads, no_network, url):
+        assert csl.get_datasheet_detail(url, part_number="QTR-8A") is None
+        assert no_network.dns == [] and no_network.connects == []
+        assert downloads.ingested == []
+        assert os.listdir(downloads.folder) == []
+
+    def test_name_that_resolves_to_a_private_address_is_refused_before_connecting(
+            self, monkeypatch, downloads, no_network):
+        lookups = []
+
+        def getaddrinfo(host, port, *args, **kwargs):
+            lookups.append(host)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", port))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+        assert csl.get_datasheet_detail("https://cdn.vendor.example/ds.pdf") is None
+        assert lookups                                   # looked up ...
+        assert no_network.connects == []                 # ... never connected to
+        assert downloads.ingested == []
+
+    def test_a_refused_url_is_not_treated_as_not_a_pdf(self, monkeypatch, downloads):
+        """A refusal is a plain failure (None), so it does not trigger the
+        reformulated-query search the way a confirmed non-PDF does."""
+        import utils.web_search as web_search
+        searches = []
+        monkeypatch.setattr(web_search, "search", lambda *a, **k: searches.append(a) or [])
+        assert csl.get_datasheet_detail("http://10.0.0.5/ds.pdf", part_number="QTR-8A") is None
+        assert searches == []
+
+
+class TestTooLarge:
+    def test_declared_size_over_the_cap_returns_none(self, monkeypatch, downloads):
+        def handler(url, **kw):
+            raise ResponseTooLarge("The response is too large")
+        _fake_safe_stream(monkeypatch, handler)
+        assert csl.get_datasheet_detail(DATASHEET) is None
+        assert downloads.ingested == []
+
+    def test_body_that_outgrows_the_cap_mid_download_returns_none_and_leaves_no_file(
+            self, monkeypatch, downloads):
+        _fake_safe_stream(monkeypatch, lambda url, **kw: _FakeResponse(
+            "application/pdf", chunks=(b"%PDF-first-chunk", b"never written"),
+            fail_after=ResponseTooLarge("The response is too large")))
+        assert csl.get_datasheet_detail(DATASHEET) is None
+        assert downloads.ingested == []
+        assert os.listdir(downloads.folder) == []        # the half-written file was removed
+
+
+class TestFailuresAndTimeouts:
+    def test_http_error_returns_none_without_a_retry(self, monkeypatch, downloads):
+        def handler(url, **kw):
+            raise FetchError("The server did not return the page")
+        calls = _fake_safe_stream(monkeypatch, handler)
+        assert csl.get_datasheet_detail(DATASHEET) is None
+        assert len(calls) == 1
+
+    def test_timeout_is_a_requests_timeout_so_the_retry_wrapper_works(self):
+        assert isinstance(FetchTimeout(), requests.exceptions.Timeout)
+
+    def test_timeout_triggers_one_retry_with_the_longer_budget(self, monkeypatch, downloads):
+        attempts = []
+
+        def handler(url, **kw):
+            attempts.append(kw["timeout"])
+            if len(attempts) == 1:
+                raise FetchTimeout("The server did not answer in time")
+            return _FakeResponse("application/pdf")
+
+        _fake_safe_stream(monkeypatch, handler)
+        result = csl.get_datasheet_detail(DATASHEET)
+        assert result["title"] == "T"
+        assert attempts == [csl.DATASHEET_REQUEST_TIMEOUT, csl.DATASHEET_REQUEST_TIMEOUT_RETRY]
+
+    def test_timeout_in_the_middle_of_the_body_also_retries_and_leaves_no_file(
+            self, monkeypatch, downloads):
+        attempts = []
+
+        def handler(url, **kw):
+            attempts.append(kw["timeout"])
+            if len(attempts) == 1:
+                return _FakeResponse("application/pdf", chunks=(b"%PDF-start", b"x"),
+                                     fail_after=FetchTimeout())
+            return _FakeResponse("application/pdf")
+
+        _fake_safe_stream(monkeypatch, handler)
+        assert csl.get_datasheet_detail(DATASHEET)["title"] == "T"
+        assert len(attempts) == 2
+        assert os.listdir(downloads.folder) == []
+
+    def test_two_timeouts_give_up_with_none(self, monkeypatch, downloads):
+        def handler(url, **kw):
+            raise FetchTimeout()
+        calls = _fake_safe_stream(monkeypatch, handler)
+        assert csl.get_datasheet_detail(DATASHEET) is None
+        assert len(calls) == 2
 
 
 # ---------------------------------------------------------------------------

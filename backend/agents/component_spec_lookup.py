@@ -46,6 +46,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.datasheet_cache import get_cached_datasheet, set_cached_datasheet
 from eo.spec_cache import get_cached_spec, set_cached_spec
+from utils.url_guard import safe_stream
 
 # Permanent fix (2026-08-13): load_dotenv() at MODULE level, not just
 # inside __main__. The __main__-only version only covered
@@ -78,6 +79,9 @@ REQUEST_TIMEOUT = 15
 # pass, not inline with a chat response).
 DATASHEET_REQUEST_TIMEOUT = 45          # was 30
 DATASHEET_REQUEST_TIMEOUT_RETRY = 90    # NEW
+# Patch SX-08: largest datasheet PDF a download may be. PLACEHOLDER until the
+# size limits are decided (decision D-3 in the SX patch guide).
+DATASHEET_MAX_BYTES = 25_000_000
 
 DIGIKEY_TOKEN_URL = "https://api.digikey.com/v1/oauth2/token"
 # Permanent fix (real-bug follow-up, 2026-08-13): the old
@@ -592,19 +596,29 @@ def _fetch_and_parse_pdf(url: str, _timeout: int = None) -> dict | None:
     timeout = _timeout or DATASHEET_REQUEST_TIMEOUT
     tmp_path = None
     try:
-        resp = requests.get(url, timeout=timeout, stream=True)
-        resp.raise_for_status()
-        content_type = (resp.headers.get("Content-Type") or "").lower()
-        if "pdf" not in content_type and not url.lower().endswith(".pdf"):
-            # Not actually a PDF (e.g. an HTML product page some vendors
-            # return under a "datasheet" link) -- ingest_pdf() would just
-            # raise on this, so skip the download/parse attempt entirely.
-            raise _NotAPdfError(url)
+        # Patch SX-08: `url` comes from a vendor API or a search result, so it
+        # is fetched with utils.url_guard.safe_stream (private / metadata
+        # addresses refused, redirects re-checked, certificates verified,
+        # body capped), not the requests library. `timeout` limits each connect/read
+        # as before; the whole download gets twice that. A guard refusal or a
+        # too-large body is a ValueError and lands in the "skip cleanly"
+        # handler below; a timeout is also a requests Timeout (FetchTimeout),
+        # so the retry wrapper keeps working.
+        with safe_stream(url, max_bytes=DATASHEET_MAX_BYTES, timeout=timeout,
+                         total_timeout=timeout * 2) as resp:
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            if "pdf" not in content_type and not url.lower().endswith(".pdf"):
+                # Not actually a PDF (e.g. an HTML product page some vendors
+                # return under a "datasheet" link) -- ingest_pdf() would just
+                # raise on this, so skip the download/parse attempt entirely.
+                raise _NotAPdfError(url)
 
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            for chunk in resp.iter_content(chunk_size=65536):
-                tmp.write(chunk)
-            tmp_path = tmp.name
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                # Set BEFORE writing: the size cap can stop the download
+                # half-way, and the finally block must still find the file.
+                tmp_path = tmp.name
+                for chunk in resp.iter_bytes():
+                    tmp.write(chunk)
 
         artifact = ingest_pdf(tmp_path)
     except requests.exceptions.Timeout:
