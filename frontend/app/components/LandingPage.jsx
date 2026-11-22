@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { supabase } from "../lib/supabaseClient";
 import { clearLocalAppState } from "../lib/clearLocalAppState";   // BUGFIX — see that file's header comment; this page's own Sign out button calls supabase.auth.signOut() directly, bypassing AuthContext.jsx's signOut(), so it needs this same cleanup independently
+import { safeAvatarUrl } from "../lib/avatar";   // SX-03 -- the nav avatar URL is user-controlled; only a parsed https: URL is ever used
 
 // ---------------------------------------------------------------------
 // Ported verbatim from minime_new.html (the standalone static template).
@@ -289,10 +290,19 @@ export default function LandingPage() {
           if (navAccountName) navAccountName.textContent = displayName;
           if (navAccountEmail) navAccountEmail.textContent = user.email || '';
           if (navAvatar) {
-            navAvatar.innerHTML = avatarUrl
-              ? '<img src="' + avatarUrl + '" alt="" />'
-              : '';
-            if (!avatarUrl) navAvatar.textContent = (displayName || '?').charAt(0).toUpperCase();
+            // SX-03: build the <img> as an element, never from an HTML
+            // string -- avatarUrl is user-controlled OAuth metadata.
+            navAvatar.textContent = '';
+            var okUrl = safeAvatarUrl(avatarUrl);
+            if (okUrl) {
+              var img = document.createElement('img');
+              img.alt = '';
+              img.referrerPolicy = 'no-referrer';
+              img.src = okUrl;
+              navAvatar.appendChild(img);
+            } else {
+              navAvatar.textContent = (displayName || '?').charAt(0).toUpperCase();
+            }
           }
           navAccount.classList.add('is-signed-in');
         }
