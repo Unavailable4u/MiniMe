@@ -71,7 +71,7 @@ def test_install_wires_the_runner_and_three_hooks_and_is_safe_twice(handlers):
         assert len(hooks) == 1, f"{name} registered {len(hooks)} times"
 
 
-def test_install_keeps_the_openai_sdk_from_logging_prompts():
+def test_install_keeps_the_openai_sdk_from_logging_prompts(handlers):
     sdk = logging.getLogger("openai")
     before = sdk.level
     try:
