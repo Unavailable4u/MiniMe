@@ -26,7 +26,7 @@ from eo import devices, run_guard
 from tests.unit.devices_testkit import SECRET, SUPABASE_SECRET, Clock, FakeStore, sha256
 from tests.unit.loop_testkit import FakeConn, Rig, go, protocol_problems
 from tests.unit.metering_testkit import CANARY, RESET_AT, FakeLedger, Harness, priced, tool_call
-from tests.unit.run_manager_testkit import DEVICE, OTHER_DEVICE, OTHER_USER, USER, World, start_payload
+from tests.unit.run_manager_testkit import DEVICE, OTHER_DEVICE, OTHER_USER, USER, World
 
 pytest.importorskip("jsonschema", reason="the loop validates tool arguments with jsonschema")
 

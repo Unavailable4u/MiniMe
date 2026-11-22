@@ -16,9 +16,8 @@ from codeagent.loop import (BudgetPause, LoopConfig, ModelChoice, ToolCatalog, T
                             MSG_DENIED, MSG_RESUME_DISCONNECTED, MSG_NOT_RUN_BUDGET)
 from codeagent.model_adapter import ModelAdapterError
 from codeagent.run_handlers import RunHandlers
-from tests.unit.loop_testkit import (CANARY, HANG, LIGHT, STRONG, FakeBroker, FakeBudget, FakeConn, FakeMetering,
-                                     Recorder, Reply, Rig, ScriptedAdapter, bad_call, call, catalog, go, outcome,
-                                     protocol_problems, user_msg)
+from tests.unit.loop_testkit import (CANARY, HANG, LIGHT, STRONG, FakeBroker, FakeBudget, FakeMetering,
+                                     Recorder, Reply, Rig, ScriptedAdapter, bad_call, call, catalog, go, protocol_problems)
 from tests.unit.run_manager_testkit import USER
 from utils.llm_errors import ErrorBucket
 

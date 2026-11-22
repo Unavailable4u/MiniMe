@@ -23,9 +23,7 @@ tests/unit/test_codeagent_broker.py proves the broker's own rules with a recordi
 Skipped as a module when jsonschema is not installed, like the other socket tests.
 """
 import asyncio
-import threading
 import time
-import types
 
 import pytest
 
@@ -36,13 +34,12 @@ pytest.importorskip(
 )
 
 from codeagent import broker as broker_module                                                   # noqa: E402
-from codeagent import buffer, connections, emitter as emitter_module, router as router_module   # noqa: E402
+from codeagent import buffer, connections   # noqa: E402
 from codeagent import run_handlers, run_manager, runs                                           # noqa: E402
 from codeagent.connections import ConnectionClosed                                              # noqa: E402
 from codeagent.emitter import RunEmitter                                                        # noqa: E402
 from codeagent.router import MessageRouter                                                      # noqa: E402
 from codeagent.run_handlers import RunHandlers                                                  # noqa: E402
-from tests.unit import runs_testkit as rt                                                       # noqa: E402
 from tests.unit.codeagent_testkit import Rig, envelope                                          # noqa: E402
 from tests.unit.run_manager_testkit import (                                                    # noqa: E402
     DEVICE, OTHER_DEVICE, OTHER_USER, USER, World, start_payload,

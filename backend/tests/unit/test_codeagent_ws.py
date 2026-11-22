@@ -39,7 +39,7 @@ from fastapi import Depends, FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api import deps  # noqa: E402
-from codeagent import connections, ws as ws_module  # noqa: E402
+from codeagent import ws as ws_module  # noqa: E402
 from eo import devices  # noqa: E402
 from tests.unit.codeagent_testkit import (  # noqa: E402
     CLIENT_TYPES,

@@ -28,9 +28,8 @@ What is pinned:
     keyset paging; a run that is moved by someone else in between is "raced";
   * fail closed, and nothing but a type name in the log.
 """
-import logging
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -39,7 +38,6 @@ pytest.importorskip("jsonschema")
 from codeagent import buffer, run_manager, runs                      # noqa: E402
 from eo import run_guard                                             # noqa: E402
 from tests.unit import buffer_testkit as bt                          # noqa: E402
-from tests.unit import runs_testkit as rt                            # noqa: E402
 from tests.unit.run_manager_testkit import (                         # noqa: E402
     CANARY, DEVICE, OTHER_DEVICE, OTHER_USER, USER, World, history, start_payload,
 )

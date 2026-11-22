@@ -35,7 +35,7 @@ pytest.importorskip(
            "device-socket tests (see codeagent/ws.py, 'Runtime needs')",
 )
 
-from codeagent import buffer, connections, router as router_module, run_handlers, run_manager, runs   # noqa: E402
+from codeagent import buffer, connections, router as router_module, run_handlers, run_manager   # noqa: E402
 from codeagent import ws as ws_module                                                                  # noqa: E402
 from codeagent.connections import ConnectionClosed                                                     # noqa: E402
 from codeagent.emitter import RunEmitter                                                               # noqa: E402

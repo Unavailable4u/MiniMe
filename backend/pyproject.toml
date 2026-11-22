@@ -21,3 +21,8 @@ select = ["E4", "E7", "E9", "F"]
 # like a redefinition of an unused import to F811. That is how pytest
 # fixture injection works, not a real shadowing bug.
 "tests/unit/test_eo_code_proposals_wireframe.py" = ["F811"]
+# Same pattern: these two modules borrow the `stack` fixture from
+# hello_testkit (imported, not moved), so every test taking `stack` as an
+# argument looks like a redefinition of an unused import to F811.
+"tests/integration/test_hello_logging.py" = ["F811"]
+"tests/integration/test_hello_run_e2e.py" = ["F811"]

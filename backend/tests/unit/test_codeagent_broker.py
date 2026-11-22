@@ -1524,7 +1524,9 @@ def test_no_content_reaches_the_log(caplog):
 
     async def run():
         conn = rig.device()
-        raising = lambda *a: (_ for _ in ()).throw(RuntimeError(CANARY))
+        def raising(*a):
+            raise RuntimeError(CANARY)
+
         t1 = await rig.propose(conn, "call_1", tool_input={"path": CANARY, "old_string": CANARY, "new_string": CANARY},
                                on_approval=raising)
         t2 = await rig.propose(conn, "call_2", tool="bash", tool_input={"command": CANARY, "reason": CANARY})

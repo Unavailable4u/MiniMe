@@ -33,7 +33,6 @@ Skipped as a module when jsonschema is not installed, like the other socket test
 import asyncio
 import functools
 import logging
-import re
 import time
 
 import pytest
@@ -44,7 +43,7 @@ pytest.importorskip(
            "device-socket tests (see codeagent/ws.py, 'Runtime needs')",
 )
 
-from codeagent import buffer, connections, emitter as emitter_module, router as router_module   # noqa: E402
+from codeagent import buffer, connections, router as router_module   # noqa: E402
 from codeagent import run_handlers, run_manager, runs, ws as ws_module                           # noqa: E402
 from codeagent.connections import ConnectionClosed                                               # noqa: E402
 from codeagent.emitter import RunEmitter                                                         # noqa: E402

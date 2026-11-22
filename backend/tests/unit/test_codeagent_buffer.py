@@ -455,7 +455,6 @@ def test_a_retried_write_that_duplicated_records_is_read_once(env):
     big = {"role": "user", "text": "m" * 150_000}                              # a multi-record item, duplicated whole
     buffer.append_conversation(RUN, big)
     records = env.redis.get_list(key)
-    n = len([r for r in records]) - len(records[:-3])
     env.redis.set_list(key, records + records[-3:], ttl=3600)
     texts = [len(i.get("text", "")) for i in buffer.read_conversation(RUN).items]
     assert texts == [3, 3, 150_000]
