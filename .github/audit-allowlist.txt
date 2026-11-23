@@ -27,9 +27,6 @@
 # expire 2027-01-07 (45 days); lines that say "accepted" expire 2027-02-21 (90 days at most). A patch that
 # fixes a group deletes exactly that group's lines; the job fails on a line whose finding is gone.
 
-# ---- SX-15: cryptography 50 (with the pyOpenSSL bump; backend/requirements.txt): 1 line(s)
-GHSA-G6CJ-PR64-35W5 | python | cryptography 49.0.0: baseline 2026-11-23; fixed by SX-15 | expires=2027-01-07
-
 # ---- SX-16: frontend, the safe `npm audit fix` (frontend/package-lock.json; may need two passes): 13 line(s)
 GHSA-MCHM-GJX6-7H55 | frontend | @sentry/nextjs: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
 GHSA-6J4F-FJ2G-MC7P | frontend | brace-expansion: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
