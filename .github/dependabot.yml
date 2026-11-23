@@ -1,0 +1,43 @@
+# Patch SX-17 (Dependabot) -- weekly version-update PRs for the four dependency manifests.
+#
+# Cooldown: a new release has to be out for 3 days (7 days for a major version) before
+# Dependabot opens a PR for it, so a freshly published bad release is less likely to land
+# here first. GitHub's reference says cooldown applies to version updates only, not to
+# security updates, so it does not slow security PRs down.
+#
+# Docker is deliberately NOT listed (decision D-4): backend.Dockerfile and frontend.Dockerfile
+# are not named plain `Dockerfile`, and it is not confirmed that Dependabot finds them.
+# Do not add a `docker` entry until that is confirmed.
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+
+  - package-ecosystem: "npm"
+    directory: "/backend/evals/promptfoo"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
