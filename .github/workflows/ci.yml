@@ -480,7 +480,7 @@ jobs:
       - run: semgrep scan --config=auto --sarif --output=semgrep.sarif
         continue-on-error: true  # upload the SARIF even if semgrep exits non-zero on findings
       - id: upload-sarif  # named so dismiss-alerts below can read its sarif-id output
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3.37.6
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: semgrep.sarif
           wait-for-processing: true  # dismiss-alerts needs the upload fully processed before it queries the Alerts API
