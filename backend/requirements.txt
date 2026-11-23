@@ -201,7 +201,7 @@ tqdm==4.68.3
 trafilatura==2.1.0
 typing-inspection==0.4.2
 typing_extensions==4.16.0
-tzdata==2026.3
+tzdata==2026.6
 tzlocal==5.4.4
 upstash-redis==1.7.0
 upstash-vector==0.8.0
