@@ -47,10 +47,14 @@ def test_server_logs_and_rows_hold_no_message_or_reply_text(stack, caplog, capsy
     logging.getLogger("openai").setLevel(logging.DEBUG)
     hello.install()
     assert logging.getLogger("openai").getEffectiveLevel() >= logging.INFO
+    # One gate per stalled turn. A shared gate is a race: the cancelled turn's gate is opened to let its
+    # stream drain, and a later turn on that same, already-open gate would not stall at all -- on a slow
+    # runner it finished before the connection was dropped, so there was no partial reply to rewrite.
     gate, started = threading.Event(), threading.Event()
+    cut_gate, cut_started = threading.Event(), threading.Event()
     stack.provider.push(text_reply(k.REPLY_TEXT_CANARY))                       # a normal turn
     stack.provider.push(blocking_reply([k.REPLY_TEXT_CANARY], gate, started))  # a turn cancelled by Ctrl-C
-    stack.provider.push(blocking_reply([k.REPLY_TEXT_CANARY], gate, started))  # a turn cut by a disconnect
+    stack.provider.push(blocking_reply([k.REPLY_TEXT_CANARY], cut_gate, cut_started))  # a turn cut by a disconnect
     stack.provider.push(text_reply(k.REPLY_TEXT_CANARY))                       # ... then written again
     for _ in range(4):
         stack.provider.push(Error(500, {"error": {"message": k.USER_TEXT_CANARY}}))   # a provider that echoes
@@ -68,10 +72,9 @@ def test_server_logs_and_rows_hold_no_message_or_reply_text(stack, caplog, capsy
             await s.until(lambda: s.repl.run_id is not None and "restarting" not in s.text and s.text.count(k.REPLY_TEXT_CANARY) >= 3,
                           what="the third partial reply")
             run_id = s.repl.run_id
-            gate.clear()
             s.drop_connection()
             await s.until(lambda: stack.run_row(run_id).state == "paused_disconnected", what="the pause")
-            gate.set()
+            cut_gate.set()
             s.allow_reconnect()
             await s.until(lambda: s.repl.restarts == 1 and s.repl.idle, what="the reply written again")
             stack.ledger.fail_commit = True                                    # a ledger failure

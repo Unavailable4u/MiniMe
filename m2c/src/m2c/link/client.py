@@ -880,7 +880,13 @@ class DeviceLink:
         self._closing = True
         runner = self._runner or self._task
         if runner is not None and not runner.done() and runner is not asyncio.current_task():
-            runner.cancel()
+            # A cancel can be swallowed by a library underneath (on Python 3.11 websockets' own
+            # ``asyncio.timeout`` turns a cancel that races its close deadline into a TimeoutError it
+            # handles), so one ``cancel()`` is not a guarantee: ask again until the runner is done.
+            # ``run()`` also stops by itself once ``_closing`` is set.
+            while not runner.done():
+                runner.cancel()
+                await asyncio.wait({runner}, timeout=self._close_timeout_s + 1.0)
             await asyncio.gather(runner, return_exceptions=True)
         self._finalize(None)
 
@@ -913,7 +919,11 @@ class DeviceLink:
         failure: BaseException | None = None
         try:
             while True:
+                if self._closing:
+                    raise asyncio.CancelledError()     # aclose() asked; a swallowed cancel must not mean "reconnect"
                 outcome = await self._attempt()
+                if self._closing:
+                    raise asyncio.CancelledError()
                 connected_at = self._connected_at
                 kept_up_s = 0.0 if connected_at is None else max(0.0, self._clock() - connected_at)
                 if connected_at is not None:
