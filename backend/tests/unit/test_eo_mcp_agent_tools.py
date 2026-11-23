@@ -38,6 +38,18 @@ def _clean_module_state():
     mcp_client._connections.clear()
 
 
+@pytest.fixture(autouse=True)
+def _injection_guard_benign(monkeypatch):
+    """Patch SX-25: these tests are about names, tool lists and events, not about the
+    injection guard (tests/unit/test_eo_mcp_agent_tools_injection_guard.py covers that).
+    Without this, every call would try to load the real Laya model."""
+    monkeypatch.setattr(mcp_agent_tools.injection_guard, "score_snippet",
+                        lambda text, source_label="": {"flagged": False, "reason": ""})
+    mcp_agent_tools._description_verdicts.clear()
+    yield
+    mcp_agent_tools._description_verdicts.clear()
+
+
 # ---------------------------------------------------------------------
 # Name encoding / decoding
 # ---------------------------------------------------------------------
