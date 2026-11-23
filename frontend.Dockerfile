@@ -25,6 +25,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 COPY --from=builder /app/next.config.js ./
+# next.config.js require()s this file at startup (SX-28 security headers),
+# so it has to be in the runtime image next to it.
+COPY --from=builder /app/securityHeaders.js ./
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/package.json ./package.json

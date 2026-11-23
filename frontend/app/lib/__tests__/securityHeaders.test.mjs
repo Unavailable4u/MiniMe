@@ -90,6 +90,18 @@ assertTrue(
   "headers() applies securityHeaders to every path (/:path*)",
 );
 
+// --- the Docker runtime image must contain the module ------------------------------
+// The runner stage of frontend.Dockerfile copies next.config.js by name. If
+// securityHeaders.js is not copied too, `npm start` in the container dies with
+// "Cannot find module './securityHeaders'" (found after SX-28; fixed by SX-28b).
+// Not run: building the image itself (no Docker daemon in the test run).
+
+const dockerfile = fs.readFileSync(path.join(frontendDir, "..", "frontend.Dockerfile"), "utf8");
+assertTrue(
+  /^COPY\s+--from=builder\s+\/app\/securityHeaders\.js\s+\.\/\s*$/m.test(dockerfile),
+  "frontend.Dockerfile copies securityHeaders.js into the runtime image",
+);
+
 if (failures > 0) {
   console.error(`\n${failures} test(s) failed.`);
   process.exit(1);
