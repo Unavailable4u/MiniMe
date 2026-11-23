@@ -12,6 +12,6 @@
     "check-role": "python3 scripts/check_role.py"
   },
   "devDependencies": {
-    "promptfoo": "0.122.0"
+    "promptfoo": "0.126.0"
   }
 }
