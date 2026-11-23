@@ -1,13 +1,15 @@
 const { withSentryConfig } = require("@sentry/nextjs");
-const { securityHeaders } = require("./securityHeaders");
+const { buildHeaderRules } = require("./securityHeaders");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
   async headers() {
-    // Patch SX-28: same basic security headers on every path. The list and
-    // the reasoning for each value live in securityHeaders.js.
-    return [{ source: "/:path*", headers: securityHeaders }];
+    // Patches SX-28/SX-29: security headers on every path, plus the
+    // report-only CSP. The values and the reasoning for each live in
+    // securityHeaders.js. This runs at build time, so the NEXT_PUBLIC_* values
+    // and CSP_REPORT_URI it reads must be set when `next build` runs.
+    return buildHeaderRules(process.env);
   },
   async redirects() {
     // /landing used to be the standalone marketing route; its content now

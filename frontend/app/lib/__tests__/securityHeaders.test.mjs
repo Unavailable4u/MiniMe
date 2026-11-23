@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(here, "../../..");
 const require = createRequire(import.meta.url);
-const { securityHeaders } = require(path.join(frontendDir, "securityHeaders.js"));
+const { securityHeaders, buildHeaderRules } = require(path.join(frontendDir, "securityHeaders.js"));
 
 let failures = 0;
 function assertEqual(actual, expected, msg) {
@@ -71,7 +71,7 @@ assertTrue(
 );
 assertTrue(
   !("Content-Security-Policy" in byKey) && !("Content-Security-Policy-Report-Only" in byKey),
-  "no CSP here (that is SX-29)",
+  "the base list has no CSP (SX-29 adds it through buildHeaderRules; see securityHeaders.csp.test.mjs)",
 );
 
 // --- next.config.js wires it in for every path -------------------------------------
@@ -86,8 +86,14 @@ assertTrue(
   "next.config.js defines async headers()",
 );
 assertTrue(
-  /source:\s*["']\/:path\*["']\s*,\s*headers:\s*securityHeaders/.test(config),
-  "headers() applies securityHeaders to every path (/:path*)",
+  /return\s+buildHeaderRules\(\s*process\.env\s*\)/.test(config),
+  "headers() returns buildHeaderRules(process.env)",
+);
+assertTrue(
+  buildHeaderRules({}).some(
+    (rule) => rule.source === "/:path*" && securityHeaders.every((h) => rule.headers.some((x) => x.key === h.key && x.value === h.value)),
+  ),
+  "the /:path*  rule carries all four base headers",
 );
 
 // --- the Docker runtime image must contain the module ------------------------------
