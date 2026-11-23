@@ -22,4 +22,176 @@
 # The job also fails when an entry matches no current finding (stale), so a fixed
 # dependency forces its line to be deleted in the same change.
 #
-# Empty on purpose in patch SX-09. Patch SX-10 fills it from the live audit.
+# Filled by patch SX-10 from the live audit of 2026-11-23 (pip-audit 2.10.1, npm audit). One line per
+# finding, grouped below by the patch (or decision) that removes it. Lines that say "fixed by SX-nn"
+# expire 2027-01-07 (45 days); lines that say "accepted" expire 2027-02-21 (90 days at most). A patch that
+# fixes a group deletes exactly that group's lines; the job fails on a line whose finding is gone.
+
+# ---- SX-11: PyJWT and pyasn1 (backend/requirements.txt): 21 line(s)
+GHSA-2QM8-X737-GMW5 | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-8PPF-4F7H-5PPJ | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-9M75-VC3G-4X39 | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-FM9C-5RCF-2Q5P | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-HM4W-WWCW-MR6R | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-M4P7-R5RC-7G4J | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-MM57-4V3P-RCHX | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-2GX3-RCP4-G85Q | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-42VR-XJ54-VC7V | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-8WJV-2P76-3863 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-9J54-FG26-WV3R | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-9V7F-9G4P-FFGJ | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-FFC3-869F-JXW9 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-HXM8-2XGR-2P9M | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-JWRC-G2Q2-PQ5P | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-P4G4-X82P-Q773 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-PXH4-856F-4H89 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-R6X4-923Q-G947 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-W2CX-738M-MC7W | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-W6J9-CWV2-H6WQ | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+GHSA-X33G-CR3X-6449 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
+
+# ---- SX-12: async stack - aiohttp, anyio, h2, multidict (backend/requirements.txt): 25 line(s)
+GHSA-24C4-3P7V-29CM | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-28QF-CPWQ-VMC2 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-2G87-PP6C-29X5 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-3RP8-RXJ8-MVJW | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-494J-54XM-RWP3 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-5PV8-VVHC-H7JV | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-5RMC-48H2-HVCM | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-5WR8-GCQF-GQF3 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-6CJC-53GC-5RQM | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-9XW5-W5JJ-PVCG | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-CQ5V-8Q36-5273 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-F9XW-JH8M-3MWQ | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-GX76-C99X-2C96 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-H4CC-HM5H-FMM9 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-JM3W-GW2P-XJFJ | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-MFX4-HV73-Q22V | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-MQ44-7P77-Q5H7 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-PQXQ-W44R-73XW | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-PW86-H8FM-J323 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-XGW8-8CCX-RMQH | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-3W57-8XMC-8V26 | python | anyio 4.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-5P39-CFHJ-2XMP | python | anyio 4.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-82R6-8W77-94W6 | python | anyio 4.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-6HR6-W5QG-QMWG | python | h2 4.3.0: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+GHSA-54P9-H82J-F925 | python | multidict 6.7.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
+
+# ---- SX-13: HTTP/TLS stack - urllib3, certifi, setuptools (backend/requirements.txt): 5 line(s)
+GHSA-6Q48-6C7W-9GW2 | python | certifi 2026.6.17: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
+GHSA-XMJ3-9GF7-H52W | python | setuptools 83.0.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
+GHSA-8988-9CW3-XX77 | python | urllib3 2.7.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
+GHSA-GH4C-6FX4-QH6G | python | urllib3 2.7.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
+GHSA-VXQ7-64XX-V4GW | python | urllib3 2.7.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
+
+# ---- SX-14: filelock 4 (backend/requirements.txt): 9 line(s)
+GHSA-567Q-5QVW-PF92 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+GHSA-69HJ-F68J-2879 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+GHSA-8MX5-7M5M-R77G | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+GHSA-9VHV-JXWW-XFM5 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+GHSA-CWQR-HH33-GH44 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+GHSA-FQ56-3CX3-FJXP | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+GHSA-J8F7-RJXC-MR56 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+GHSA-RFPC-QCW5-3PC4 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+GHSA-V4X8-3WR5-3WQ8 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
+
+# ---- SX-15: cryptography 50 (with the pyOpenSSL bump; backend/requirements.txt): 1 line(s)
+GHSA-G6CJ-PR64-35W5 | python | cryptography 49.0.0: baseline 2026-11-23; fixed by SX-15 | expires=2027-01-07
+
+# ---- SX-16: frontend, the safe `npm audit fix` (frontend/package-lock.json; may need two passes): 13 line(s)
+GHSA-MCHM-GJX6-7H55 | frontend | @sentry/nextjs: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-6J4F-FJ2G-MC7P | frontend | brace-expansion: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-QHR7-859C-M2P7 | frontend | brace-expansion: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-73WF-GQ98-2V4G | frontend | browserslist: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-C83G-RGW3-J3CX | frontend | browserslist: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-5JGF-P345-68V8 | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-F65P-4M7J-42XC | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-FPH4-WMHF-6FWF | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-JQFF-G426-HQXP | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-QW65-CVWX-89V3 | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-28WG-GHJ8-5HJV | frontend | nanoid: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-2V37-7H3G-55P8 | frontend | nanoid: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+GHSA-68FV-2MGG-JV7Q | frontend | source-map-js: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
+
+# ---- ACCEPTED, decision D-1: Pillow vs moviepy (expires in 90 days at most): 59 line(s)
+GHSA-22HG-R758-RRW9 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-24RC-8HJ2-V98C | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-254F-3936-288H | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-27H8-GF7J-V5HC | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-332P-7HRC-92WF | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-3J72-P6QG-6XP7 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-4558-3H8R-V8XP | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-45HQ-CXWH-F6VC | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-462X-PGG6-55FP | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-4RM8-3HMM-39FG | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-4RR5-89J8-MWWM | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-4X4J-2G7C-83W6 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-58R4-6RV3-GFH8 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-5X8W-8JJ5-Q52H | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-5X94-69RX-G8H2 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-5XM2-6676-QCP9 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-5XMW-VC9V-4WF2 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-62P4-GMF7-7G93 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-654X-CWWV-5J9C | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-65QM-JVMH-6PQG | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-6R8X-57C9-28J4 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-74R2-7FF9-MJJ2 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-78G4-XQWV-Q3G8 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-7MWM-GHPF-9VRM | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-8G5G-8VMR-9782 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-8V84-F9PQ-WR9X | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-9HW9-CH79-4VH6 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-9V9V-9QVF-H2HJ | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-C6HW-5GRF-FF96 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-CFH3-3JMP-RVHC | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-F2G6-542V-9J58 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-FC9G-5QG7-MF45 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-FJ7V-R99M-22GQ | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-G4QV-2JXX-769H | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-G7CR-3P24-7WF7 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-G842-9RC4-69PW | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-GG2R-WVFM-Q9RX | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-J4M9-6W36-PW47 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-JG86-V3JV-HRPM | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-JJJ6-MW9F-P565 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-MRFP-P49P-3HF2 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-P4WG-P73J-C528 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-P8HX-V2P6-RP84 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-PCHR-8J38-3X4P | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-PHJ9-MV4W-65PM | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-PWV6-VV43-88GR | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-Q45J-58J2-45RG | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-R73J-PQJ5-W3X7 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-V9PV-5GC8-W2M6 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-VJC4-5QP5-M44J | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-VX6W-VV9F-6GVG | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-W889-685W-C8FH | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-WHJ4-6X5X-4V2J | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-WJX4-4JCJ-G98J | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-WQGW-9XFH-QF2G | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-XCVG-W56Q-R89M | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-XGH8-JP6Q-P5X8 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-XJ96-63GP-2GMR | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+GHSA-XVH5-G6GV-559V | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
+
+# ---- ACCEPTED, decision D-2: wcmatch / e2b (expires in 90 days at most): 1 line(s)
+GHSA-53PM-WGXF-C6QF | python | wcmatch 10.2.1: baseline 2026-11-23; accepted until decision D-2 (the fix needs e2b 2.64.0 and bracex 3.2.x) | expires=2027-02-21
+
+# ---- ACCEPTED, no fixed version released: PyJWT (expires in 90 days at most): 1 line(s)
+GHSA-GVP8-978C-RX2Q | python | pyjwt 2.13.0: baseline 2026-11-23; accepted: no fixed version is released yet; the backend jwt.decode calls pass no options dict (grep 2026-11-23); recheck in SX-11 | expires=2027-02-21
+
+# ---- ACCEPTED, until the Next.js 14 -> 16 upgrade: next and postcss (expires in 90 days at most): 14 line(s)
+GHSA-2464-FHR4-W9XW | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-2XP9-VWFH-VXW4 | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-36QX-FR4F-26G5 | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-89XV-2M56-2M9X | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-8H8Q-6873-Q5FJ | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-C4J6-FC7J-M34R | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-H25M-26QC-WCJF | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-M99W-X7HQ-7VFJ | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-P293-QW3H-JR36 | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-P3M5-59MP-JV5R | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-P9J2-GV94-2WF4 | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-Q4GF-8MX6-V5V3 | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-6G55-P6WH-862Q | frontend | postcss: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
+GHSA-R28C-9Q8G-F849 | frontend | postcss: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
