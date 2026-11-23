@@ -55,6 +55,7 @@ Place this file at: eo/mcp_registry.py
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -66,6 +67,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import eo.mcp_client as mcp_client
 from eo.mcp_client import MCPClientError
+from utils.url_guard import GuardPolicy, UnsafeURL, check_url_syntax
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
@@ -118,6 +120,58 @@ class MCPServerConfig:
     headers: dict[str, str]
     default_tool_trust: ToolTrust
     tool_trust_overrides: dict[str, ToolTrust] = field(default_factory=dict)
+    local: bool = False  # Patch SX-24: True only for an http server on this machine (loopback IP)
+
+
+# ---------------------------------------------------------------------
+# Patch SX-24: URL rules for transport=http entries (no network access)
+# ---------------------------------------------------------------------
+#
+# The rules, applied to the URL AFTER `${VAR}` expansion so an environment
+# variable cannot smuggle in a URL that the file itself would not be allowed
+# to contain:
+#   - a normal entry must be https://, with no user name/password, no control
+#     characters and no private, loopback, link-local or cloud-metadata IP
+#     address (utils/url_guard.py's rules), on ANY port -- MCP servers may
+#     listen anywhere, unlike the 80/443 limit url_guard applies to fetches;
+#   - an entry marked "local": true may instead use http:// (or https://) to a
+#     LOOPBACK IP literal (127.0.0.0/8 or [::1]), still with no user name and
+#     no control characters. A name such as "localhost" is not accepted:
+#     use 127.0.0.1.
+# Nothing here looks up DNS: this file is re-read on every classify_tool() call.
+_REMOTE_URL_POLICY = GuardPolicy(ports=None)
+
+
+def _not_loopback(ip: str) -> bool:
+    try:
+        return not ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return True
+
+
+_LOCAL_URL_POLICY = GuardPolicy(ports=None, blocked=_not_loopback)
+
+
+def _check_http_url(name: str, url: str, local: bool) -> None:
+    """Raises MCPRegistryError if `url` breaks the rules above. The message
+    names the server and the rule, never the URL itself (it may carry a
+    password)."""
+    local_hint = (
+        ' A "local": true server must use a loopback IP address such as http://127.0.0.1:PORT/.'
+        if local else ""
+    )
+    try:
+        parsed = check_url_syntax(url, _LOCAL_URL_POLICY if local else _REMOTE_URL_POLICY)
+    except UnsafeURL as exc:
+        raise MCPRegistryError(f"server {name!r}: 'url' is not allowed ({exc}).{local_hint}") from None
+    if local:
+        if not parsed.is_ip:
+            raise MCPRegistryError(f"server {name!r}: 'url' is not allowed (the host is not an IP address).{local_hint}")
+    elif parsed.scheme != "https":
+        raise MCPRegistryError(
+            f"server {name!r}: 'url' must start with https:// "
+            '(a server on this machine can set "local": true to use http://127.0.0.1:PORT/).'
+        )
 
 
 def _expand(value: str) -> str:
@@ -153,6 +207,18 @@ def _parse_entry(raw: dict[str, Any]) -> MCPServerConfig:
     if transport == "http" and not url:
         raise MCPRegistryError(f"server {name!r}: transport=http requires a 'url'")
 
+    local = raw.get("local", False)
+    if not isinstance(local, bool):
+        raise MCPRegistryError(f"server {name!r}: 'local' must be true or false, got {local!r}")
+    if local and transport != "http":
+        raise MCPRegistryError(f"server {name!r}: 'local' only applies to transport=http")
+    expanded_url = _expand(url) if url else None
+    # An empty result means a ${VAR} in the url is unset: left alone, exactly as
+    # before, so connect_server() fails for that one server with its own error
+    # instead of this loader rejecting the whole file over an environment issue.
+    if transport == "http" and expanded_url:
+        _check_http_url(name, expanded_url, local)
+
     default_tool_trust = raw.get("default_tool_trust", "mutating")
     if default_tool_trust not in ("read_only", "mutating"):
         raise MCPRegistryError(
@@ -172,10 +238,11 @@ def _parse_entry(raw: dict[str, Any]) -> MCPServerConfig:
         transport=transport,
         command=list(command) if command else None,
         env=_expand_dict(raw.get("env")),
-        url=_expand(url) if url else None,
+        url=expanded_url,
         headers=_expand_dict(raw.get("headers")),
         default_tool_trust=default_tool_trust,
         tool_trust_overrides=dict(overrides),
+        local=local,
     )
 
 
