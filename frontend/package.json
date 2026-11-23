@@ -46,7 +46,7 @@
     "reactflow": "^11.11.4",
     "recharts": "^2.12.7",
     "remark-gfm": "^4.0.1",
-    "three": "^0.185.1"
+    "three": "^0.187.0"
   },
   "devDependencies": {
     "autoprefixer": "10.4.19",
