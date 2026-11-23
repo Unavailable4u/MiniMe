@@ -24,6 +24,10 @@ paths = [
   # string heuristic. No real secret material lives under tests/.
   '''backend/tests/''',
   '''backend/token\.txt''',
+    # SX-26: MCP tool pins are sha256 hashes keyed by tool name. A tool named like
+  # "run_secret_scanning" trips generic-api-key (the word "secret" next to a 64-char
+  # hex value). The file holds only tool names and hashes, never credentials.
+  '''backend/config/mcp_tool_pins\.json''',
 ]
 regexes = [
   '''^[-+ ]?[A-Z][A-Z0-9_]*_KEY_\d+=?$''',

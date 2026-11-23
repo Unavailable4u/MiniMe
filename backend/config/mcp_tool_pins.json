@@ -8,5 +8,62 @@
     "'python -m eo.mcp_pins --server NAME', approve them with '--write', and",
     "commit the result."
   ],
-  "servers": {}
+  "servers": {
+    "context7": {
+      "tools": {
+        "query-docs": "8d44872bfbfcb5a41c68e338df4fb7f4b18e1312dc942e04530b3d0630fb4b02",
+        "resolve-library-id": "411ccbeeeaf17ac9c04d7e8037ebc4cd5833d46b5be8a6b743bfcbfc3f36d4f7"
+      }
+    },
+    "github": {
+      "tools": {
+        "add_comment_to_pending_review": "7c680f31a5ed0d278e8f82c7f8fb247d6dd770283208281b249d1eec924b172b",
+        "add_issue_comment": "236fa89dc29833bebac9bd99bae0aa45994f7a9093c4744bb985cb4f6622dc50",
+        "add_reply_to_pull_request_comment": "beab01bf24b7e8cdcb7270b0c45822527ec3d799e11dd0ceeec87463deebcd17",
+        "create_branch": "453127a5be6860a2823d226a04a59675c3a56f331c0758f37e42a712899747bb",
+        "create_or_update_file": "821e8f78874d4a8bd2ca342839567083b04c2e3eacad4e40503a50322936be84",
+        "create_pull_request": "0af6e92de99b1ea31e97e14550c1bc982bdf4bd9ab40294c80ff4f498f66322f",
+        "create_repository": "27a319e89d129c4a0eda878749781e7789259ea4d94cf54efc4b8dad0e9ad6ba",
+        "delete_file": "cbbdb4c055211cc23340fc0ae7c707561afa8fe01b6dc03584dd1688e3e92cf7",
+        "fork_repository": "5ebdd59c1a57aef9861f5d96314541ee5d3f3ae277eb181d799464d48eac69d9",
+        "get_commit": "84a3854f1acb794be211e4813836d81a11b515fef0e796ffd943e41b95d558a0",
+        "get_file_contents": "d658a325488ada101c90e8ed3810733ace3c63260ffc01f282ea36f4515c1d32",
+        "get_label": "545939dbe6be701eab3ad5f6ac3f5c7351d2675c1e212146665f1c88b7cefcf5",
+        "get_latest_release": "dfa52903a0f7b0def5a7492425986583e38fdae4156eddd05d9ba652f0d891a9",
+        "get_me": "ef89dd99233e5f86c3000eaab6f71aadbf164575f4d8e1b74c4cbbf3c8b54a0e",
+        "get_release_by_tag": "0b73ab10a42549087b39631c5f99e61c7f727cd748439e0f284a4b39cda3f70e",
+        "get_tag": "4f9ea42c868329504ed92c425d50498ee2bd3fbabd76144b3815bf8adbe2b3b3",
+        "get_team_members": "2b611b5b0e0fb5154facc0c346fa6eae5d348b0689048d3bab49f0ff1dc54fcc",
+        "get_teams": "02d9baeedfdbc5decf080b95ee62376b87f7d2edeb1a768ac12ac273186f5481",
+        "issue_read": "685494e784c465dec9f3e7e7cad24d179e05008c0919b3bbfc1cd33b74116d7d",
+        "issue_write": "bfa1ea2f080a00e1fa984591aadf9a9af2ade3474764ad8e469a30c9efa2187d",
+        "list_branches": "04e91e094ba2e31d409e73d940143603b6aaac504b58ee2d84a996b060ae8a5e",
+        "list_commits": "f5fa7bba9a715efaf94cd8ed29e24398a2f4a4948bcd07228fd396cbbe5c3c8b",
+        "list_issue_fields": "e3d0b0a355ca9bcb3cdf28618c5566fc1ba98a88568e8df247c24b171b056cbc",
+        "list_issue_types": "eda654cba6cb2cde42b5df79dd7a34ee9fb79ff600ae97c34f8163f865bed919",
+        "list_issues": "1841a5d30069b8a147a5abf5aced0f8393ff09249d6c4b1e606beefca658721c",
+        "list_pull_requests": "78b21157a628e943d84d75d9972d8b71d157ca0b7c1d2a9d3cc5c43bce68b7d6",
+        "list_releases": "5a09fb2d839b5d454abb7ca80b46d37b295844ec1e5f0558e4da381fe4f72d6b",
+        "list_repository_collaborators": "5388210b2b645bb910bf798f421dea8dfc39780398b35f59b1e5ab22b6d9c8ce",
+        "list_tags": "4626ee4df15b2eea54f652a8b7d46ddbaa995466619309fec7b7c23f7cbc04d3",
+        "merge_pull_request": "c71040c3cc75e9530db6e45c0e2f891c50b3fa29ffd9fefe9a07e1aad3f41861",
+        "pull_request_read": "0084a608f41634252d64bf22bda9d4d946875a638ff1df13ee1be278fe491194",
+        "pull_request_review_write": "a635c22e8fbc92fe2ff5526cb2e81764931a7363baa77d9c26bf11f9c8131d33",
+        "push_files": "28a18c673f316071023dbce1543ff0955f3e2382bc7612b57e19ddadd2edd234",
+        "request_copilot_review": "96f5f717f45e3e4b69da24ce0c1e27b7fa99503a6e8585be3b0cfe15cbcfea71",
+        "run_secret_scanning": "6d1b496ff5e77e9cfc5a889186bda4ffecb5f48fad144a172e9f39d86c88adb8",
+        "search_code": "967f34d75aa7f037dbae1c7c3b06048d9e017d8f9be431095077acfa18a12679",
+        "search_commits": "6d383701343b4310ad5b8d66d91004ff05d8c4e4216bd6acf8dc5c1504d861d3",
+        "search_issues": "049e06371a6ab20bcc8a2d337601369185f4c81b1a02c5967afe0f953fb4bad5",
+        "search_pull_requests": "885bc92c1692433b6cffdb87e62c130c6fa2baddc71be32b9903108ac83f6c2f",
+        "search_repositories": "10864e1adb746c7a2b68e49cd6afd39363f3d89b7eee2655c7b3e46fff0f06ca",
+        "search_users": "41015d8c3c5588de980d9699ae7c14a61623af36afe57d8f8eb9fad6d6e4855e",
+        "sub_issue_write": "8a793fb5eb9e9b21f8dbb2861a1c2582044a07570ff0c241301af64b31f31a5a",
+        "ui_get": "b588476b0549a616706e6f21bd9cd5374820813165eb24c39e7d446a3a651e84",
+        "update_issue_comment": "e461bdb569456b7b30df10e5c585065056764b0a9112d0842f3a919303f599df",
+        "update_pull_request": "f0eb52b746ef8fae110cda158303296a449be1a6259cd6a93b7f51ce0b9fc1e5",
+        "update_pull_request_branch": "71d15e77f24d874b59b967355926f2974d2b4e49213e177ddf51bda859c6f408"
+      }
+    }
+  }
 }
