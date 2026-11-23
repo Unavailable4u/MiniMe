@@ -27,29 +27,6 @@
 # expire 2027-01-07 (45 days); lines that say "accepted" expire 2027-02-21 (90 days at most). A patch that
 # fixes a group deletes exactly that group's lines; the job fails on a line whose finding is gone.
 
-# ---- SX-11: PyJWT and pyasn1 (backend/requirements.txt): 21 line(s)
-GHSA-2QM8-X737-GMW5 | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-8PPF-4F7H-5PPJ | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-9M75-VC3G-4X39 | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-FM9C-5RCF-2Q5P | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-HM4W-WWCW-MR6R | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-M4P7-R5RC-7G4J | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-MM57-4V3P-RCHX | python | pyasn1 0.6.3: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-2GX3-RCP4-G85Q | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-42VR-XJ54-VC7V | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-8WJV-2P76-3863 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-9J54-FG26-WV3R | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-9V7F-9G4P-FFGJ | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-FFC3-869F-JXW9 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-HXM8-2XGR-2P9M | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-JWRC-G2Q2-PQ5P | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-P4G4-X82P-Q773 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-PXH4-856F-4H89 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-R6X4-923Q-G947 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-W2CX-738M-MC7W | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-W6J9-CWV2-H6WQ | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-GHSA-X33G-CR3X-6449 | python | pyjwt 2.13.0: baseline 2026-11-23; fixed by SX-11 | expires=2027-01-07
-
 # ---- SX-12: async stack - aiohttp, anyio, h2, multidict (backend/requirements.txt): 25 line(s)
 GHSA-24C4-3P7V-29CM | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
 GHSA-28QF-CPWQ-VMC2 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
@@ -176,9 +153,6 @@ GHSA-XVH5-G6GV-559V | python | pillow 11.3.0: baseline 2026-11-23; accepted unti
 
 # ---- ACCEPTED, decision D-2: wcmatch / e2b (expires in 90 days at most): 1 line(s)
 GHSA-53PM-WGXF-C6QF | python | wcmatch 10.2.1: baseline 2026-11-23; accepted until decision D-2 (the fix needs e2b 2.64.0 and bracex 3.2.x) | expires=2027-02-21
-
-# ---- ACCEPTED, no fixed version released: PyJWT (expires in 90 days at most): 1 line(s)
-GHSA-GVP8-978C-RX2Q | python | pyjwt 2.13.0: baseline 2026-11-23; accepted: no fixed version is released yet; the backend jwt.decode calls pass no options dict (grep 2026-11-23); recheck in SX-11 | expires=2027-02-21
 
 # ---- ACCEPTED, until the Next.js 14 -> 16 upgrade: next and postcss (expires in 90 days at most): 14 line(s)
 GHSA-2464-FHR4-W9XW | frontend | next: baseline 2026-11-23; accepted until the Next.js upgrade (every fix needs next 16) | expires=2027-02-21
