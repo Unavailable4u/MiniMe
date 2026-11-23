@@ -27,21 +27,6 @@
 # expire 2027-01-07 (45 days); lines that say "accepted" expire 2027-02-21 (90 days at most). A patch that
 # fixes a group deletes exactly that group's lines; the job fails on a line whose finding is gone.
 
-# ---- SX-16: frontend, the safe `npm audit fix` (frontend/package-lock.json; may need two passes): 13 line(s)
-GHSA-MCHM-GJX6-7H55 | frontend | @sentry/nextjs: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-6J4F-FJ2G-MC7P | frontend | brace-expansion: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-QHR7-859C-M2P7 | frontend | brace-expansion: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-73WF-GQ98-2V4G | frontend | browserslist: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-C83G-RGW3-J3CX | frontend | browserslist: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-5JGF-P345-68V8 | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-F65P-4M7J-42XC | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-FPH4-WMHF-6FWF | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-JQFF-G426-HQXP | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-QW65-CVWX-89V3 | frontend | fast-uri: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-28WG-GHJ8-5HJV | frontend | nanoid: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-2V37-7H3G-55P8 | frontend | nanoid: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-GHSA-68FV-2MGG-JV7Q | frontend | source-map-js: baseline 2026-11-23; fixed by SX-16 | expires=2027-01-07
-
 # ---- ACCEPTED, decision D-1: Pillow vs moviepy (expires in 90 days at most): 59 line(s)
 GHSA-22HG-R758-RRW9 | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
 GHSA-24RC-8HJ2-V98C | python | pillow 11.3.0: baseline 2026-11-23; accepted until decision D-1 (moviepy 2.2.1 requires pillow<12, every fix is 12.1.1 or newer) | expires=2027-02-21
