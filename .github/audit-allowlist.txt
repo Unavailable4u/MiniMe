@@ -27,33 +27,6 @@
 # expire 2027-01-07 (45 days); lines that say "accepted" expire 2027-02-21 (90 days at most). A patch that
 # fixes a group deletes exactly that group's lines; the job fails on a line whose finding is gone.
 
-# ---- SX-12: async stack - aiohttp, anyio, h2, multidict (backend/requirements.txt): 25 line(s)
-GHSA-24C4-3P7V-29CM | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-28QF-CPWQ-VMC2 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-2G87-PP6C-29X5 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-3RP8-RXJ8-MVJW | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-494J-54XM-RWP3 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-5PV8-VVHC-H7JV | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-5RMC-48H2-HVCM | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-5WR8-GCQF-GQF3 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-6CJC-53GC-5RQM | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-9XW5-W5JJ-PVCG | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-CQ5V-8Q36-5273 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-F9XW-JH8M-3MWQ | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-GX76-C99X-2C96 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-H4CC-HM5H-FMM9 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-JM3W-GW2P-XJFJ | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-MFX4-HV73-Q22V | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-MQ44-7P77-Q5H7 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-PQXQ-W44R-73XW | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-PW86-H8FM-J323 | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-XGW8-8CCX-RMQH | python | aiohttp 3.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-3W57-8XMC-8V26 | python | anyio 4.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-5P39-CFHJ-2XMP | python | anyio 4.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-82R6-8W77-94W6 | python | anyio 4.14.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-6HR6-W5QG-QMWG | python | h2 4.3.0: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-GHSA-54P9-H82J-F925 | python | multidict 6.7.1: baseline 2026-11-23; fixed by SX-12 | expires=2027-01-07
-
 # ---- SX-13: HTTP/TLS stack - urllib3, certifi, setuptools (backend/requirements.txt): 5 line(s)
 GHSA-6Q48-6C7W-9GW2 | python | certifi 2026.6.17: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
 GHSA-XMJ3-9GF7-H52W | python | setuptools 83.0.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
