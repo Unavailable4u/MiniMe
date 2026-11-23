@@ -27,13 +27,6 @@
 # expire 2027-01-07 (45 days); lines that say "accepted" expire 2027-02-21 (90 days at most). A patch that
 # fixes a group deletes exactly that group's lines; the job fails on a line whose finding is gone.
 
-# ---- SX-13: HTTP/TLS stack - urllib3, certifi, setuptools (backend/requirements.txt): 5 line(s)
-GHSA-6Q48-6C7W-9GW2 | python | certifi 2026.6.17: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
-GHSA-XMJ3-9GF7-H52W | python | setuptools 83.0.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
-GHSA-8988-9CW3-XX77 | python | urllib3 2.7.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
-GHSA-GH4C-6FX4-QH6G | python | urllib3 2.7.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
-GHSA-VXQ7-64XX-V4GW | python | urllib3 2.7.0: baseline 2026-11-23; fixed by SX-13 | expires=2027-01-07
-
 # ---- SX-14: filelock 4 (backend/requirements.txt): 9 line(s)
 GHSA-567Q-5QVW-PF92 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
 GHSA-69HJ-F68J-2879 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
