@@ -46,6 +46,11 @@ from eo.pii_scrub import scrub
 SUPPORTED_EXTENSIONS = (".pdf",)
 PAGE_JOIN = "\n\n"
 
+# Patch SX-22: limits for one PDF. PLACEHOLDERS until decision D-3 (no cost
+# model exists yet); change the number here when that decision is made.
+PDF_MAX_PAGES = 500
+PDF_MAX_CHARS = 2_000_000
+
 
 def _guess_title(pdf, path: str) -> str:
     """PDF metadata title, if present and non-empty, wins. Otherwise the
@@ -114,13 +119,35 @@ def ingest_pdf(path: str) -> dict:
 
     Always returns exactly one section (the whole document) — see the
     module docstring for why sections no longer track pages.
+
+    Patch SX-22: raises ValueError (with a message that is safe to show a
+    user) if the PDF has more than PDF_MAX_PAGES pages or more than
+    PDF_MAX_CHARS characters of extracted text. The /api/notes/pdf route
+    already turns a ValueError into HTTP 400.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
     with pdfplumber.open(path) as pdf:
+        # Patch SX-22: refuse an oversize PDF BEFORE the slow work (text
+        # extraction, then PII scrubbing). The page count is checked first;
+        # the text size is checked page by page against the raw extracted
+        # text, so extraction stops at the page that crosses the limit.
+        if len(pdf.pages) > PDF_MAX_PAGES:
+            raise ValueError(
+                f"This PDF has {len(pdf.pages)} pages; the limit is {PDF_MAX_PAGES} pages."
+            )
         title = scrub(_guess_title(pdf, path))
-        page_texts = [scrub(_extract_page_text(page)) for page in pdf.pages]
+        page_texts = []
+        total_chars = 0
+        for page in pdf.pages:
+            text = _extract_page_text(page)
+            total_chars += len(text)
+            if total_chars > PDF_MAX_CHARS:
+                raise ValueError(
+                    f"This PDF has too much text; the limit is {PDF_MAX_CHARS:,} characters."
+                )
+            page_texts.append(scrub(text))
 
     content, page_breaks = _join_pages(page_texts)
 
