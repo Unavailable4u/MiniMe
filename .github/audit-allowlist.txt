@@ -27,17 +27,6 @@
 # expire 2027-01-07 (45 days); lines that say "accepted" expire 2027-02-21 (90 days at most). A patch that
 # fixes a group deletes exactly that group's lines; the job fails on a line whose finding is gone.
 
-# ---- SX-14: filelock 4 (backend/requirements.txt): 9 line(s)
-GHSA-567Q-5QVW-PF92 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-GHSA-69HJ-F68J-2879 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-GHSA-8MX5-7M5M-R77G | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-GHSA-9VHV-JXWW-XFM5 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-GHSA-CWQR-HH33-GH44 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-GHSA-FQ56-3CX3-FJXP | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-GHSA-J8F7-RJXC-MR56 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-GHSA-RFPC-QCW5-3PC4 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-GHSA-V4X8-3WR5-3WQ8 | python | filelock 3.29.7: baseline 2026-11-23; fixed by SX-14 | expires=2027-01-07
-
 # ---- SX-15: cryptography 50 (with the pyOpenSSL bump; backend/requirements.txt): 1 line(s)
 GHSA-G6CJ-PR64-35W5 | python | cryptography 49.0.0: baseline 2026-11-23; fixed by SX-15 | expires=2027-01-07
 

@@ -35,7 +35,7 @@ edge-tts==7.2.8
 et_xmlfile==2.0.0
 fastapi==0.139.0
 faster-whisper==1.2.1
-filelock==3.29.7
+filelock==4.2.1
 flatbuffers==25.12.19
 frozenlist==1.8.0
 fsspec==2026.6.0
