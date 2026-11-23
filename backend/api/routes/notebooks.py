@@ -36,7 +36,6 @@ deploy/monitoring block reserved for piece 8).
 import json
 import os
 import re
-import tempfile
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -60,6 +59,7 @@ from agents.tts_synthesizer import synthesize_podcast
 from agents.video_overview_builder import build_video_overview
 from agents.workflow_suggester import build_topic_workflow, suggest_workflows
 from api.deps import _resolve_chat_or_404, require_auth
+from api.uploads import IMPORT_MAX_BYTES, PDF_MAX_BYTES, VOICE_MAX_BYTES, save_upload_capped
 from eo import (
     chat_store,
     chat_workspace,
@@ -1933,9 +1933,7 @@ async def import_file_endpoint(
             status_code=400,
             detail=f"Unsupported import format '{ext}'. Supported: {', '.join(IMPORTABLE_FORMATS)}.",
         )
-    with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
+    tmp_path = await save_upload_capped(file, f".{ext}", IMPORT_MAX_BYTES)
     try:
         original_title = os.path.splitext(file.filename or "")[0] or None
         result = process_upload(
@@ -1960,9 +1958,7 @@ async def ingest_pdf_endpoint(
     (see /api/notes/import above) -- this is that "other job", same
     temp-file-then-cleanup shape, funneled through process_upload()
     (§2b) like every other ingestion endpoint here."""
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
+    tmp_path = await save_upload_capped(file, ".pdf", PDF_MAX_BYTES)
     try:
         result = process_upload("pdf", tmp_path, workspace_id, session_id=session_id, created_by="user")
     except ValueError as e:
@@ -1985,9 +1981,7 @@ async def ingest_voice_endpoint(
     as ingest_voice()'s own ValueError -> 400 rather than needing a
     second check here."""
     suffix = os.path.splitext(file.filename or "")[1] or ".audio"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
+    tmp_path = await save_upload_capped(file, suffix, VOICE_MAX_BYTES)
     try:
         result = process_upload("voice", tmp_path, workspace_id, session_id=session_id, created_by="user")
     except ValueError as e:
