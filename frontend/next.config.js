@@ -1,8 +1,14 @@
 const { withSentryConfig } = require("@sentry/nextjs");
+const { securityHeaders } = require("./securityHeaders");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  async headers() {
+    // Patch SX-28: same basic security headers on every path. The list and
+    // the reasoning for each value live in securityHeaders.js.
+    return [{ source: "/:path*", headers: securityHeaders }];
+  },
   async redirects() {
     // /landing used to be the standalone marketing route; its content now
     // lives at "/" itself (see app/page.js), so anything still pointing at
