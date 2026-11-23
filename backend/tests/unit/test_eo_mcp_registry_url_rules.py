@@ -9,12 +9,23 @@ import socket
 import pytest
 
 import eo.mcp_client as mcp_client
+import eo.mcp_pins as mcp_pins
 from eo.mcp_registry import MCPRegistryError, connect_configured_servers, load_server_configs
 
 
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _pins_not_under_test(monkeypatch):
+    # Patch SX-26: this file is about URL rules, not tool pins (those are tested in
+    # test_eo_mcp_pins.py), so treat every server that connects here as approved.
+    async def approved(server_name, *, pins_path=None):
+        return None
+
+    monkeypatch.setattr(mcp_pins, "verify_server", approved)
 
 
 @pytest.fixture(autouse=True)

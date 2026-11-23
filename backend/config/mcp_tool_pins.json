@@ -1,0 +1,12 @@
+{
+  "_comment": [
+    "Patch SX-26 -- approved MCP tool definitions. Loaded by eo/mcp_pins.py",
+    "every time an MCP server connects. Each value is the sha256 of one tool's",
+    "canonical JSON (name, description, input_schema). A server that is not",
+    "listed here, or whose tools differ from what is listed, is disconnected.",
+    "Do not edit by hand: review a server's tools with",
+    "'python -m eo.mcp_pins --server NAME', approve them with '--write', and",
+    "commit the result."
+  ],
+  "servers": {}
+}

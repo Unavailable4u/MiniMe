@@ -66,6 +66,7 @@ from typing import Any, Literal
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import eo.mcp_client as mcp_client
+import eo.mcp_pins as mcp_pins
 from eo.mcp_client import MCPClientError
 from utils.url_guard import GuardPolicy, UnsafeURL, check_url_syntax
 
@@ -283,7 +284,9 @@ def classify_tool(server_name: str, tool_name: str, *, path: str | None = None) 
     return server.tool_trust_overrides.get(tool_name, server.default_tool_trust)
 
 
-async def connect_configured_servers(path: str | None = None) -> dict[str, str | None]:
+async def connect_configured_servers(
+    path: str | None = None, *, pins_path: str | None = None
+) -> dict[str, str | None]:
     """The backend-startup loader Patch A2's own goal describes:
     connects every `enabled` server through eo.mcp_client.connect_server().
     Intended caller: api/server.py's `_lifespan`, once, at startup --
@@ -311,6 +314,14 @@ async def connect_configured_servers(path: str | None = None) -> dict[str, str |
     handshakes run in parallel and this function's total wall-clock
     cost is roughly the SLOWEST single server's handshake, not the SUM
     of all of them.
+
+    Patch SX-26: after a server connects, its tool list is checked against
+    the approved pins (eo/mcp_pins.py, backend/config/mcp_tool_pins.json).
+    A server whose tools are not exactly what was approved -- no pin entry,
+    a changed description or schema, a new tool, a tool that went missing --
+    is disconnected again, so none of its tools can be listed or called, and
+    the reason comes back here like any other connect failure. `pins_path`
+    exists for tests.
     """
     servers = [server for server in load_server_configs(path) if server.enabled]
 
@@ -324,8 +335,13 @@ async def connect_configured_servers(path: str | None = None) -> dict[str, str |
                 url=server.url,
                 headers=server.headers,
             )
+            try:
+                await mcp_pins.verify_server(server.name, pins_path=pins_path)
+            except (mcp_pins.MCPPinError, MCPClientError):
+                await mcp_client.disconnect_server(server.name)  # not approved: no tools may be used
+                raise
             return server.name, None
-        except MCPClientError as exc:
+        except (MCPClientError, mcp_pins.MCPPinError) as exc:
             # Logged, not raised -- see docstring above. print() matches
             # this codebase's existing convention for startup-path
             # diagnostics (see api/server.py's own SIGINT handler
