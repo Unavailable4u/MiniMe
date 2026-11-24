@@ -84,10 +84,14 @@ def test_log_event_rejects_bad_event_names(log, stream):
 
 
 def test_percent_args_are_never_interpolated(log, stream):
-    log.info("user said %s and %d", SECRET, 42)
+    # The canary number must not be able to occur in the line's own timestamp ("... 22:42:43,110"), which
+    # a short value like 42 did whenever the clock showed it. Nine digits cannot: a timestamp has no run
+    # longer than four.
+    number = 918273645
+    log.info("user said %s and %d", SECRET, number)
     out = stream.getvalue()
     assert SECRET not in out
-    assert "42" not in out
+    assert str(number) not in out
     assert "user said %s and %d" in out  # the literal template survives
 
 
